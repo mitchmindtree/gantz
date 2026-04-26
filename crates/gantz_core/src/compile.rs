@@ -1,5 +1,92 @@
-//! Items related to generating steel code from a gantz graph, primarily the
-//! [`module`] fn.
+//! Generates [Steel][steel] code from a gantz graph via the [`module`] fn.
+//!
+//! # Compilation Stages
+//!
+//! Compilation proceeds through four stages:
+//!
+//! 1. **Meta collection** - Traverses the graph tree (including
+//!    nested graphs) to build a [`Meta`] per graph. Each `Meta` contains a
+//!    [`MetaGraph`] (a simplified directed graph of [`EdgeKind`]s), along with
+//!    lookup tables for branch nodes, stateful nodes, inlets, outlets, and
+//!    input/output counts.
+//!
+//! 2. **Entrypoint discovery** ([`entrypoint`]) - Scans for nodes that declare
+//!    push or pull evaluation via `Node::push_eval` / `Node::pull_eval`.
+//!    Each distinct set of [`EvalSource`]s is grouped into an [`Entrypoint`]
+//!    with a content-addressed [`EntrypointId`].
+//!
+//! 3. **Flow graph construction** - For each entrypoint, determines
+//!    reachable nodes via topological ordering, then builds a [`FlowGraph`] whose
+//!    nodes are [`Block`]s (basic blocks of sequentially evaluated
+//!    [`NodeConf`]s) and whose edges are branch arms. Linear chains of
+//!    non-branching nodes are contracted into single blocks.
+//!
+//! 4. **Code generation** - Lowers each `FlowGraph` into Steel
+//!    expressions. Produces one function per unique node input/output
+//!    configuration and one entry function per entrypoint.
+//!
+//! # Entrypoints
+//!
+//! An entrypoint is the unit of evaluation - a set of sources that, when
+//! triggered, cause a subgraph to evaluate. Nodes opt into evaluation by
+//! returning non-empty `Vec<EvalConf>` from `push_eval()` or `pull_eval()`.
+//!
+//! - **Push** sources propagate forward along outgoing edges.
+//! - **Pull** sources propagate backward along incoming (reversed) edges.
+//!
+//! The reachable subgraph is the intersection of forward push traversal and
+//! backward pull traversal, evaluated in topological order.
+//!
+//! # State Handling
+//!
+//! Nodes wrapped in `node::State<N, S>` are marked stateful. At runtime:
+//!
+//! - A root state hash-map (`%root-state`) is maintained across evaluations.
+//! - Each graph level binds a local `graph-state` scoped from the root.
+//! - Before a stateful node evaluates, its state is read from `graph-state`.
+//! - The node returns `(list output new-state)`, and `graph-state` is updated.
+//! - Nested graphs push/pop their own `graph-state` scope, keyed by node ID
+//!   within the parent.
+//!
+//! # Bridge Nodes
+//!
+//! When a nested graph's entrypoint evaluation reaches an outlet, the parent
+//! graph needs the resulting values. The nested graph node that *contains* that
+//! evaluation becomes a "bridge node" - its output is bound by inlining the
+//! nested graph's statements and extracting outlet values, rather than by
+//! calling the node's own function. Bridge nodes are skipped during normal
+//! block evaluation since their outputs are already bound by the bridge.
+//!
+//! # Phi Nodes and Branching
+//!
+//! A branch node (one whose `Node::branches()` is non-empty) returns
+//! `(list branch-ix outputs)`, selecting which downstream edges are active.
+//! The flow graph models this as multiple outgoing edges from the branching
+//! block, each labelled with a `Branch` index and the active output set.
+//!
+//! When branches reconverge at a join point (a node with in-degree > 1),
+//! inputs may arrive from different branch arms. These inputs are handled
+//! with phi variables (in the SSA sense):
+//!
+//! - A `(define var '())` is emitted before the branch.
+//! - Each arm sets the variable via `(set! var value)`.
+//! - After the branch, the join node reads from the phi variable.
+//!
+//! Join points are identified via post-dominator analysis - the first node
+//! that all paths from a branch must pass through.
+//!
+//! # Nested Graphs
+//!
+//! Graphs can be nested arbitrarily. Inlet nodes receive values from the
+//! parent graph's edges into the nested graph node; outlet nodes propagate
+//! values back out. The compilation tree is a rose tree mirroring the
+//! graph nesting, with [`Meta`] and [`Flow`] at each level.
+//!
+//! Entrypoint sources from a child graph's outlets are propagated upward -
+//! if a child's entrypoint reaches an outlet, the parent treats the
+//! containing graph node as an additional push source for that entrypoint.
+//!
+//! [steel]: https://github.com/mattwparas/steel
 
 use crate::{
     Edge,

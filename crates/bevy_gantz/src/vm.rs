@@ -115,6 +115,14 @@ pub struct EvalEntryEvent {
     pub head: Entity,
     /// The entrypoint to evaluate.
     pub entrypoint: core_compile::Entrypoint,
+    /// The monotonic time (seconds, on the [`EvalEpoch`](crate::EvalEpoch))
+    /// this evaluation logically fires at, exposed to nodes as `%args`'s `time`.
+    ///
+    /// `None` means "now" - resolved to [`EvalEpoch::now_secs`](crate::EvalEpoch)
+    /// in [`on_eval_entry`]. A `tick!` passes `Some(t)` with each tick's exact
+    /// firing time so timed control updates schedule sample-accurately; one-shot
+    /// firings (`update!`, GUI pushes) leave it `None`.
+    pub time: Option<f64>,
 }
 
 /// Emitted after VM evaluation completes, for timing capture.
@@ -171,6 +179,7 @@ where
 /// Emits an `EvalEntryComplete` event with timing information for UI layers to observe.
 pub fn on_eval_entry(
     trigger: On<EvalEntryEvent>,
+    epoch: Res<crate::EvalEpoch>,
     mut vms: NonSendMut<head::HeadVms>,
     mut cmds: Commands,
     mut heads: Query<(&head::Module, &mut head::Diagnostics)>,
@@ -178,6 +187,10 @@ pub fn on_eval_entry(
     let event = trigger.event();
     let fn_name = core_compile::entry_fn_name(&event.entrypoint.id());
     if let Some(vm) = vms.get_mut(&event.head) {
+        // Expose this firing's time to nodes via `%args` (e.g. DSP control inputs
+        // stamp queued values with it). `None` means "now".
+        let time = event.time.unwrap_or_else(|| epoch.now_secs());
+        vm.update_value(gantz_core::ARGS, gantz_core::args::time(time));
         let start = web_time::Instant::now();
         let result = vm.call_function_by_name_with_args(&fn_name, vec![]);
         // Runtime diagnostics reflect the latest evaluation only.

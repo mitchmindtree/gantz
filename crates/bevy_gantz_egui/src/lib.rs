@@ -170,8 +170,12 @@ where
             .add_systems(
                 Update,
                 (
-                    node::update_bang::drive_update_bangs::<N>.after(bevy_gantz::VmSet),
-                    node::tick_bang::drive_tick_bangs::<N>.after(bevy_gantz::VmSet),
+                    node::update_bang::drive_update_bangs::<N>
+                        .after(bevy_gantz::VmSet)
+                        .in_set(bevy_gantz::EntrypointSet),
+                    node::tick_bang::drive_tick_bangs::<N>
+                        .after(bevy_gantz::VmSet)
+                        .in_set(bevy_gantz::EntrypointSet),
                     persist_camera_and_seed::<N>,
                     // On layout settle, fork a layout-only commit. Runs after
                     // `VmSet` (so a graph edit commits first and its baseline is
@@ -1929,7 +1933,12 @@ fn dispatch_eval_entry(entity: Option<Entity>, payload: DynResponse, cmds: &mut 
         return;
     };
     let gantz_egui::EvalEntry(entrypoint) = downcast_payload(payload);
-    cmds.trigger(EvalEntryEvent { head, entrypoint });
+    cmds.trigger(EvalEntryEvent {
+        head,
+        entrypoint,
+        // A user-driven push fires "now".
+        time: None,
+    });
 }
 
 /// Dispatch a [`gantz_egui::OpenHead`] payload as a [`head::OpenEvent`].

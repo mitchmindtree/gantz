@@ -434,6 +434,7 @@ where
 /// every whole tick duration elapsed (capped by `MAX_CATCHUP_TICKS`).
 pub fn drive_tick_bangs<N>(
     time: Res<Time>,
+    epoch: Res<bevy_gantz::EvalEpoch>,
     registry: Res<crate::Registry<N>>,
     builtins: Res<bevy_gantz::BuiltinNodes<N>>,
     demos: Res<crate::Demos>,
@@ -444,6 +445,8 @@ pub fn drive_tick_bangs<N>(
     N: gantz_core::Node + ToTickBang + Send + Sync,
 {
     let dt = time.delta_secs_f64();
+    // The frame's monotonic "now"; each tick's exact firing time is derived from it.
+    let now = epoch.now_secs();
 
     for (entity, wg) in heads.iter() {
         let node_reg = crate::registry_ref(&registry, &builtins, &demos);
@@ -478,19 +481,27 @@ pub fn drive_tick_bangs<N>(
             let full = (acc / dur).floor();
             let n = full.min(MAX_CATCHUP_TICKS) as u32;
             // Subtract the full elapsed so the remainder is < dur; any backlog
-            // beyond the cap is dropped rather than carried forward.
+            // beyond the cap is dropped rather than carried forward. The remainder
+            // `acc` is the time since the most recent tick boundary, so the latest
+            // tick fired `acc` seconds ago.
             acc -= full * dur;
             if let Err(e) = node::state::update_value(vm, path, SteelVal::NumV(acc)) {
                 bevy_log::error!("tick! state update failed: {e}");
             }
 
-            // Trigger one eval per elapsed tick.
-            for _ in 0..n {
+            // Trigger one eval per elapsed tick, oldest first, each stamped with the
+            // exact monotonic time it should fire: the i-th most-recent tick (i = 0
+            // latest) fired at `now - acc - i*dur`. Carrying each tick's own time
+            // lets the audio driver schedule them sample-accurately, spread across
+            // the interval, rather than bunched at the frame boundary.
+            for i in (0..n).rev() {
+                let t = now - acc - i as f64 * *dur;
                 let source = gantz_core::compile::entrypoint::push_source(path.clone(), 1);
                 let entrypoint = gantz_core::compile::entrypoint::from_sources([source]);
                 cmds.trigger(bevy_gantz::vm::EvalEntryEvent {
                     head: entity,
                     entrypoint,
+                    time: Some(t),
                 });
             }
         }

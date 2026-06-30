@@ -205,6 +205,8 @@ pub fn drive_update_bangs<N>(
         cmds.trigger(bevy_gantz::vm::EvalEntryEvent {
             head: entity,
             entrypoint,
+            // An update represents "now".
+            time: None,
         });
     }
 }

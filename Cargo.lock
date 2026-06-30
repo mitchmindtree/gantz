@@ -953,9 +953,11 @@ dependencies = [
 name = "bevy_gantz_plyphon"
 version = "0.1.0"
 dependencies = [
+ "bevy",
  "bevy_app",
  "bevy_ecs",
  "bevy_gantz",
+ "bytemuck",
  "cpal",
  "gantz_ca",
  "gantz_core",

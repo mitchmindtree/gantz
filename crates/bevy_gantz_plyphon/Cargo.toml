@@ -19,3 +19,9 @@ log.workspace = true
 plyphon.workspace = true
 
 bevy_gantz.workspace = true
+
+[dev-dependencies]
+# The `custom_unit` example runs a minimal headless bevy app.
+bevy.workspace = true
+# For deriving `Pod`/`Zeroable` on a custom unit's state.
+bytemuck = { version = "1", features = ["derive"] }

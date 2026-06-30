@@ -235,6 +235,8 @@ mod tests {
                     ("y_max", Datum::Null),
                 ],
             ),
+            node_datum("Sine", vec![]),
+            node_datum("Out", vec![]),
         ];
         for value in cases {
             let node: Box<dyn Node> = from_datum(value.clone())
@@ -326,6 +328,39 @@ mod tests {
             let from_ron: Box<dyn Node> = ron::de::from_str(&ron).unwrap();
             assert_eq!(to_datum(&from_ron).unwrap(), expected_datum);
         }
+    }
+
+    /// The DSP nodes are inert in the control-rate Steel world (they emit
+    /// placeholder exprs and declare no entrypoints), so a `~sine -> ~out` graph
+    /// still compiles through the VM without error - and the app's `ToNodeDsp`
+    /// impl lets a synthdef derive from the same graph. This guards the
+    /// two-independent-backends design end to end.
+    #[test]
+    fn dsp_nodes_are_steel_inert_and_derive() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_plyphon::{ToNodeDsp, derive_synthdef};
+        type G = Graph<Box<dyn Node>>;
+
+        let mut g: G = Graph::default();
+        let s = g.add_node(Box::new(gantz_plyphon::Sine::default()) as Box<dyn Node>);
+        let o = g.add_node(Box::new(gantz_plyphon::Out::default()) as Box<dyn Node>);
+        g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+
+        // Steel-inert: compiles through the control-rate VM (no entrypoints, no
+        // error) even though it is a pure-audio graph.
+        let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+        let config = gantz_core::compile::Config::default();
+        gantz_core::vm::init(&get_node, &g, &[], &config)
+            .expect("DSP graph must compile in the Steel VM");
+
+        // The `~out` root is discoverable via `ToNodeDsp` and a synthdef derives.
+        let root = g
+            .node_indices()
+            .find(|&ix| g[ix].to_node_dsp().is_some_and(|d| d.is_output()))
+            .expect("~out root");
+        let def = derive_synthdef(&g, root, 2, "test").expect("derive");
+        assert_eq!(def.units.len(), 3, "SinOsc + gain-mul + Out");
     }
 
     /// Lowering a hand-authored `mul` (declared in base.gantz's index order)

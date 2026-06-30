@@ -11,8 +11,11 @@ use plyphon::synthdef::{InputRef, Param, SynthDef, UnitSpec};
 /// trait (and being discoverable via [`ToNodeDsp`]); the same gantz graph is
 /// compiled by both backends independently.
 pub trait NodeDsp {
-    /// The number of DSP (signal) inputs. Matches the node's
-    /// [`gantz_core::Node::n_inputs`] so graph edges line up.
+    /// The number of DSP (signal) inputs - the leading inputs that carry audio,
+    /// wired into the synthdef. A node's [`gantz_core::Node::n_inputs`] may exceed
+    /// this: any inputs at indices `>= n_dsp_inputs` are *control* inputs, a purely
+    /// Steel/state concern (a connected control value is written into the node's
+    /// param state by its `expr`), and are ignored by the synthdef compiler.
     fn n_dsp_inputs(&self) -> usize {
         0
     }

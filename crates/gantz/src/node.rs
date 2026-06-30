@@ -34,6 +34,7 @@ impl Node for gantz_egui::node::Plot {}
 
 impl Node for gantz_plyphon::Sine {}
 impl Node for gantz_plyphon::Out {}
+impl Node for gantz_plyphon::Lag {}
 
 // `Box<dyn Node>`'s `Serialize`/`Deserialize`: compiled dispatch over the
 // full node set, keyed by each type's `gantz_nodetag::NodeTag`. Adding a
@@ -60,6 +61,7 @@ gantz_format::impl_node_set_serde! {
         gantz_egui::node::Plot,
         gantz_plyphon::Sine,
         gantz_plyphon::Out,
+        gantz_plyphon::Lag,
     }
 }
 
@@ -106,6 +108,9 @@ impl gantz_plyphon::ToNodeDsp for Box<dyn Node> {
             return Some(n);
         }
         if let Some(n) = any.downcast_ref::<gantz_plyphon::Out>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Lag>() {
             return Some(n);
         }
         None
@@ -237,6 +242,7 @@ mod tests {
             ),
             node_datum("Sine", vec![]),
             node_datum("Out", vec![]),
+            node_datum("Lag", vec![]),
         ];
         for value in cases {
             let node: Box<dyn Node> = from_datum(value.clone())
@@ -361,6 +367,53 @@ mod tests {
             .expect("~out root");
         let derived = derive_synthdef(&g, root, 2, "test").expect("derive");
         assert_eq!(derived.def.units.len(), 3, "SinOsc + gain-mul + Out");
+    }
+
+    /// A control input on a DSP node: connecting a `number` to `~sine`'s freq
+    /// socket and pushing the number writes the number's value into `~sine`'s VM
+    /// state (which the audio driver then applies via `set_control`). Guards the
+    /// ctrl/dsp bridge end to end on the Steel side.
+    #[test]
+    fn control_input_writes_dsp_node_state() {
+        use gantz_core::compile::{EvalKind, entry_fn_name, push_pull_entrypoints};
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_core::steel::SteelVal;
+        type G = Graph<Box<dyn Node>>;
+
+        // number (a push source) -> ~sine.freq (control input at index 0).
+        let mut g: G = Graph::default();
+        let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
+        let sine = g.add_node(Box::new(gantz_plyphon::Sine::default()) as Box<dyn Node>);
+        g.add_edge(num, sine, Edge::new(0.into(), 0.into()));
+
+        let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+        let config = gantz_core::compile::Config::default();
+        let eps = push_pull_entrypoints(&get_node, &g);
+        let (mut vm, _compiled) =
+            gantz_core::vm::init(&get_node, &g, &eps, &config).expect("compile number -> ~sine");
+
+        // Set the number's value, then fire its push entrypoint.
+        gantz_core::node::state::update_value(&mut vm, &[num.index()], SteelVal::NumV(440.0))
+            .expect("set number state");
+        let ep = eps
+            .iter()
+            .find(|ep| {
+                ep.0.iter()
+                    .any(|s| s.kind == EvalKind::Push && s.path == [num.index()])
+            })
+            .expect("number push entrypoint");
+        vm.call_function_by_name_with_args(&entry_fn_name(&ep.id()), vec![])
+            .expect("push number");
+
+        // The control value landed in ~sine's freq state.
+        let freq = gantz_core::node::state::extract::<f64>(&vm, &[sine.index()])
+            .expect("extract ~sine state")
+            .expect("~sine state present");
+        assert_eq!(
+            freq, 440.0,
+            "control input must write the dsp node's freq state",
+        );
     }
 
     /// Lowering a hand-authored `mul` (declared in base.gantz's index order)

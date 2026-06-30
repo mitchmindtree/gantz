@@ -14,7 +14,7 @@ use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
-use crate::param::{cahash_lag, param_name, param_row, plyphon_param};
+use crate::param::{cahash_lag, control_input_expr, param_name, param_row, plyphon_param};
 
 /// A sine oscillator. Emits a single `SinOsc.ar(freq)` UGen.
 ///
@@ -65,6 +65,11 @@ impl CaHash for Sine {
 }
 
 impl gantz_core::Node for Sine {
+    fn n_inputs(&self, _ctx: MetaCtx) -> usize {
+        // A single control input: the frequency. (No dsp signal inputs.)
+        1
+    }
+
     fn n_outputs(&self, _ctx: MetaCtx) -> usize {
         1
     }
@@ -81,11 +86,12 @@ impl gantz_core::Node for Sine {
         .unwrap()
     }
 
-    fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
-        // Inert in the Steel (control-rate) world; the audio engine reads this
-        // node's freq from state. A single placeholder output keeps any incidental
-        // Steel reachability valid.
-        gantz_core::node::parse_expr("0")
+    fn expr(&self, ctx: ExprCtx<'_, '_>) -> ExprResult {
+        // The audio engine reads the freq from state; this node is otherwise
+        // Steel-inert. When its control input is connected, write the incoming
+        // value into state (the audio driver applies it via `set_control`). The
+        // placeholder output (the freq) feeds the inert dsp output edge.
+        control_input_expr(&ctx, self.n_dsp_inputs(), "state")
     }
 }
 
@@ -162,12 +168,15 @@ impl NodeUi for Sine {
         resp
     }
 
-    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {
-        match kind {
-            SocketKind::Output => Some(
+    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, ix: usize) -> Option<SocketDoc> {
+        match (kind, ix) {
+            (SocketKind::Input, 0) => Some(SocketDoc::ty("number").with_description(
+                "frequency (Hz) control; overrides the inspector value while connected",
+            )),
+            (SocketKind::Output, _) => Some(
                 SocketDoc::ty("audio").with_description("sine signal at the configured frequency"),
             ),
-            SocketKind::Input => None,
+            _ => None,
         }
     }
 }

@@ -14,7 +14,7 @@ use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
-use crate::param::{cahash_lag, param_name, param_row, plyphon_param};
+use crate::param::{cahash_lag, control_input_expr, param_name, param_row, plyphon_param};
 
 /// The audio output sink. Applies a master `gain` to its input and writes it to
 /// output bus 0, fanned across every output channel. The compiler roots a
@@ -74,7 +74,8 @@ impl CaHash for Out {
 
 impl gantz_core::Node for Out {
     fn n_inputs(&self, _ctx: MetaCtx) -> usize {
-        1
+        // Input 0 is the audio signal (a dsp edge); input 1 is the gain control.
+        2
     }
 
     fn stateful(&self, _ctx: MetaCtx) -> bool {
@@ -89,10 +90,11 @@ impl gantz_core::Node for Out {
         .unwrap()
     }
 
-    fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
-        // A 0-output sink, inert in the Steel world (the audio engine drives it):
-        // emit the empty-output value, matching the 0-output convention.
-        gantz_core::node::parse_expr("'()")
+    fn expr(&self, ctx: ExprCtx<'_, '_>) -> ExprResult {
+        // A 0-output sink. The audio input (index 0) is a dsp edge handled by the
+        // synthdef and ignored here; when the gain control (index 1) is connected,
+        // write it into state (the audio driver applies it via `set_control`).
+        control_input_expr(&ctx, self.n_dsp_inputs(), "'()")
     }
 }
 
@@ -186,12 +188,15 @@ impl NodeUi for Out {
         resp
     }
 
-    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {
-        match kind {
-            SocketKind::Input => {
+    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, ix: usize) -> Option<SocketDoc> {
+        match (kind, ix) {
+            (SocketKind::Input, 0) => {
                 Some(SocketDoc::ty("audio").with_description("signal to send to the audio output"))
             }
-            SocketKind::Output => None,
+            (SocketKind::Input, 1) => Some(SocketDoc::ty("number").with_description(
+                "master gain control; overrides the inspector value while connected",
+            )),
+            _ => None,
         }
     }
 }

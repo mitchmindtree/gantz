@@ -7,6 +7,7 @@
 //! the node weight, because lag is structural (it bakes a `LagControl` into the
 //! synthdef and so respawns on change).
 
+use gantz_core::node::{ExprCtx, ExprResult};
 use plyphon::synthdef::Param;
 
 /// The plyphon control [`Param`] named `name` with the given default value and
@@ -17,6 +18,25 @@ pub fn plyphon_param(name: impl Into<String>, default: f32, lag: f32) -> Param {
     } else {
         Param::control(name, default)
     }
+}
+
+/// Build a single-param DSP node's Steel `expr`.
+///
+/// If the node's *control input* at `control_ix` is connected, the incoming value
+/// is written into the node's scalar VM state (`(set! state ...)`, guarded by
+/// `number?` so a non-numeric value is ignored) - this is how a `number` or
+/// `tick!`-driven chain drives the param at runtime. The expr always evaluates to
+/// `output`: the node's placeholder dsp output (`"state"` for a source like
+/// `~sine`, `"'()"` for a sink like `~out`). DSP nodes are otherwise Steel-inert;
+/// the audio engine reads the same state slot and applies it via `set_control`.
+pub fn control_input_expr(ctx: &ExprCtx<'_, '_>, control_ix: usize, output: &str) -> ExprResult {
+    let expr = match ctx.inputs().get(control_ix) {
+        Some(Some(val)) => {
+            format!("(begin (if (number? {val}) (set! state {val}) void) {output})")
+        }
+        _ => format!("(begin {output})"),
+    };
+    gantz_core::node::parse_expr(&expr)
 }
 
 /// A synthdef parameter name unique to a node's parameter within a synthdef,
@@ -78,4 +98,26 @@ pub fn param_row(
         });
     });
     (value_changed, lag_changed)
+}
+
+/// One inspector row for a single value (no smoothing-lag field): the key column
+/// is `name`, the value column is the caller-configured `value` dialer. Returns
+/// whether it changed. Used for params that are themselves a duration (e.g.
+/// `~lag`'s lag time), where there is no separate value-being-smoothed.
+pub fn value_row(
+    body: &mut egui_extras::TableBody,
+    name: &str,
+    value: egui::DragValue<'_>,
+) -> bool {
+    let row_h = gantz_egui::widget::node_inspector::table_row_h(body.ui_mut());
+    let mut changed = false;
+    body.row(row_h, |mut row| {
+        row.col(|ui| {
+            ui.label(name);
+        });
+        row.col(|ui| {
+            changed = ui.add(value).changed();
+        });
+    });
+    changed
 }

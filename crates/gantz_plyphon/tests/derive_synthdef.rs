@@ -4,7 +4,9 @@
 
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::{Graph, NodeIx};
-use gantz_plyphon::{DeriveError, NodeDsp, Out, Sine, ToNodeDsp, derive_synthdef, structural_sig};
+use gantz_plyphon::{
+    DeriveError, Lag, NodeDsp, Out, Sine, ToNodeDsp, derive_synthdef, structural_sig,
+};
 use plyphon::synthdef::InputRef;
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, World, engine};
 
@@ -14,6 +16,7 @@ const SR: f32 = 48_000.0;
 /// `Other` is a non-DSP node (a stand-in for any control-rate node).
 enum N {
     Sine(Sine),
+    Lag(Lag),
     Out(Out),
     Other,
 }
@@ -22,6 +25,7 @@ impl ToNodeDsp for N {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         match self {
             N::Sine(s) => Some(s),
+            N::Lag(l) => Some(l),
             N::Out(o) => Some(o),
             N::Other => None,
         }
@@ -136,6 +140,43 @@ fn fans_output_across_channels() {
     // `Out` gets the bus index followed by one signal input per channel.
     assert_eq!(def.units[2].name, "Out");
     assert_eq!(def.units[2].inputs.len(), 1 + 2);
+}
+
+#[test]
+fn lag_node_wired_into_chain() {
+    // `~sine -> ~lag -> ~out`: the Lag UGen sits between the SinOsc and the gain
+    // mul, smoothing the signal, with its own `dur` control param.
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::Sine(Sine::default()));
+    let l = g.add_node(N::Lag(Lag::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, l, Edge::new(0.into(), 0.into()));
+    g.add_edge(l, o, Edge::new(0.into(), 0.into()));
+    let def = derive_synthdef(&g, o, 1, "t").expect("derive").def;
+
+    // Units: SinOsc(0), Lag(1), BinaryOpUGen(2), Out(3).
+    assert_eq!(def.units.len(), 4);
+    assert_eq!(def.units[1].name, "Lag");
+    // Lag input 0 = the SinOsc output; input 1 = the dur param.
+    assert!(matches!(
+        def.units[1].inputs[0],
+        InputRef::Unit { unit: 0, output: 0 }
+    ));
+    assert!(matches!(def.units[1].inputs[1], InputRef::Param(_)));
+    // The gain mul reads the Lag output.
+    assert_eq!(def.units[2].name, "BinaryOpUGen");
+    assert!(matches!(
+        def.units[2].inputs[0],
+        InputRef::Unit { unit: 1, output: 0 }
+    ));
+
+    // A `dur` param (the lag time) exists, defaulting to 0.1 s.
+    let dur = def
+        .params
+        .iter()
+        .find(|p| p.name.ends_with("/dur"))
+        .expect("dur param");
+    assert_eq!(dur.default, Lag::DEFAULT_DUR);
 }
 
 #[test]

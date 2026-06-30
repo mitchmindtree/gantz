@@ -1,0 +1,21 @@
+[package]
+name = "bevy_gantz_plyphon"
+version = "0.1.0"
+description = "Bevy + plyphon audio runtime for gantz: a cpal output stream driving synthdefs derived from DSP graphs."
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[dependencies]
+bevy_app.workspace = true
+bevy_ecs.workspace = true
+cpal.workspace = true
+gantz_ca.workspace = true
+gantz_core.workspace = true
+gantz_plyphon.workspace = true
+log.workspace = true
+plyphon.workspace = true
+
+bevy_gantz.workspace = true

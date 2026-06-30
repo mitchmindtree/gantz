@@ -1,4 +1,5 @@
 {
+  alsa-lib,
   lib,
   libxkbcommon,
   makeWrapper,
@@ -21,6 +22,8 @@ let
   manifest = builtins.fromTOML (builtins.readFile manifestPath);
 
   buildInputs = lib.optionals stdenv.hostPlatform.isLinux [
+    # `cpal` (via `bevy_gantz_plyphon`) links ALSA on Linux for audio output.
+    alsa-lib
     libxkbcommon
     vulkan-loader
     vulkan-validation-layers

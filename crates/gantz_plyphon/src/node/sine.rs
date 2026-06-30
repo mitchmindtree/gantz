@@ -34,6 +34,9 @@ impl Sine {
     /// The default frequency (Hz) a fresh `~sine` starts at.
     pub const DEFAULT_FREQ: f32 = 220.0;
 
+    /// The default frequency smoothing lag in seconds (`0.0` = instant/unsmoothed).
+    pub const DEFAULT_FREQ_LAG: f32 = 0.0;
+
     /// The frequency smoothing lag in seconds (`0.0` = instant).
     pub fn freq_lag(&self) -> f32 {
         self.freq_lag

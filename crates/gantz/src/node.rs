@@ -128,6 +128,7 @@ impl gantz_format::NodeSugar for Box<dyn Node> {
             &gantz_std::StdSugar,
             &gantz_egui::EguiSugar,
             &bevy_gantz_egui::BevySugar,
+            &gantz_plyphon::PlyphonSugar,
         ])
     }
 }
@@ -333,6 +334,29 @@ mod tests {
             assert_eq!(to_datum(&from_datum).unwrap(), expected_datum);
             let from_ron: Box<dyn Node> = ron::de::from_str(&ron).unwrap();
             assert_eq!(to_datum(&from_ron).unwrap(), expected_datum);
+        }
+    }
+
+    /// `PlyphonSugar` is composed into the app's `NodeSugar`, so the DSP nodes
+    /// serialize as their `~`-prefixed keyword forms (not the generic
+    /// `(node "Sine" ...)` fallback). Guards that the sugar stays wired in.
+    #[test]
+    fn dsp_nodes_use_plyphon_keyword_sugar() {
+        use gantz_format::{NodeSugar, Sugar, to_datum};
+
+        let sugar = <Box<dyn Node> as NodeSugar>::sugar();
+        let cases: [(Box<dyn Node>, &str, &str); 3] = [
+            (Box::new(gantz_plyphon::Sine::default()), "Sine", "~sine"),
+            (Box::new(gantz_plyphon::Out::default()), "Out", "~out"),
+            (Box::new(gantz_plyphon::Lag::default()), "Lag", "~lag"),
+        ];
+        for (node, tag, expected) in cases {
+            let datum = to_datum(&node).expect("to_datum");
+            assert_eq!(
+                sugar.write_spec(tag, &datum).as_deref(),
+                Some(expected),
+                "default {tag} should sugar to bare `{expected}`",
+            );
         }
     }
 

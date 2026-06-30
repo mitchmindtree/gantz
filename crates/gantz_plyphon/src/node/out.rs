@@ -34,6 +34,9 @@ impl Out {
     /// The default master gain (linear amplitude) a fresh `~out` starts at.
     pub const DEFAULT_GAIN: f32 = 0.2;
 
+    /// The default gain smoothing lag in seconds (a short de-click).
+    pub const DEFAULT_GAIN_LAG: f32 = 0.01;
+
     /// The gain smoothing lag in seconds (`0.0` = instant).
     pub fn gain_lag(&self) -> f32 {
         self.gain_lag
@@ -207,5 +210,5 @@ impl NodeUi for Out {
 
 fn default_gain_lag() -> f32 {
     // A short de-click lag on the master gain (per "lag the gain, not the freq").
-    0.01
+    Out::DEFAULT_GAIN_LAG
 }

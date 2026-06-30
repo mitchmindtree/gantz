@@ -12,9 +12,11 @@ pub use backend::{Backend, BackendError, Embedded};
 pub use compile::{DeriveError, Derived, derive_synthdef, structural_sig};
 pub use dsp::{DspBuilder, NodeDsp, ParamBinding, ToNodeDsp};
 pub use node::{Lag, Out, Sine};
+pub use sugar::PlyphonSugar;
 
 pub mod backend;
 pub mod compile;
 pub mod dsp;
 pub mod node;
 pub mod param;
+pub mod sugar;

@@ -25,6 +25,15 @@ use gantz_core::node::graph::{Graph, NodeIx};
 use gantz_plyphon::{Backend, Embedded, ToNodeDsp, derive_synthdef, structural_sig};
 use plyphon::{Controller, Nrt, Options, World, engine};
 
+/// Re-export of [`plyphon`] so downstream crates can implement custom units
+/// (`Unit`, `UnitDef`, `unit_spec`, …) against the exact version this runtime
+/// uses, without pinning it separately. See [`PlyphonPlugin::with_units`].
+pub use plyphon;
+
+/// A callback that registers custom plyphon units into the embedded engine's
+/// [`plyphon::UnitRegistry`] at startup (see [`PlyphonPlugin::with_units`]).
+type UnitRegistrar = Box<dyn Fn(&mut plyphon::UnitRegistry) + Send + Sync>;
+
 use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
 use bevy_gantz::{EntrypointSet, EvalEpoch, Registry, VmSet};
 
@@ -46,11 +55,46 @@ fn osc(secs: f64) -> u64 {
 ///
 /// Generic over `N`, the graph node type (must expose its DSP nodes via
 /// [`ToNodeDsp`]). Add it *after* [`bevy_gantz::GantzPlugin`].
-pub struct PlyphonPlugin<N>(std::marker::PhantomData<N>);
+///
+/// To use custom UGens, register them with [`with_units`](Self::with_units); a
+/// node's [`NodeDsp::ugens`](gantz_plyphon::NodeDsp::ugens) can then name them in a
+/// [`UnitSpec`](plyphon::UnitSpec).
+pub struct PlyphonPlugin<N> {
+    unit_registrars: Vec<UnitRegistrar>,
+    _marker: std::marker::PhantomData<N>,
+}
 
 impl<N> Default for PlyphonPlugin<N> {
     fn default() -> Self {
-        Self(std::marker::PhantomData)
+        Self {
+            unit_registrars: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<N> PlyphonPlugin<N> {
+    /// A plugin with no custom units (equivalent to [`default`](Self::default)).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register custom plyphon units into the embedded engine at startup, before
+    /// any synth that names them is spawned. The callback gets the controller's
+    /// [`plyphon::UnitRegistry`]; call [`register`](plyphon::UnitRegistry::register)
+    /// (or `register_demand`) once per unit. Chainable.
+    ///
+    /// ```ignore
+    /// PlyphonPlugin::<N>::new().with_units(|reg| {
+    ///     reg.register("Saw", Box::new(SawCtor));
+    /// })
+    /// ```
+    pub fn with_units(
+        mut self,
+        f: impl Fn(&mut plyphon::UnitRegistry) + Send + Sync + 'static,
+    ) -> Self {
+        self.unit_registrars.push(Box::new(f));
+        self
     }
 }
 
@@ -63,7 +107,7 @@ where
         // the audio clock's time base; the cpal callback anchors the engine clock
         // to it via `fill_at`, matching the firing times queued into `%args`.
         let epoch = *app.world().resource::<EvalEpoch>();
-        match build_audio_engine(epoch) {
+        match build_audio_engine(epoch, &self.unit_registrars) {
             Some(engine) => {
                 app.insert_non_send(engine);
             }
@@ -313,8 +357,10 @@ fn teardown(controller: &mut Controller, synth: Option<HeadSynth>) {
 
 /// Build the plyphon engine + cpal output stream from the default output device.
 /// Returns `None` (and the app runs silently) if no device is available. `epoch`
-/// is the shared monotonic clock the callback anchors the engine clock to.
-fn build_audio_engine(epoch: EvalEpoch) -> Option<AudioEngine> {
+/// is the shared monotonic clock the callback anchors the engine clock to;
+/// `unit_registrars` register any custom units into the controller's registry
+/// before the stream starts.
+fn build_audio_engine(epoch: EvalEpoch, unit_registrars: &[UnitRegistrar]) -> Option<AudioEngine> {
     let host = cpal::default_host();
     let device = host.default_output_device()?;
     let supported = device.default_output_config().ok()?;
@@ -323,11 +369,17 @@ fn build_audio_engine(epoch: EvalEpoch) -> Option<AudioEngine> {
     let channels = config.channels as usize;
     let sample_rate = config.sample_rate as f64;
 
-    let (controller, nrt, world) = engine(Options {
+    let (mut controller, nrt, world) = engine(Options {
         sample_rate,
         output_channels: channels,
         ..Options::default()
     });
+
+    // Register any custom units before the engine compiles/spawns a synth naming
+    // them (the compiled GraphDef carries their fn-pointers to the audio thread).
+    for register in unit_registrars {
+        register(controller.registry_mut());
+    }
 
     let stream = build_stream(&device, config, channels, sample_format, world, epoch)?;
     stream.play().ok()?;

@@ -4,7 +4,7 @@
 
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::{Graph, NodeIx};
-use gantz_plyphon::{DeriveError, NodeDsp, Out, Sine, ToNodeDsp, derive_synthdef};
+use gantz_plyphon::{DeriveError, NodeDsp, Out, Sine, ToNodeDsp, derive_synthdef, structural_sig};
 use plyphon::synthdef::InputRef;
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, World, engine};
 
@@ -48,18 +48,32 @@ fn derives_expected_units() {
 
     assert_eq!(def.units.len(), 3, "SinOsc + gain-mul + Out");
 
-    // unit 0: SinOsc.ar(220, 0)
-    assert_eq!(def.units[0].name, "SinOsc");
-    assert!(matches!(def.units[0].inputs[0], InputRef::Constant(f) if f == 220.0));
+    // Two settable control params: the sine's freq (param 0) and the out's gain
+    // (param 1) - so value edits become `set_control`, not respawns.
+    assert_eq!(def.params.len(), 2);
+    assert!(def.params[0].name.ends_with("/freq"));
+    assert_eq!(def.params[0].default, 220.0);
+    assert_eq!(def.params[0].lag, None, "freq is unsmoothed by default");
+    assert!(def.params[1].name.ends_with("/gain"));
+    assert_eq!(def.params[1].default, 0.2);
+    assert_eq!(
+        def.params[1].lag,
+        Some(0.01),
+        "gain has a default de-click lag"
+    );
 
-    // unit 1: BinaryOpUGen multiply (SinOsc * 0.2)
+    // unit 0: SinOsc.ar(freq-param, 0)
+    assert_eq!(def.units[0].name, "SinOsc");
+    assert!(matches!(def.units[0].inputs[0], InputRef::Param(0)));
+
+    // unit 1: BinaryOpUGen multiply (SinOsc * gain-param)
     assert_eq!(def.units[1].name, "BinaryOpUGen");
     assert_eq!(def.units[1].special_index, 2, "multiply selector");
     assert!(matches!(
         def.units[1].inputs[0],
         InputRef::Unit { unit: 0, output: 0 }
     ));
-    assert!(matches!(def.units[1].inputs[1], InputRef::Constant(g) if g == 0.2));
+    assert!(matches!(def.units[1].inputs[1], InputRef::Param(1)));
 
     // unit 2: Out.ar(0, gained)
     assert_eq!(def.units[2].name, "Out");
@@ -69,6 +83,30 @@ fn derives_expected_units() {
         def.units[2].inputs[1],
         InputRef::Unit { unit: 1, output: 0 }
     ));
+}
+
+#[test]
+fn structural_sig_stable_across_value_changes() {
+    // A value change keeps the structural signature (so the driver `set_control`s
+    // rather than respawning).
+    let (g220, out220) = sine_to_out(220.0, 0.2);
+    let (g440, out440) = sine_to_out(440.0, 0.2);
+    let d220 = derive_synthdef(&g220, out220, 1, "t").expect("derive");
+    let d440 = derive_synthdef(&g440, out440, 1, "t").expect("derive");
+    assert_eq!(
+        structural_sig(&d220),
+        structural_sig(&d440),
+        "a param value change must not change the structural signature",
+    );
+
+    // A lag change is structural (it is baked into the synthdef), so it does.
+    let mut lagged = d220.clone();
+    lagged.params[0].lag = Some(0.5);
+    assert_ne!(
+        structural_sig(&d220),
+        structural_sig(&lagged),
+        "a param lag change must change the structural signature",
+    );
 }
 
 #[test]

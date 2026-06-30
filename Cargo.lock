@@ -3413,6 +3413,7 @@ name = "gantz_plyphon"
 version = "0.1.0"
 dependencies = [
  "egui",
+ "egui_extras",
  "egui_graph",
  "gantz_ca",
  "gantz_core",
@@ -3421,6 +3422,7 @@ dependencies = [
  "log",
  "petgraph",
  "plyphon",
+ "ron 0.10.1",
  "serde",
 ]
 

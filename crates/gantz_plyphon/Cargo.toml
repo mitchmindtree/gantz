@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 egui.workspace = true
+egui_extras.workspace = true
 egui_graph.workspace = true
 gantz_ca.workspace = true
 gantz_core.workspace = true
@@ -22,3 +23,4 @@ serde.workspace = true
 
 [dev-dependencies]
 petgraph.workspace = true
+ron.workspace = true

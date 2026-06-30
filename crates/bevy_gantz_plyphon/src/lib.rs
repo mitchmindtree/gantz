@@ -20,7 +20,7 @@ use cpal::{FromSample, SizedSample};
 
 use gantz_ca as ca;
 use gantz_core::node::graph::{Graph, NodeIx};
-use gantz_plyphon::{Backend, Embedded, ToNodeDsp, derive_synthdef};
+use gantz_plyphon::{Backend, Embedded, ToNodeDsp, derive_synthdef, structural_sig};
 use plyphon::{Controller, Nrt, Options, World, engine};
 
 use bevy_gantz::head::{HeadRef, OpenHead, WorkingGraph};
@@ -76,6 +76,12 @@ struct HeadSynth {
     graph: ca::GraphAddr,
     def_name: String,
     node_id: i32,
+    /// Structural signature of the running synth's def (excludes param values) -
+    /// an unchanged signature means a graph edit was param-only, so the params
+    /// can be `set_control`'d instead of respawning.
+    sig: u64,
+    /// The running synth's current param values, indexed by param.
+    param_defaults: Vec<f32>,
 }
 
 /// Derive, install and (re)spawn a synth per open head whose committed graph
@@ -126,9 +132,30 @@ fn drive_synths<N>(
                 continue;
             }
         };
+        let sig = structural_sig(&def);
+        let param_defaults: Vec<f32> = def.params.iter().map(|p| p.default).collect();
 
         let mut backend = Embedded::new(&mut audio.controller);
-        // The def is replaced in place; free the previous synth before respawning.
+
+        // Param-only change (same structure): `set_control` the changed values on
+        // the running synth - no respawn, so oscillator phase is preserved.
+        if let Some(prev) = state.0.get_mut(&entity) {
+            if prev.sig == sig {
+                for (i, (&old, &new)) in prev.param_defaults.iter().zip(&param_defaults).enumerate()
+                {
+                    if old.to_bits() != new.to_bits() {
+                        if let Err(e) = backend.set_control(prev.node_id, i, new) {
+                            log::error!("bevy_gantz_plyphon: set_control failed: {e:?}");
+                        }
+                    }
+                }
+                prev.graph = graph_ca;
+                prev.param_defaults = param_defaults;
+                continue;
+            }
+        }
+
+        // Structural change (or this head's first synth): respawn.
         if let Some(prev) = state.0.get(&entity) {
             let _ = backend.free_node(prev.node_id);
         }
@@ -144,6 +171,8 @@ fn drive_synths<N>(
                         graph: graph_ca,
                         def_name,
                         node_id,
+                        sig,
+                        param_defaults,
                     },
                 );
             }

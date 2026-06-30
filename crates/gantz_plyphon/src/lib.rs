@@ -9,11 +9,13 @@
 //! the derived synthdefs through a [`Backend`].
 
 pub use backend::{Backend, BackendError, Embedded};
-pub use compile::{DeriveError, derive_synthdef};
+pub use compile::{DeriveError, derive_synthdef, structural_sig};
 pub use dsp::{DspBuilder, NodeDsp, ToNodeDsp};
 pub use node::{Out, Sine};
+pub use param::DspParam;
 
 pub mod backend;
 pub mod compile;
 pub mod dsp;
 pub mod node;
+pub mod param;

@@ -2,10 +2,12 @@
 //! nodes.
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;
-use plyphon::synthdef::{InputRef, SynthDef};
+use plyphon::Rate;
+use plyphon::synthdef::{InputRef, Param, SynthDef, UnitSpec};
 
 use gantz_core::compile::pull_eval_order;
 use gantz_core::node::Conns;
@@ -75,9 +77,76 @@ where
                 inputs[input_ix] = *src;
             }
         }
-        let outs = dsp.ugens(&inputs, &mut builder);
+        let outs = dsp.ugens(&[n.index()], &inputs, &mut builder);
         outputs.insert(n, outs);
     }
 
     Ok(builder.finish(name))
+}
+
+/// A hash of a synthdef's *structure* - everything except parameter values.
+///
+/// Two synthdefs that differ only in their [`Param`] defaults (the settable
+/// values) share a signature, so the audio driver can `set_control` those values
+/// on the running synth rather than respawning it (preserving phase). A change to
+/// the unit graph, the wiring, a baked constant, or a param's name/rate/lag *does*
+/// change the signature, forcing a respawn.
+pub fn structural_sig(def: &SynthDef) -> u64 {
+    let mut h = DefaultHasher::new();
+    def.units.len().hash(&mut h);
+    for u in &def.units {
+        hash_unit(&mut h, u);
+    }
+    def.params.len().hash(&mut h);
+    for p in &def.params {
+        hash_param_struct(&mut h, p);
+    }
+    h.finish()
+}
+
+fn hash_unit(h: &mut DefaultHasher, u: &UnitSpec) {
+    u.name.hash(h);
+    rate_tag(u.rate).hash(h);
+    u.num_outputs.hash(h);
+    u.special_index.hash(h);
+    u.inputs.len().hash(h);
+    for i in &u.inputs {
+        hash_input(h, i);
+    }
+}
+
+fn hash_input(h: &mut DefaultHasher, i: &InputRef) {
+    match i {
+        InputRef::Constant(c) => {
+            0u8.hash(h);
+            c.to_bits().hash(h);
+        }
+        InputRef::Param(p) => {
+            1u8.hash(h);
+            p.hash(h);
+        }
+        InputRef::Unit { unit, output } => {
+            2u8.hash(h);
+            unit.hash(h);
+            output.hash(h);
+        }
+    }
+}
+
+/// Hash a param's structure - name, rate, trigger flag and lag - but NOT its
+/// default value (which the driver sets live via `set_control`).
+fn hash_param_struct(h: &mut DefaultHasher, p: &Param) {
+    p.name.hash(h);
+    rate_tag(p.rate).hash(h);
+    p.is_trig.hash(h);
+    p.lag.map(f32::to_bits).hash(h);
+}
+
+fn rate_tag(rate: Rate) -> u8 {
+    match rate {
+        Rate::Scalar => 0,
+        Rate::Control => 1,
+        Rate::Audio => 2,
+        Rate::Demand => 3,
+    }
 }

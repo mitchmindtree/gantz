@@ -33,9 +33,12 @@ pub trait NodeDsp {
     /// input, returning one [`InputRef`] per DSP output (so downstream nodes can
     /// reference them).
     ///
+    /// `path` is the node's path within the graph (e.g. `[2]` for the node at
+    /// index 2 of a flat graph); use it to name any control [`Param`](plyphon::Param)s
+    /// uniquely within the synthdef (see [`param_name`](crate::param::param_name)).
     /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs); an unconnected
     /// input is [`InputRef::Constant`]`(0.0)` (silence).
-    fn ugens(&self, inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef>;
+    fn ugens(&self, path: &[usize], inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef>;
 }
 
 /// A downcast hook so the synthdef compiler and the audio driver can find

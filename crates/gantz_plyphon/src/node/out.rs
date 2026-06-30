@@ -1,35 +1,39 @@
 //! The `~out` audio-output sink node.
 
-use std::hash::{Hash, Hasher};
-
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
-use gantz_egui::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind};
+use gantz_egui::{
+    InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
+};
+use gantz_nodetag::NodeTag;
 use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
-use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
+use crate::param::{DspParam, lag_row, param_name};
 
 /// The audio output sink. Applies a master `gain` to its input and writes it to
 /// output bus 0, fanned across every output channel. The compiler roots a
 /// synthdef at this node.
-#[derive(Clone, Debug, Serialize, Deserialize, NodeTag)]
+///
+/// `gain` is a settable [`DspParam`] with a small default smoothing lag, so gain
+/// changes de-click without a respawn.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
 pub struct Out {
     #[serde(default = "default_gain")]
-    gain: f32,
+    gain: DspParam,
 }
 
 impl Out {
     /// The master output gain (linear amplitude).
     pub fn gain(&self) -> f32 {
-        self.gain
+        self.gain.value
     }
 
     /// Set the master output gain (content-address affecting).
     pub fn set_gain(&mut self, gain: f32) {
-        self.gain = gain;
+        self.gain.value = gain;
     }
 }
 
@@ -41,24 +45,10 @@ impl Default for Out {
     }
 }
 
-impl PartialEq for Out {
-    fn eq(&self, other: &Self) -> bool {
-        self.gain.to_bits() == other.gain.to_bits()
-    }
-}
-
-impl Eq for Out {}
-
-impl Hash for Out {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        Hash::hash(&self.gain.to_bits(), state);
-    }
-}
-
 impl CaHash for Out {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
         hasher.update(b"gantz.plyphon.out");
-        hasher.update(&self.gain.to_le_bytes());
+        self.gain.cahash(hasher);
     }
 }
 
@@ -87,13 +77,15 @@ impl NodeDsp for Out {
         true
     }
 
-    fn ugens(&self, inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
+    fn ugens(&self, path: &[usize], inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
         let sig = inputs.first().copied().unwrap_or(InputRef::Constant(0.0));
         // Apply master gain: sig * gain (BinaryOpUGen multiply, special_index 2).
+        // `gain` is a settable (smoothed) param so changes de-click in place.
+        let gain = b.push_param(self.gain.to_plyphon(param_name(path, "gain")));
         let gained = b.push_unit(UnitSpec {
             name: "BinaryOpUGen".to_string(),
             rate: Rate::Audio,
-            inputs: vec![sig, InputRef::Constant(self.gain)],
+            inputs: vec![sig, InputRef::Param(gain)],
             num_outputs: 1,
             special_index: 2,
         });
@@ -127,12 +119,12 @@ impl NodeUi for Out {
 
     fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
         // The gain lives in the node weight, so an edit changes the content
-        // address: mark `changed`.
-        let mut gain = self.gain;
+        // address: mark `changed` (the driver then set_controls it, no respawn).
+        let mut value = self.gain.value;
         let mut edited = false;
         let framed = uictx.framed(|ui, _sockets| {
             let res = ui.add(
-                egui::DragValue::new(&mut gain)
+                egui::DragValue::new(&mut value)
                     .prefix("gain ")
                     .range(0.0..=1.0)
                     .speed(0.005),
@@ -142,7 +134,19 @@ impl NodeUi for Out {
         });
         let mut resp = NodeUiResponse::new(framed);
         if edited {
-            self.gain = gain;
+            self.gain.value = value;
+            resp.mark_changed();
+        }
+        resp
+    }
+
+    fn inspector_rows(
+        &mut self,
+        _ctx: &mut NodeCtx,
+        body: &mut egui_extras::TableBody,
+    ) -> InspectorRowsResponse {
+        let mut resp = InspectorRowsResponse::default();
+        if lag_row(body, "gain lag", &mut self.gain) {
             resp.mark_changed();
         }
         resp
@@ -158,6 +162,7 @@ impl NodeUi for Out {
     }
 }
 
-fn default_gain() -> f32 {
-    0.2
+fn default_gain() -> DspParam {
+    // A short de-click lag on the master gain (per "lag the gain, not the freq").
+    DspParam::lagged(0.2, 0.01)
 }

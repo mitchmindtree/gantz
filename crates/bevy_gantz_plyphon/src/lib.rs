@@ -12,7 +12,6 @@
 //! and plyphon sums all synths on that bus.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
@@ -35,16 +34,10 @@ pub use plyphon;
 type UnitRegistrar = Box<dyn Fn(&mut plyphon::UnitRegistry) + Send + Sync>;
 
 use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
-use bevy_gantz::{EntrypointSet, EvalEpoch, Registry, VmSet};
+use bevy_gantz::{AudioConfig, AudioStatus, EntrypointSet, EvalEpoch, Registry, VmSet};
 
 /// OSC/NTP fixed-point units per second (OSC time is 32.32 fixed point: 2^32).
 const OSC_UNITS_PER_SEC: f64 = 4_294_967_296.0;
-
-/// How far ahead of the audio clock a timestamped control update is scheduled, so
-/// it lands in the audio future and plays sample-accurately. Must exceed output
-/// latency + frame jitter, or a schedule lands behind the clock and degrades to
-/// block-immediate (still correct, just not sample-accurate). 50 ms is balanced.
-const SCHED_LEAD: Duration = Duration::from_millis(50);
 
 /// Convert monotonic [`EvalEpoch`] seconds to an absolute OSC/NTP engine-clock time.
 fn osc(secs: f64) -> u64 {
@@ -107,14 +100,27 @@ where
         // the audio clock's time base; the cpal callback anchors the engine clock
         // to it via `fill_at`, matching the firing times queued into `%args`.
         let epoch = *app.world().resource::<EvalEpoch>();
-        match build_audio_engine(epoch, &self.unit_registrars) {
+        // Audio settings (the Settings → Audio tab) + the status it reports.
+        app.init_resource::<AudioConfig>();
+        let status = match build_audio_engine(epoch, &self.unit_registrars) {
             Some(engine) => {
+                let status = AudioStatus {
+                    present: true,
+                    device: Some(engine.device.clone()),
+                    sample_rate: engine.sample_rate,
+                    channels: engine.out_channels,
+                };
                 app.insert_non_send(engine);
+                status
             }
-            None => log::warn!(
-                "bevy_gantz_plyphon: no audio output device; `~out` nodes will be silent"
-            ),
-        }
+            None => {
+                log::warn!(
+                    "bevy_gantz_plyphon: no audio output device; `~out` nodes will be silent"
+                );
+                AudioStatus::default()
+            }
+        };
+        app.insert_resource(status);
         // `.after(EntrypointSet)`: run once the `tick!`/`update!` drivers' triggered
         // evaluations have flushed, so the control values they queue are visible to
         // the param drain below in the same frame.
@@ -130,7 +136,12 @@ struct AudioEngine {
     controller: Controller,
     nrt: Nrt,
     out_channels: usize,
-    _stream: cpal::Stream,
+    /// The active output device's name (for the Settings → Audio status readout).
+    device: String,
+    /// The output sample rate (Hz).
+    sample_rate: f64,
+    /// The cpal output stream; held to keep audio running, paused/played on mute.
+    stream: cpal::Stream,
 }
 
 /// Per-head synth bookkeeping: which committed graph produced the currently
@@ -177,6 +188,8 @@ struct ParamSlot {
 fn drive_synths<N>(
     registry: Res<Registry<N>>,
     audio: Option<NonSendMut<AudioEngine>>,
+    audio_config: Res<AudioConfig>,
+    mut enabled_applied: Local<Option<bool>>,
     mut state: ResMut<HeadSynths>,
     mut vms: NonSendMut<HeadVms>,
     heads: Query<(Entity, &HeadRef, &WorkingGraph<N>), With<OpenHead>>,
@@ -187,6 +200,19 @@ fn drive_synths<N>(
         return;
     };
     let audio = audio.into_inner();
+
+    // Apply the enable/mute toggle by pausing/playing the output stream on change.
+    if *enabled_applied != Some(audio_config.enabled) {
+        let result = if audio_config.enabled {
+            audio.stream.play()
+        } else {
+            audio.stream.pause()
+        };
+        if let Err(e) = result {
+            log::error!("bevy_gantz_plyphon: audio stream play/pause failed: {e}");
+        }
+        *enabled_applied = Some(audio_config.enabled);
+    }
 
     // Tick NRT cleanup off the audio thread (drops freed synths, surfaces events).
     audio.nrt.process();
@@ -238,7 +264,7 @@ fn drive_synths<N>(
                     // Timestamped automation: schedule each update at its own time
                     // plus the lead, preserving the inter-tick spacing.
                     for (t, v) in pending {
-                        let when = osc(t + SCHED_LEAD.as_secs_f64());
+                        let when = osc(t + audio_config.sched_lead.as_secs_f64());
                         if let Err(e) = backend.set_control_at(node_id, slot.index, v as f32, when)
                         {
                             log::error!("bevy_gantz_plyphon: set_control_at failed: {e:?}");
@@ -363,6 +389,8 @@ fn teardown(controller: &mut Controller, synth: Option<HeadSynth>) {
 fn build_audio_engine(epoch: EvalEpoch, unit_registrars: &[UnitRegistrar]) -> Option<AudioEngine> {
     let host = cpal::default_host();
     let device = host.default_output_device()?;
+    // cpal's `Device` `Display` is its name (there is no `name()` in 0.18).
+    let device_name = device.to_string();
     let supported = device.default_output_config().ok()?;
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
@@ -388,7 +416,9 @@ fn build_audio_engine(epoch: EvalEpoch, unit_registrars: &[UnitRegistrar]) -> Op
         controller,
         nrt,
         out_channels: channels,
-        _stream: stream,
+        device: device_name,
+        sample_rate,
+        stream,
     })
 }
 

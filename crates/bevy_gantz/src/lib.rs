@@ -21,6 +21,7 @@
 //! per-frame streams consumed by polling systems -
 //! [`debounced_input::DebouncedInputEvent`] is the one case.
 
+pub mod audio;
 pub mod builtin;
 pub mod debounced_input;
 pub mod head;
@@ -28,6 +29,7 @@ pub mod reg;
 pub mod storage;
 pub mod vm;
 
+pub use audio::{AudioConfig, AudioStatus};
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Resource, SystemSet};
 pub use builtin::{BuiltinNodes, Builtins};

@@ -13,7 +13,7 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use bevy_gantz::head;
 use bevy_gantz::reg::Registry;
 use bevy_gantz::vm::EvalEntryEvent;
-use bevy_gantz::{BuiltinNodes, CompileConfig, EvalEntryComplete};
+use bevy_gantz::{AudioConfig, AudioStatus, BuiltinNodes, CompileConfig, EvalEntryComplete};
 use bevy_log as log;
 use gantz_ca as ca;
 use gantz_core::Node;
@@ -1657,11 +1657,20 @@ pub fn update<N>(
     mut focused: ResMut<head::FocusedHead>,
     mut heads_query: Query<OpenHeadViews<N>, With<head::OpenHead>>,
     import_task: Option<Res<ImportTask>>,
-    (base_names, base_immutable, mut compile_config, mut change_validation): (
+    (
+        base_names,
+        base_immutable,
+        mut compile_config,
+        mut change_validation,
+        audio_config,
+        audio_status,
+    ): (
         Res<BaseNames>,
         Res<BaseImmutable>,
         ResMut<CompileConfig>,
         ResMut<bevy_gantz::ValidateCommitted>,
+        Option<ResMut<AudioConfig>>,
+        Option<Res<AudioStatus>>,
     ),
     mut demos: ResMut<Demos>,
     dispatchers: Res<ResponseDispatchers>,
@@ -1717,17 +1726,34 @@ where
     );
     panel_ui.set_clip_rect(ctx.content_rect());
 
+    // The Settings → Audio panel: present only when an audio runtime supplied both
+    // its config and status resources (so the demo / a no-audio app omits the tab).
+    let audio_panel = match (&audio_config, &audio_status) {
+        (Some(cfg), Some(status)) => Some(gantz_egui::widget::AudioPanel {
+            present: status.present,
+            device: status.device.clone(),
+            sample_rate: status.sample_rate,
+            channels: status.channels,
+            sched_lead_ms: cfg.sched_lead.as_secs_f32() * 1000.0,
+            enabled: cfg.enabled,
+        }),
+        _ => None,
+    };
+
     let mut response = egui::containers::CentralPanel::default()
         .frame(egui::Frame::default())
         .show_inside(&mut panel_ui, |ui| {
-            gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
+            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .demos(&demos.0)
                 .compile_config(current_compile_config)
                 .validate_change_tracking(current_validate_change_tracking)
                 .trace_capture(trace_capture.0.clone(), level)
-                .perf_captures(&mut perf_vm.0, &mut perf_gui.0)
-                .show(&mut *gui_state, focused_ix, &mut access, ui)
+                .perf_captures(&mut perf_vm.0, &mut perf_gui.0);
+            if let Some(panel) = audio_panel {
+                widget = widget.audio(panel);
+            }
+            widget.show(&mut *gui_state, focused_ix, &mut access, ui)
         })
         .inner;
 
@@ -1841,6 +1867,16 @@ where
     // Toggle change-tracking validation (a debugging aid; see `vm::sync`).
     if let Some(enabled) = response.validate_change_tracking {
         change_validation.0 = enabled;
+    }
+
+    // Apply Settings → Audio changes to the audio config resource.
+    if let Some(mut cfg) = audio_config {
+        if let Some(lead_ms) = response.audio_sched_lead_ms {
+            cfg.sched_lead = std::time::Duration::from_secs_f32(lead_ms / 1000.0);
+        }
+        if let Some(enabled) = response.audio_enabled {
+            cfg.enabled = enabled;
+        }
     }
 
     // Handle import button - open a file dialog (only if none already in flight).

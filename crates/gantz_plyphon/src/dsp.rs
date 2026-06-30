@@ -54,13 +54,25 @@ pub trait ToNodeDsp {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp>;
 }
 
+/// Records which dsp node a synthdef [`Param`] came from, so the audio driver can
+/// map a node's live state value to the right synth param index.
+#[derive(Clone, Debug)]
+pub struct ParamBinding {
+    /// The dsp node's path within the graph (e.g. `[2]` for a flat graph).
+    pub node_path: Vec<usize>,
+    /// The param's index within the synthdef's `params`.
+    pub index: usize,
+}
+
 /// Accumulates the [`UnitSpec`]s and [`Param`]s of a synthdef as nodes emit them.
 ///
 /// Also carries the engine's output-channel count so a sink node (`~out`) can
-/// fan a mono signal across every output channel.
+/// fan a mono signal across every output channel, and records a [`ParamBinding`]
+/// per pushed param.
 pub struct DspBuilder {
     units: Vec<UnitSpec>,
     params: Vec<Param>,
+    bindings: Vec<ParamBinding>,
     out_channels: usize,
 }
 
@@ -70,6 +82,7 @@ impl DspBuilder {
         DspBuilder {
             units: Vec::new(),
             params: Vec::new(),
+            bindings: Vec::new(),
             out_channels: out_channels.max(1),
         }
     }
@@ -81,11 +94,16 @@ impl DspBuilder {
         ix
     }
 
-    /// Declare a control parameter, returning its index for [`InputRef::Param`].
-    pub fn push_param(&mut self, param: Param) -> u32 {
-        let ix = self.params.len() as u32;
+    /// Declare a control parameter belonging to the dsp node at `path`, returning
+    /// its index for [`InputRef::Param`] and recording its [`ParamBinding`].
+    pub fn push_param(&mut self, path: &[usize], param: Param) -> u32 {
+        let index = self.params.len();
         self.params.push(param);
-        ix
+        self.bindings.push(ParamBinding {
+            node_path: path.to_vec(),
+            index,
+        });
+        index as u32
     }
 
     /// The number of output-bus channels a sink should fan its signal across.
@@ -93,12 +111,13 @@ impl DspBuilder {
         self.out_channels
     }
 
-    /// Consume the builder into a finished [`SynthDef`] with the given `name`.
-    pub fn finish(self, name: impl Into<String>) -> SynthDef {
-        SynthDef {
+    /// Consume the builder into a finished [`SynthDef`] and its param bindings.
+    pub fn finish(self, name: impl Into<String>) -> (SynthDef, Vec<ParamBinding>) {
+        let def = SynthDef {
             name: name.into(),
             params: self.params,
             units: self.units,
-        }
+        };
+        (def, self.bindings)
     }
 }

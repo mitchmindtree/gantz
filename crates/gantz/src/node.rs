@@ -359,8 +359,8 @@ mod tests {
             .node_indices()
             .find(|&ix| g[ix].to_node_dsp().is_some_and(|d| d.is_output()))
             .expect("~out root");
-        let def = derive_synthdef(&g, root, 2, "test").expect("derive");
-        assert_eq!(def.units.len(), 3, "SinOsc + gain-mul + Out");
+        let derived = derive_synthdef(&g, root, 2, "test").expect("derive");
+        assert_eq!(derived.def.units.len(), 3, "SinOsc + gain-mul + Out");
     }
 
     /// Lowering a hand-authored `mul` (declared in base.gantz's index order)

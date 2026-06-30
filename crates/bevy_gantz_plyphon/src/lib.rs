@@ -23,7 +23,7 @@ use gantz_core::node::graph::{Graph, NodeIx};
 use gantz_plyphon::{Backend, Embedded, ToNodeDsp, derive_synthdef, structural_sig};
 use plyphon::{Controller, Nrt, Options, World, engine};
 
-use bevy_gantz::head::{HeadRef, OpenHead, WorkingGraph};
+use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
 use bevy_gantz::{Registry, VmSet};
 
 /// Plugin wiring plyphon audio into a gantz bevy app.
@@ -77,19 +77,38 @@ struct HeadSynth {
     def_name: String,
     node_id: i32,
     /// Structural signature of the running synth's def (excludes param values) -
-    /// an unchanged signature means a graph edit was param-only, so the params
-    /// can be `set_control`'d instead of respawning.
+    /// unchanged across a structural-graph edit means the synth need not respawn.
     sig: u64,
-    /// The running synth's current param values, indexed by param.
-    param_defaults: Vec<f32>,
+    /// One slot per control param, binding a dsp node's state value to its synth
+    /// param index, with the last value pushed via `set_control`.
+    params: Vec<ParamSlot>,
 }
 
-/// Derive, install and (re)spawn a synth per open head whose committed graph
-/// changed, and tear down synths for closed heads. Runs `.after(VmSet)`.
+/// Binds one synth control param to a dsp node's VM state value.
+struct ParamSlot {
+    /// The dsp node's path in the graph (where its value lives in VM state).
+    node_path: Vec<usize>,
+    /// The param's index within the synth.
+    index: usize,
+    /// The last value pushed via `set_control` (`None` until first applied).
+    last: Option<f32>,
+}
+
+/// Keep each open head's synth in sync, `.after(VmSet)`. Two passes per head:
+///
+/// - *Structural sync* (only when the head's committed graph changed): re-derive
+///   the synthdef and respawn the synth if its structure changed (else keep it).
+/// - *Param sync* (every frame): push each dsp node's live param value - read from
+///   VM node state - to the running synth via `set_control`, so value/automation
+///   edits (which no longer change the graph address) reach the audio thread
+///   without a respawn (preserving phase).
+///
+/// Also tears down synths for closed heads.
 fn drive_synths<N>(
     registry: Res<Registry<N>>,
     audio: Option<NonSendMut<AudioEngine>>,
     mut state: ResMut<HeadSynths>,
+    mut vms: NonSendMut<HeadVms>,
     heads: Query<(Entity, &HeadRef, &WorkingGraph<N>), With<OpenHead>>,
 ) where
     N: 'static + ToNodeDsp + Send + Sync,
@@ -112,71 +131,37 @@ fn drive_synths<N>(
             continue;
         };
 
-        // Unchanged committed graph: nothing to do.
-        if state.0.get(&entity).map(|h| h.graph) == Some(graph_ca) {
-            continue;
+        // --- Structural sync: only when the committed graph changed. ---
+        if state.0.get(&entity).map(|h| h.graph) != Some(graph_ca) {
+            structural_sync(
+                &mut audio.controller,
+                &mut state.0,
+                entity,
+                graph_ca,
+                &wg.0,
+                out_channels,
+            );
         }
 
-        let graph: &Graph<N> = &wg.0;
-        let Some(root) = find_output(graph) else {
-            // No `~out` in this head: tear down any synth it had.
-            teardown(&mut audio.controller, state.0.remove(&entity));
-            continue;
-        };
-
-        let def_name = format!("gantz-head-{}", entity.index());
-        let def = match derive_synthdef(graph, root, out_channels, def_name.clone()) {
-            Ok(def) => def,
-            Err(e) => {
-                log::error!("bevy_gantz_plyphon: synthdef derivation failed: {e:?}");
-                continue;
-            }
-        };
-        let sig = structural_sig(&def);
-        let param_defaults: Vec<f32> = def.params.iter().map(|p| p.default).collect();
-
-        let mut backend = Embedded::new(&mut audio.controller);
-
-        // Param-only change (same structure): `set_control` the changed values on
-        // the running synth - no respawn, so oscillator phase is preserved.
-        if let Some(prev) = state.0.get_mut(&entity) {
-            if prev.sig == sig {
-                for (i, (&old, &new)) in prev.param_defaults.iter().zip(&param_defaults).enumerate()
-                {
-                    if old.to_bits() != new.to_bits() {
-                        if let Err(e) = backend.set_control(prev.node_id, i, new) {
-                            log::error!("bevy_gantz_plyphon: set_control failed: {e:?}");
-                        }
+        // --- Param sync: push live state values to the synth every frame. ---
+        if let (Some(synth), Some(vm)) = (state.0.get_mut(&entity), vms.get_mut(&entity)) {
+            let node_id = synth.node_id;
+            let mut backend = Embedded::new(&mut audio.controller);
+            for slot in &mut synth.params {
+                let Some(value) = gantz_core::node::state::extract::<f64>(vm, &slot.node_path)
+                    .ok()
+                    .flatten()
+                    .map(|v| v as f32)
+                else {
+                    continue;
+                };
+                if slot.last.map(f32::to_bits) != Some(value.to_bits()) {
+                    if let Err(e) = backend.set_control(node_id, slot.index, value) {
+                        log::error!("bevy_gantz_plyphon: set_control failed: {e:?}");
                     }
+                    slot.last = Some(value);
                 }
-                prev.graph = graph_ca;
-                prev.param_defaults = param_defaults;
-                continue;
             }
-        }
-
-        // Structural change (or this head's first synth): respawn.
-        if let Some(prev) = state.0.get(&entity) {
-            let _ = backend.free_node(prev.node_id);
-        }
-        if let Err(e) = backend.install_synthdef(def) {
-            log::error!("bevy_gantz_plyphon: synthdef install failed: {e:?}");
-            continue;
-        }
-        match backend.spawn(&def_name) {
-            Ok(node_id) => {
-                state.0.insert(
-                    entity,
-                    HeadSynth {
-                        graph: graph_ca,
-                        def_name,
-                        node_id,
-                        sig,
-                        param_defaults,
-                    },
-                );
-            }
-            Err(e) => log::error!("bevy_gantz_plyphon: synth spawn failed: {e:?}"),
         }
     }
 
@@ -189,6 +174,78 @@ fn drive_synths<N>(
         .collect();
     for e in stale {
         teardown(&mut audio.controller, state.0.remove(&e));
+    }
+}
+
+/// Re-derive `entity`'s synthdef and respawn the synth if its *structure* changed
+/// (else keep the running synth, just recording the new graph address). Tears the
+/// synth down if the head no longer has a `~out`.
+fn structural_sync<N>(
+    controller: &mut Controller,
+    synths: &mut HashMap<Entity, HeadSynth>,
+    entity: Entity,
+    graph_ca: ca::GraphAddr,
+    graph: &Graph<N>,
+    out_channels: usize,
+) where
+    N: ToNodeDsp,
+{
+    let Some(root) = find_output(graph) else {
+        teardown(controller, synths.remove(&entity));
+        return;
+    };
+
+    let def_name = format!("gantz-head-{}", entity.index());
+    let derived = match derive_synthdef(graph, root, out_channels, def_name.clone()) {
+        Ok(derived) => derived,
+        Err(e) => {
+            log::error!("bevy_gantz_plyphon: synthdef derivation failed: {e:?}");
+            return;
+        }
+    };
+    let sig = structural_sig(&derived.def);
+
+    // Structure unchanged (e.g. a non-dsp edit changed the head address): keep the
+    // running synth + its param slots; just record the new graph address.
+    if synths.get(&entity).map(|s| s.sig) == Some(sig) {
+        if let Some(prev) = synths.get_mut(&entity) {
+            prev.graph = graph_ca;
+        }
+        return;
+    }
+
+    // Structural change (or this head's first synth): respawn.
+    let mut backend = Embedded::new(controller);
+    if let Some(prev) = synths.get(&entity) {
+        let _ = backend.free_node(prev.node_id);
+    }
+    if let Err(e) = backend.install_synthdef(derived.def) {
+        log::error!("bevy_gantz_plyphon: synthdef install failed: {e:?}");
+        return;
+    }
+    match backend.spawn(&def_name) {
+        Ok(node_id) => {
+            let params = derived
+                .params
+                .iter()
+                .map(|b| ParamSlot {
+                    node_path: b.node_path.clone(),
+                    index: b.index,
+                    last: None,
+                })
+                .collect();
+            synths.insert(
+                entity,
+                HeadSynth {
+                    graph: graph_ca,
+                    def_name,
+                    node_id,
+                    sig,
+                    params,
+                },
+            );
+        }
+        Err(e) => log::error!("bevy_gantz_plyphon: synth spawn failed: {e:?}"),
     }
 }
 

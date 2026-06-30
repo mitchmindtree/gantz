@@ -13,13 +13,23 @@ use gantz_core::compile::pull_eval_order;
 use gantz_core::node::Conns;
 use gantz_core::node::graph::{Graph, NodeIx};
 
-use crate::dsp::{DspBuilder, ToNodeDsp};
+use crate::dsp::{DspBuilder, ParamBinding, ToNodeDsp};
 
 /// An error deriving a synthdef from a graph.
 #[derive(Debug)]
 pub enum DeriveError {
     /// The given root node is not a [`NodeDsp`](crate::NodeDsp).
     RootNotDsp,
+}
+
+/// The output of [`derive_synthdef`]: the synthdef plus the [`ParamBinding`]s the
+/// audio driver uses to push each dsp node's live state value to the right synth
+/// param via `set_control`.
+pub struct Derived {
+    /// The compiled synth definition.
+    pub def: SynthDef,
+    /// One binding per control param, in param-index order.
+    pub params: Vec<ParamBinding>,
 }
 
 /// Derive a [`SynthDef`] named `name` from the DSP subgraph feeding `root` (a
@@ -39,7 +49,7 @@ pub fn derive_synthdef<N>(
     root: NodeIx,
     out_channels: usize,
     name: impl Into<String>,
-) -> Result<SynthDef, DeriveError>
+) -> Result<Derived, DeriveError>
 where
     N: ToNodeDsp,
 {
@@ -81,7 +91,8 @@ where
         outputs.insert(n, outs);
     }
 
-    Ok(builder.finish(name))
+    let (def, params) = builder.finish(name);
+    Ok(Derived { def, params })
 }
 
 /// A hash of a synthdef's *structure* - everything except parameter values.

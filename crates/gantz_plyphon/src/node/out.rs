@@ -1,7 +1,10 @@
 //! The `~out` audio-output sink node.
 
+use std::hash::{Hash, Hasher};
+
 use gantz_ca::CaHash;
-use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
+use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, RegCtx};
+use gantz_core::steel::SteelVal;
 use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
@@ -11,50 +14,79 @@ use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
-use crate::param::{DspParam, lag_row, param_name};
+use crate::param::{cahash_lag, param_name, param_row, plyphon_param};
 
 /// The audio output sink. Applies a master `gain` to its input and writes it to
 /// output bus 0, fanned across every output channel. The compiler roots a
 /// synthdef at this node.
 ///
-/// `gain` is a settable [`DspParam`] with a small default smoothing lag, so gain
-/// changes de-click without a respawn.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
+/// The `gain` *value* lives in the node's VM state (like `number`); only the
+/// smoothing `gain_lag` (structural; a small de-click by default) is in the weight.
+#[derive(Clone, Debug, Serialize, Deserialize, NodeTag)]
 pub struct Out {
-    #[serde(default = "default_gain")]
-    gain: DspParam,
+    #[serde(default = "default_gain_lag")]
+    gain_lag: f32,
 }
 
 impl Out {
-    /// The master output gain (linear amplitude).
-    pub fn gain(&self) -> f32 {
-        self.gain.value
+    /// The default master gain (linear amplitude) a fresh `~out` starts at.
+    pub const DEFAULT_GAIN: f32 = 0.2;
+
+    /// The gain smoothing lag in seconds (`0.0` = instant).
+    pub fn gain_lag(&self) -> f32 {
+        self.gain_lag
     }
 
-    /// Set the master output gain (content-address affecting).
-    pub fn set_gain(&mut self, gain: f32) {
-        self.gain.value = gain;
+    /// Set the gain smoothing lag in seconds (content-address affecting).
+    pub fn set_gain_lag(&mut self, lag: f32) {
+        self.gain_lag = lag;
     }
 }
 
 impl Default for Out {
     fn default() -> Self {
         Out {
-            gain: default_gain(),
+            gain_lag: default_gain_lag(),
         }
+    }
+}
+
+impl PartialEq for Out {
+    fn eq(&self, other: &Self) -> bool {
+        self.gain_lag.to_bits() == other.gain_lag.to_bits()
+    }
+}
+
+impl Eq for Out {}
+
+impl Hash for Out {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Hash::hash(&self.gain_lag.to_bits(), state);
     }
 }
 
 impl CaHash for Out {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
         hasher.update(b"gantz.plyphon.out");
-        self.gain.cahash(hasher);
+        cahash_lag(hasher, self.gain_lag);
     }
 }
 
 impl gantz_core::Node for Out {
     fn n_inputs(&self, _ctx: MetaCtx) -> usize {
         1
+    }
+
+    fn stateful(&self, _ctx: MetaCtx) -> bool {
+        true
+    }
+
+    fn register(&self, mut ctx: RegCtx<'_, '_>) {
+        let path = ctx.path();
+        gantz_core::node::state::init_value_if_absent(ctx.vm(), path, || {
+            SteelVal::NumV(Self::DEFAULT_GAIN as f64)
+        })
+        .unwrap()
     }
 
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
@@ -80,8 +112,12 @@ impl NodeDsp for Out {
     fn ugens(&self, path: &[usize], inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
         let sig = inputs.first().copied().unwrap_or(InputRef::Constant(0.0));
         // Apply master gain: sig * gain (BinaryOpUGen multiply, special_index 2).
-        // `gain` is a settable (smoothed) param so changes de-click in place.
-        let gain = b.push_param(self.gain.to_plyphon(param_name(path, "gain")));
+        // `gain` is a settable (smoothed) control param; the driver applies its
+        // live state value via `set_control`.
+        let gain = b.push_param(
+            path,
+            plyphon_param(param_name(path, "gain"), Self::DEFAULT_GAIN, self.gain_lag),
+        );
         let gained = b.push_unit(UnitSpec {
             name: "BinaryOpUGen".to_string(),
             rate: Rate::Audio,
@@ -118,35 +154,33 @@ impl NodeUi for Out {
     }
 
     fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
-        // The gain lives in the node weight, so an edit changes the content
-        // address: mark `changed` (the driver then set_controls it, no respawn).
-        let mut value = self.gain.value;
-        let mut edited = false;
-        let framed = uictx.framed(|ui, _sockets| {
-            let res = ui.add(
-                egui::DragValue::new(&mut value)
-                    .prefix("gain ")
-                    .range(0.0..=1.0)
-                    .speed(0.005),
-            );
-            edited = res.changed();
-            res
-        });
-        let mut resp = NodeUiResponse::new(framed);
-        if edited {
-            self.gain.value = value;
-            resp.mark_changed();
-        }
-        resp
+        // The body shows just the node name; params are edited in the inspector.
+        let framed =
+            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~out").selectable(false)));
+        NodeUiResponse::new(framed)
     }
 
     fn inspector_rows(
         &mut self,
-        _ctx: &mut NodeCtx,
+        ctx: &mut NodeCtx,
         body: &mut egui_extras::TableBody,
     ) -> InspectorRowsResponse {
         let mut resp = InspectorRowsResponse::default();
-        if lag_row(body, "gain lag", &mut self.gain) {
+        let mut value = ctx
+            .extract::<f64>()
+            .ok()
+            .flatten()
+            .unwrap_or(Self::DEFAULT_GAIN as f64) as f32;
+        let mut lag = self.gain_lag;
+        let dv = egui::DragValue::new(&mut value)
+            .range(0.0..=1.0)
+            .speed(0.005);
+        let (value_changed, lag_changed) = param_row(body, "gain", dv, &mut lag);
+        if value_changed {
+            let _ = ctx.update::<f64>(value as f64);
+        }
+        if lag_changed {
+            self.gain_lag = lag;
             resp.mark_changed();
         }
         resp
@@ -162,7 +196,7 @@ impl NodeUi for Out {
     }
 }
 
-fn default_gain() -> DspParam {
+fn default_gain_lag() -> f32 {
     // A short de-click lag on the master gain (per "lag the gain, not the freq").
-    DspParam::lagged(0.2, 0.01)
+    0.01
 }

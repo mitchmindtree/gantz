@@ -1,7 +1,10 @@
 //! The `~sine` sine-oscillator node.
 
+use std::hash::{Hash, Hasher};
+
 use gantz_ca::CaHash;
-use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
+use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, RegCtx};
+use gantz_core::steel::SteelVal;
 use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
@@ -11,43 +14,53 @@ use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
-use crate::param::{DspParam, lag_row, param_name};
+use crate::param::{cahash_lag, param_name, param_row, plyphon_param};
 
 /// A sine oscillator. Emits a single `SinOsc.ar(freq)` UGen.
 ///
-/// `freq` (Hz) lives in the node weight as a settable [`DspParam`]: editing the
-/// value changes the content address, and the audio driver applies value changes
-/// via `set_control` (no respawn). `freq` defaults to no smoothing (instant pitch).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
+/// The `freq` (Hz) *value* lives in the node's VM state (path-keyed, like
+/// `number`), so editing it does not churn the graph's content address; the audio
+/// driver applies value changes via `set_control`. Only the smoothing `freq_lag`
+/// (structural) lives in the node weight.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, NodeTag)]
 pub struct Sine {
-    #[serde(default = "default_freq")]
-    freq: DspParam,
+    #[serde(default)]
+    freq_lag: f32,
 }
 
 impl Sine {
-    /// The oscillator frequency in Hz.
-    pub fn freq(&self) -> f32 {
-        self.freq.value
+    /// The default frequency (Hz) a fresh `~sine` starts at.
+    pub const DEFAULT_FREQ: f32 = 220.0;
+
+    /// The frequency smoothing lag in seconds (`0.0` = instant).
+    pub fn freq_lag(&self) -> f32 {
+        self.freq_lag
     }
 
-    /// Set the oscillator frequency in Hz (content-address affecting).
-    pub fn set_freq(&mut self, freq: f32) {
-        self.freq.value = freq;
+    /// Set the frequency smoothing lag in seconds (content-address affecting).
+    pub fn set_freq_lag(&mut self, lag: f32) {
+        self.freq_lag = lag;
     }
 }
 
-impl Default for Sine {
-    fn default() -> Self {
-        Sine {
-            freq: default_freq(),
-        }
+impl PartialEq for Sine {
+    fn eq(&self, other: &Self) -> bool {
+        self.freq_lag.to_bits() == other.freq_lag.to_bits()
+    }
+}
+
+impl Eq for Sine {}
+
+impl Hash for Sine {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Hash::hash(&self.freq_lag.to_bits(), state);
     }
 }
 
 impl CaHash for Sine {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
         hasher.update(b"gantz.plyphon.sine");
-        self.freq.cahash(hasher);
+        cahash_lag(hasher, self.freq_lag);
     }
 }
 
@@ -56,9 +69,21 @@ impl gantz_core::Node for Sine {
         1
     }
 
+    fn stateful(&self, _ctx: MetaCtx) -> bool {
+        true
+    }
+
+    fn register(&self, mut ctx: RegCtx<'_, '_>) {
+        let path = ctx.path();
+        gantz_core::node::state::init_value_if_absent(ctx.vm(), path, || {
+            SteelVal::NumV(Self::DEFAULT_FREQ as f64)
+        })
+        .unwrap()
+    }
+
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
-        // Inert in the Steel (control-rate) world; the audio engine compiles
-        // this node instead. A single placeholder output keeps any incidental
+        // Inert in the Steel (control-rate) world; the audio engine reads this
+        // node's freq from state. A single placeholder output keeps any incidental
         // Steel reachability valid.
         gantz_core::node::parse_expr("0")
     }
@@ -70,9 +95,12 @@ impl NodeDsp for Sine {
     }
 
     fn ugens(&self, path: &[usize], _inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
-        // `freq` is a settable control param, so dialer/control edits become
-        // `set_control` on the running synth rather than a respawn.
-        let freq = b.push_param(self.freq.to_plyphon(param_name(path, "freq")));
+        // `freq` is a settable control param (a nominal default here; the driver
+        // applies the live state value via `set_control`).
+        let freq = b.push_param(
+            path,
+            plyphon_param(param_name(path, "freq"), Self::DEFAULT_FREQ, self.freq_lag),
+        );
         let unit = b.push_unit(UnitSpec::new(
             "SinOsc",
             Rate::Audio,
@@ -99,35 +127,36 @@ impl NodeUi for Sine {
     }
 
     fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
-        // The frequency lives in the node weight, so an edit changes the content
-        // address: mark `changed` (the driver then set_controls it, no respawn).
-        let mut value = self.freq.value;
-        let mut edited = false;
-        let framed = uictx.framed(|ui, _sockets| {
-            let res = ui.add(
-                egui::DragValue::new(&mut value)
-                    .suffix(" Hz")
-                    .range(0.0..=20_000.0)
-                    .speed(1.0),
-            );
-            edited = res.changed();
-            res
-        });
-        let mut resp = NodeUiResponse::new(framed);
-        if edited {
-            self.freq.value = value;
-            resp.mark_changed();
-        }
-        resp
+        // The body shows just the node name; params are edited in the inspector.
+        let framed =
+            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~sine").selectable(false)));
+        NodeUiResponse::new(framed)
     }
 
     fn inspector_rows(
         &mut self,
-        _ctx: &mut NodeCtx,
+        ctx: &mut NodeCtx,
         body: &mut egui_extras::TableBody,
     ) -> InspectorRowsResponse {
         let mut resp = InspectorRowsResponse::default();
-        if lag_row(body, "freq lag", &mut self.freq) {
+        // The value lives in VM state (a value edit must NOT change the content
+        // address); the lag lives in the weight (a lag edit is structural).
+        let mut value = ctx
+            .extract::<f64>()
+            .ok()
+            .flatten()
+            .unwrap_or(Self::DEFAULT_FREQ as f64) as f32;
+        let mut lag = self.freq_lag;
+        let dv = egui::DragValue::new(&mut value)
+            .range(0.0..=20_000.0)
+            .speed(1.0)
+            .suffix(" Hz");
+        let (value_changed, lag_changed) = param_row(body, "freq", dv, &mut lag);
+        if value_changed {
+            let _ = ctx.update::<f64>(value as f64);
+        }
+        if lag_changed {
+            self.freq_lag = lag;
             resp.mark_changed();
         }
         resp
@@ -141,8 +170,4 @@ impl NodeUi for Sine {
             SocketKind::Input => None,
         }
     }
-}
-
-fn default_freq() -> DspParam {
-    DspParam::new(220.0)
 }

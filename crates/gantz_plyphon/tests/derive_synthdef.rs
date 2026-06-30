@@ -28,39 +28,44 @@ impl ToNodeDsp for N {
     }
 }
 
-/// Build a `~sine(freq) -> ~out(gain)` graph, returning it with the `~out` index.
-fn sine_to_out(freq: f32, gain: f32) -> (Graph<N>, NodeIx) {
+/// Build a `~sine -> ~out` graph (default params), with the `~out` node index.
+fn sine_to_out() -> (Graph<N>, NodeIx) {
     let mut g = Graph::<N>::default();
-    let mut sine = Sine::default();
-    sine.set_freq(freq);
-    let mut out = Out::default();
-    out.set_gain(gain);
-    let s = g.add_node(N::Sine(sine));
-    let o = g.add_node(N::Out(out));
+    let s = g.add_node(N::Sine(Sine::default()));
+    let o = g.add_node(N::Out(Out::default()));
     g.add_edge(s, o, Edge::new(0.into(), 0.into()));
     (g, o)
 }
 
 #[test]
 fn derives_expected_units() {
-    let (g, out_ix) = sine_to_out(220.0, 0.2);
-    let def = derive_synthdef(&g, out_ix, 1, "test").expect("derive");
+    let (g, out_ix) = sine_to_out();
+    let derived = derive_synthdef(&g, out_ix, 1, "test").expect("derive");
+    let def = &derived.def;
 
     assert_eq!(def.units.len(), 3, "SinOsc + gain-mul + Out");
 
-    // Two settable control params: the sine's freq (param 0) and the out's gain
-    // (param 1) - so value edits become `set_control`, not respawns.
+    // Two settable control params - the sine's freq (param 0) and the out's gain
+    // (param 1) - each carrying the node's *nominal* default; the live value lives
+    // in node state and is applied via set_control.
     assert_eq!(def.params.len(), 2);
     assert!(def.params[0].name.ends_with("/freq"));
-    assert_eq!(def.params[0].default, 220.0);
+    assert_eq!(def.params[0].default, Sine::DEFAULT_FREQ);
     assert_eq!(def.params[0].lag, None, "freq is unsmoothed by default");
     assert!(def.params[1].name.ends_with("/gain"));
-    assert_eq!(def.params[1].default, 0.2);
+    assert_eq!(def.params[1].default, Out::DEFAULT_GAIN);
     assert_eq!(
         def.params[1].lag,
         Some(0.01),
         "gain has a default de-click lag"
     );
+
+    // Bindings map each param back to its dsp node (sine at [0], out at [1]).
+    assert_eq!(derived.params.len(), 2);
+    assert_eq!(derived.params[0].node_path, vec![0]);
+    assert_eq!(derived.params[0].index, 0);
+    assert_eq!(derived.params[1].node_path, vec![1]);
+    assert_eq!(derived.params[1].index, 1);
 
     // unit 0: SinOsc.ar(freq-param, 0)
     assert_eq!(def.units[0].name, "SinOsc");
@@ -86,33 +91,48 @@ fn derives_expected_units() {
 }
 
 #[test]
-fn structural_sig_stable_across_value_changes() {
-    // A value change keeps the structural signature (so the driver `set_control`s
-    // rather than respawning).
-    let (g220, out220) = sine_to_out(220.0, 0.2);
-    let (g440, out440) = sine_to_out(440.0, 0.2);
-    let d220 = derive_synthdef(&g220, out220, 1, "t").expect("derive");
-    let d440 = derive_synthdef(&g440, out440, 1, "t").expect("derive");
-    assert_eq!(
-        structural_sig(&d220),
-        structural_sig(&d440),
-        "a param value change must not change the structural signature",
-    );
+fn lag_change_changes_structural_sig() {
+    // The param *value* is no longer in the synthdef (it lives in node state), so a
+    // value change cannot alter the def. The *lag* is structural, so it does.
+    let (g, out_ix) = sine_to_out();
+    let base = derive_synthdef(&g, out_ix, 1, "t").expect("derive").def;
 
-    // A lag change is structural (it is baked into the synthdef), so it does.
-    let mut lagged = d220.clone();
-    lagged.params[0].lag = Some(0.5);
+    let mut g2 = Graph::<N>::default();
+    let mut lagged_sine = Sine::default();
+    lagged_sine.set_freq_lag(0.5);
+    let s = g2.add_node(N::Sine(lagged_sine));
+    let o = g2.add_node(N::Out(Out::default()));
+    g2.add_edge(s, o, Edge::new(0.into(), 0.into()));
+    let lagged = derive_synthdef(&g2, o, 1, "t").expect("derive").def;
+
     assert_ne!(
-        structural_sig(&d220),
+        structural_sig(&base),
         structural_sig(&lagged),
-        "a param lag change must change the structural signature",
+        "a freq lag change must change the structural signature",
+    );
+}
+
+#[test]
+fn lag_is_part_of_node_identity() {
+    use gantz_ca::content_addr;
+    assert_eq!(
+        content_addr(&Sine::default()),
+        content_addr(&Sine::default()),
+        "identical nodes share a content address",
+    );
+    let mut lagged = Sine::default();
+    lagged.set_freq_lag(0.5);
+    assert_ne!(
+        content_addr(&Sine::default()),
+        content_addr(&lagged),
+        "the freq lag is part of the node's content address",
     );
 }
 
 #[test]
 fn fans_output_across_channels() {
-    let (g, out_ix) = sine_to_out(220.0, 0.2);
-    let def = derive_synthdef(&g, out_ix, 2, "test").expect("derive");
+    let (g, out_ix) = sine_to_out();
+    let def = derive_synthdef(&g, out_ix, 2, "test").expect("derive").def;
     // `Out` gets the bus index followed by one signal input per channel.
     assert_eq!(def.units[2].name, "Out");
     assert_eq!(def.units[2].inputs.len(), 1 + 2);
@@ -164,8 +184,8 @@ fn render(world: &mut World, frames: usize) -> Vec<f32> {
 
 #[test]
 fn derived_synth_plays_expected_tone() {
-    let (g, out_ix) = sine_to_out(220.0, 0.2);
-    let def = derive_synthdef(&g, out_ix, 1, "test").expect("derive");
+    let (g, out_ix) = sine_to_out();
+    let def = derive_synthdef(&g, out_ix, 1, "test").expect("derive").def;
 
     let (mut controller, _nrt, mut world) = engine(Options {
         sample_rate: SR as f64,
@@ -177,7 +197,8 @@ fn derived_synth_plays_expected_tone() {
         .synth_new("test", ROOT_GROUP_ID, AddAction::Tail)
         .expect("synth_new");
 
-    // Render ~0.5 s and confirm a 220 Hz tone at the configured 0.2 gain.
+    // The freq/gain params default to the nodes' nominal defaults (220 Hz, 0.2), so
+    // the synth plays a 220 Hz tone with no set_control.
     let a = render(&mut world, SR as usize / 2);
     assert!(
         a.iter().any(|s| s.abs() > 0.1),

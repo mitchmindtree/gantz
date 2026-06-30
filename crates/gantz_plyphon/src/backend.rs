@@ -5,7 +5,7 @@
 //! OSC for a networked scsynth/plyphon - the compiler and nodes are unaffected.
 
 use plyphon::synthdef::SynthDef;
-use plyphon::{AddAction, Controller, ROOT_GROUP_ID};
+use plyphon::{AddAction, CommandTime, Controller, ROOT_GROUP_ID};
 
 /// A sink for installing synthdefs and controlling synths, abstracting over an
 /// in-process engine ([`Embedded`]) or, in future, a networked one.
@@ -18,8 +18,25 @@ pub trait Backend {
     fn spawn(&mut self, def_name: &str) -> Result<i32, BackendError>;
     /// Free a running synth (or group) by node id.
     fn free_node(&mut self, node: i32) -> Result<(), BackendError>;
-    /// Set control parameter `param` (by index) of `node` to `value`.
+    /// Set control parameter `param` (by index) of `node` to `value`, immediately.
     fn set_control(&mut self, node: i32, param: usize, value: f32) -> Result<(), BackendError>;
+
+    /// Set control parameter `param` of `node` to `value`, scheduled to take effect
+    /// at the absolute OSC/NTP time `time_osc` on the engine's clock timeline.
+    ///
+    /// This is how timestamped control automation (e.g. a `tick!`-driven chain)
+    /// lands sample-accurately. The default applies it immediately; a backend with
+    /// a scheduling clock (like [`Embedded`]) overrides it.
+    fn set_control_at(
+        &mut self,
+        node: i32,
+        param: usize,
+        value: f32,
+        time_osc: u64,
+    ) -> Result<(), BackendError> {
+        let _ = time_osc;
+        self.set_control(node, param, value)
+    }
 }
 
 /// An error issuing a command to a [`Backend`].
@@ -75,5 +92,24 @@ impl Backend for Embedded<'_> {
         self.controller
             .set_control(node, param, value)
             .map_err(|_| BackendError::QueueFull)
+    }
+
+    fn set_control_at(
+        &mut self,
+        node: i32,
+        param: usize,
+        value: f32,
+        time_osc: u64,
+    ) -> Result<(), BackendError> {
+        // Open a scheduling window for this one command, then restore immediate
+        // mode. `set_control` pushes to the RT ring tagged with the window's time;
+        // the World holds it until `time_osc` arrives, resolving it to a sample.
+        self.controller.begin_scheduled(CommandTime::At(time_osc));
+        let res = self
+            .controller
+            .set_control(node, param, value)
+            .map_err(|_| BackendError::QueueFull);
+        self.controller.end_scheduled();
+        res
     }
 }

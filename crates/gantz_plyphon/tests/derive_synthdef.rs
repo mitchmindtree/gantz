@@ -5,7 +5,8 @@
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::{Graph, NodeIx};
 use gantz_plyphon::{
-    DeriveError, Lag, NodeDsp, Out, Sine, ToNodeDsp, derive_synthdef, structural_sig,
+    Backend, DeriveError, Embedded, Lag, NodeDsp, Out, Sine, ToNodeDsp, derive_synthdef,
+    structural_sig,
 };
 use plyphon::synthdef::InputRef;
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, World, engine};
@@ -254,5 +255,68 @@ fn derived_synth_plays_expected_tone() {
     assert!(
         m220 > 5.0 * m440,
         "expected 220 Hz dominant: m220={m220}, m440={m440}"
+    );
+}
+
+/// A control change scheduled via [`Embedded::set_control_at`] takes effect at its
+/// scheduled time (not immediately): a freq change to 440 Hz scheduled for 0.25 s
+/// leaves the first quarter-second at 220 Hz and the rest at 440 Hz. This guards the
+/// `begin_scheduled`/`set_control`/`end_scheduled` wrapper and the `fill_at` clock.
+#[test]
+fn scheduled_control_change_takes_effect_at_its_time() {
+    /// OSC/NTP fixed-point units per second (32.32 fixed point: 2^32).
+    const OSC_UNITS_PER_SEC: f64 = 4_294_967_296.0;
+    const BLOCK: usize = 64;
+
+    let (g, out_ix) = sine_to_out();
+    let derived = derive_synthdef(&g, out_ix, 1, "test").expect("derive");
+    // The sine's freq param (the node at path `[0]`) and its index within the synth.
+    let freq_index = derived
+        .params
+        .iter()
+        .find(|b| b.node_path == [0])
+        .expect("freq binding")
+        .index;
+
+    let (mut controller, _nrt, mut world) = engine(Options {
+        sample_rate: SR as f64,
+        output_channels: 1,
+        ..Options::default()
+    });
+    controller.add_synthdef(derived.def);
+    let node = controller
+        .synth_new("test", ROOT_GROUP_ID, AddAction::Tail)
+        .expect("synth_new");
+
+    // Schedule freq -> 440 Hz at 0.25 s on the engine's OSC clock.
+    let osc = |secs: f64| (secs * OSC_UNITS_PER_SEC) as u64;
+    let switch_secs = 0.25;
+    Embedded::new(&mut controller)
+        .set_control_at(node, freq_index, 440.0, osc(switch_secs))
+        .expect("schedule freq change");
+
+    // Render 0.5 s in nominal blocks, anchoring the engine clock to each block's
+    // nominal OSC time (the clock starts at 0 and advances by `inc` per block).
+    let inc = (BLOCK as f64 * OSC_UNITS_PER_SEC / SR as f64) as u64;
+    let total = (SR as usize / 2 / BLOCK) * BLOCK;
+    let mut out = vec![0.0f32; total];
+    for (n, block) in out.chunks_mut(BLOCK).enumerate() {
+        world.fill_at(block, 1, n as u64 * inc);
+    }
+
+    // Before the switch: still 220 Hz (so it was scheduled, not applied at once).
+    let switch = (switch_secs * SR as f64) as usize;
+    let before = &out[..switch];
+    let (b220, b440) = (goertzel(before, 220.0), goertzel(before, 440.0));
+    assert!(
+        b220 > 4.0 * b440,
+        "expected 220 Hz before the scheduled switch: m220={b220}, m440={b440}",
+    );
+    // After the switch (skipping the boundary block): now 440 Hz.
+    let after = &out[switch + BLOCK..];
+    let (a220, a440) = (goertzel(after, 220.0), goertzel(after, 440.0));
+    assert!(
+        a440 > 4.0 * a220,
+        "expected 440 Hz after the scheduled switch: m220={a220}, m440={a440}",
     );
 }

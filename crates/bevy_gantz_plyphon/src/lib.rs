@@ -1,16 +1,18 @@
 //! Bevy + plyphon audio runtime for gantz.
 //!
 //! [`PlyphonPlugin`] owns the audio engine: at startup it opens a cpal output
-//! stream (its own audio thread, running [`plyphon::World::fill`]) and keeps the
-//! [`plyphon::Controller`] + [`plyphon::Nrt`] handles. Each update, after
-//! [`bevy_gantz::VmSet`], it derives a synthdef from each open head's DSP
-//! subgraph (rooted at its `~out` node) and installs/respawns the synth via the
-//! [`gantz_plyphon::Backend`] seam whenever the head's committed graph changes.
+//! stream (its own audio thread, running [`plyphon::World::fill_at`] so the engine
+//! clock is anchored to the host) and keeps the [`plyphon::Controller`] +
+//! [`plyphon::Nrt`] handles. Each update, after [`bevy_gantz::VmSet`], it derives a
+//! synthdef from each open head's DSP subgraph (rooted at its `~out` node) and
+//! installs/respawns the synth via the [`gantz_plyphon::Backend`] seam whenever the
+//! head's committed graph changes.
 //!
 //! Mixing across heads is free: every head's `~out` synth writes to output bus 0,
 //! and plyphon sums all synths on that bus.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
@@ -24,7 +26,21 @@ use gantz_plyphon::{Backend, Embedded, ToNodeDsp, derive_synthdef, structural_si
 use plyphon::{Controller, Nrt, Options, World, engine};
 
 use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
-use bevy_gantz::{Registry, VmSet};
+use bevy_gantz::{EntrypointSet, EvalEpoch, Registry, VmSet};
+
+/// OSC/NTP fixed-point units per second (OSC time is 32.32 fixed point: 2^32).
+const OSC_UNITS_PER_SEC: f64 = 4_294_967_296.0;
+
+/// How far ahead of the audio clock a timestamped control update is scheduled, so
+/// it lands in the audio future and plays sample-accurately. Must exceed output
+/// latency + frame jitter, or a schedule lands behind the clock and degrades to
+/// block-immediate (still correct, just not sample-accurate). 50 ms is balanced.
+const SCHED_LEAD: Duration = Duration::from_millis(50);
+
+/// Convert monotonic [`EvalEpoch`] seconds to an absolute OSC/NTP engine-clock time.
+fn osc(secs: f64) -> u64 {
+    (secs * OSC_UNITS_PER_SEC) as u64
+}
 
 /// Plugin wiring plyphon audio into a gantz bevy app.
 ///
@@ -43,7 +59,11 @@ where
     N: 'static + ToNodeDsp + Send + Sync,
 {
     fn build(&self, app: &mut App) {
-        match build_audio_engine() {
+        // The shared monotonic epoch (set by `GantzPlugin`, added before this) is
+        // the audio clock's time base; the cpal callback anchors the engine clock
+        // to it via `fill_at`, matching the firing times queued into `%args`.
+        let epoch = *app.world().resource::<EvalEpoch>();
+        match build_audio_engine(epoch) {
             Some(engine) => {
                 app.insert_non_send(engine);
             }
@@ -51,8 +71,11 @@ where
                 "bevy_gantz_plyphon: no audio output device; `~out` nodes will be silent"
             ),
         }
+        // `.after(EntrypointSet)`: run once the `tick!`/`update!` drivers' triggered
+        // evaluations have flushed, so the control values they queue are visible to
+        // the param drain below in the same frame.
         app.init_resource::<HeadSynths>()
-            .add_systems(Update, drive_synths::<N>.after(VmSet));
+            .add_systems(Update, drive_synths::<N>.after(VmSet).after(EntrypointSet));
     }
 }
 
@@ -94,14 +117,17 @@ struct ParamSlot {
     last: Option<f32>,
 }
 
-/// Keep each open head's synth in sync, `.after(VmSet)`. Two passes per head:
+/// Keep each open head's synth in sync, `.after(VmSet)` and `.after(EntrypointSet)`.
+/// Two passes per head:
 ///
 /// - *Structural sync* (only when the head's committed graph changed): re-derive
 ///   the synthdef and respawn the synth if its structure changed (else keep it).
-/// - *Param sync* (every frame): push each dsp node's live param value - read from
-///   VM node state - to the running synth via `set_control`, so value/automation
-///   edits (which no longer change the graph address) reach the audio thread
-///   without a respawn (preserving phase).
+/// - *Param sync* (every frame): drain each dsp param's queued `(time, value)`
+///   control updates from VM state and *schedule* them on the running synth at
+///   `time + SCHED_LEAD` via [`Backend::set_control_at`], so automation plays
+///   sample-accurately; a direct inspector edit (no queue) is applied immediately.
+///   Either way the synth is not respawned (preserving phase), and value/automation
+///   edits no longer change the graph address.
 ///
 /// Also tears down synths for closed heads.
 fn drive_synths<N>(
@@ -143,22 +169,39 @@ fn drive_synths<N>(
             );
         }
 
-        // --- Param sync: push live state values to the synth every frame. ---
+        // --- Param sync: drain each param's queued control updates and schedule
+        // them ahead of the audio clock; direct (untimestamped) value edits apply
+        // immediately. ---
         if let (Some(synth), Some(vm)) = (state.0.get_mut(&entity), vms.get_mut(&entity)) {
             let node_id = synth.node_id;
             let mut backend = Embedded::new(&mut audio.controller);
             for slot in &mut synth.params {
-                let Some(value) = gantz_core::node::state::extract::<f64>(vm, &slot.node_path)
-                    .ok()
-                    .flatten()
-                    .map(|v| v as f32)
+                let Some((value, pending)) = gantz_plyphon::param::drain_param(vm, &slot.node_path)
                 else {
                     continue;
                 };
-                if slot.last.map(f32::to_bits) != Some(value.to_bits()) {
-                    if let Err(e) = backend.set_control(node_id, slot.index, value) {
-                        log::error!("bevy_gantz_plyphon: set_control failed: {e:?}");
+                let value = value as f32;
+                if pending.is_empty() {
+                    // No automation this frame: apply a direct inspector edit
+                    // immediately, only when the value actually changed.
+                    if slot.last.map(f32::to_bits) != Some(value.to_bits()) {
+                        if let Err(e) = backend.set_control(node_id, slot.index, value) {
+                            log::error!("bevy_gantz_plyphon: set_control failed: {e:?}");
+                        }
+                        slot.last = Some(value);
                     }
+                } else {
+                    // Timestamped automation: schedule each update at its own time
+                    // plus the lead, preserving the inter-tick spacing.
+                    for (t, v) in pending {
+                        let when = osc(t + SCHED_LEAD.as_secs_f64());
+                        if let Err(e) = backend.set_control_at(node_id, slot.index, v as f32, when)
+                        {
+                            log::error!("bevy_gantz_plyphon: set_control_at failed: {e:?}");
+                        }
+                    }
+                    // The latest queued value is now current; record it so a later
+                    // immediate pass doesn't resend it.
                     slot.last = Some(value);
                 }
             }
@@ -269,8 +312,9 @@ fn teardown(controller: &mut Controller, synth: Option<HeadSynth>) {
 }
 
 /// Build the plyphon engine + cpal output stream from the default output device.
-/// Returns `None` (and the app runs silently) if no device is available.
-fn build_audio_engine() -> Option<AudioEngine> {
+/// Returns `None` (and the app runs silently) if no device is available. `epoch`
+/// is the shared monotonic clock the callback anchors the engine clock to.
+fn build_audio_engine(epoch: EvalEpoch) -> Option<AudioEngine> {
     let host = cpal::default_host();
     let device = host.default_output_device()?;
     let supported = device.default_output_config().ok()?;
@@ -285,7 +329,7 @@ fn build_audio_engine() -> Option<AudioEngine> {
         ..Options::default()
     });
 
-    let stream = build_stream(&device, config, channels, sample_format, world)?;
+    let stream = build_stream(&device, config, channels, sample_format, world, epoch)?;
     stream.play().ok()?;
 
     Some(AudioEngine {
@@ -304,11 +348,12 @@ fn build_stream(
     channels: usize,
     format: cpal::SampleFormat,
     world: World,
+    epoch: EvalEpoch,
 ) -> Option<cpal::Stream> {
     match format {
-        cpal::SampleFormat::F32 => build_typed::<f32>(device, config, channels, world),
-        cpal::SampleFormat::I16 => build_typed::<i16>(device, config, channels, world),
-        cpal::SampleFormat::U16 => build_typed::<u16>(device, config, channels, world),
+        cpal::SampleFormat::F32 => build_typed::<f32>(device, config, channels, world, epoch),
+        cpal::SampleFormat::I16 => build_typed::<i16>(device, config, channels, world, epoch),
+        cpal::SampleFormat::U16 => build_typed::<u16>(device, config, channels, world, epoch),
         other => {
             log::error!("bevy_gantz_plyphon: unsupported sample format {other:?}");
             None
@@ -323,6 +368,7 @@ fn build_typed<T>(
     config: cpal::StreamConfig,
     channels: usize,
     mut world: World,
+    epoch: EvalEpoch,
 ) -> Option<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
@@ -332,10 +378,17 @@ where
     device
         .build_output_stream(
             config,
-            move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
+            move |output: &mut [T], info: &cpal::OutputCallbackInfo| {
                 scratch.clear();
                 scratch.resize(output.len(), 0.0);
-                world.fill(&mut scratch, channels);
+                // Anchor the engine clock to this buffer's heard-time on the shared
+                // monotonic epoch (`now` + the callback-to-playback latency), so
+                // scheduled control updates resolve to the right sample even as the
+                // audio device clock drifts against the epoch.
+                let ts = info.timestamp();
+                let ahead = ts.playback.duration_since(ts.callback).as_secs_f64();
+                let buffer_time = osc(epoch.now_secs() + ahead);
+                world.fill_at(&mut scratch, channels, buffer_time);
                 for (o, s) in output.iter_mut().zip(scratch.iter()) {
                     *o = T::from_sample(*s);
                 }

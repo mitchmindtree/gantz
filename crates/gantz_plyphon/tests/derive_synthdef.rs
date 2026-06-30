@@ -181,6 +181,26 @@ fn lag_node_wired_into_chain() {
 }
 
 #[test]
+fn control_edge_on_root_does_not_panic() {
+    // Connecting a non-DSP control source to `~out`'s gain (input index 1, beyond
+    // its single dsp input) must not panic the synthdef derivation: the pull is
+    // seeded over only the dsp inputs, so the control edge falls outside the eval
+    // conns and is simply ignored. Regression for the `eval_neighbors` unwrap.
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::Sine(Sine::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    let ctrl = g.add_node(N::Other);
+    g.add_edge(s, o, Edge::new(0.into(), 0.into())); // audio -> ~out input 0
+    g.add_edge(ctrl, o, Edge::new(0.into(), 1.into())); // control -> ~out gain (input 1)
+
+    let derived = derive_synthdef(&g, o, 1, "t").expect("derive must not panic");
+    // The control source is filtered out; the dsp graph is still SinOsc + mul + Out.
+    assert_eq!(derived.def.units.len(), 3, "SinOsc + gain-mul + Out");
+    assert_eq!(derived.def.units[0].name, "SinOsc");
+    assert_eq!(derived.def.units[2].name, "Out");
+}
+
+#[test]
 fn non_dsp_root_is_rejected() {
     let mut g = Graph::<N>::default();
     let root = g.add_node(N::Other);

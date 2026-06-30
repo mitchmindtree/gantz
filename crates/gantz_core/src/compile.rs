@@ -151,7 +151,12 @@ where
     for e_ref in g.edges_directed(n, petgraph::Outgoing) {
         for edge in e_ref.weight().edges() {
             let conn_ix = src_conn(&edge);
-            let include = conns.get(conn_ix).unwrap();
+            // An edge to a connection index not represented in `conns` is not part
+            // of this eval configuration, so exclude it. This happens when pulling
+            // over only a subset of a node's inputs - e.g. `derive_synthdef` seeds
+            // the pull with just a DSP node's dsp inputs, so a control input at a
+            // higher index falls outside `conns` and must not be traversed.
+            let include = conns.get(conn_ix).unwrap_or(false);
             if include {
                 set.insert(e_ref.target());
             }

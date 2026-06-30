@@ -57,8 +57,11 @@ where
         return Err(DeriveError::RootNotDsp);
     };
 
-    // Pull from the root over all its inputs, in gantz_core's eval order, keeping
-    // only DSP nodes (non-DSP control sources are filtered out).
+    // Pull from the root over only its *dsp* inputs, in gantz_core's eval order,
+    // keeping only DSP nodes. Seeding with `n_dsp_inputs` (not `n_inputs`) means a
+    // control edge at a higher input index (e.g. `~out`'s gain) falls outside
+    // `conns` and is ignored by the pull traversal - it is a Steel/state concern,
+    // applied via `set_control`, not part of the dsp signal graph.
     let conns = Conns::connected(root_dsp.n_dsp_inputs()).expect("n_dsp_inputs within Conns::MAX");
     let order: Vec<NodeIx> = pull_eval_order(graph, root, conns)
         .filter(|&n| graph[n].to_node_dsp().is_some())

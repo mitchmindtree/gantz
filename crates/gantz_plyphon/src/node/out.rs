@@ -4,7 +4,6 @@ use std::hash::{Hash, Hasher};
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, RegCtx};
-use gantz_core::steel::SteelVal;
 use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
@@ -14,7 +13,10 @@ use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
-use crate::param::{cahash_lag, control_input_expr, param_name, param_row, plyphon_param};
+use crate::param::{
+    cahash_lag, control_input_expr, param_name, param_row, param_state, param_value, plyphon_param,
+    with_value,
+};
 
 /// The audio output sink. Applies a master `gain` to its input and writes it to
 /// output bus 0, fanned across every output channel. The compiler roots a
@@ -85,7 +87,7 @@ impl gantz_core::Node for Out {
     fn register(&self, mut ctx: RegCtx<'_, '_>) {
         let path = ctx.path();
         gantz_core::node::state::init_value_if_absent(ctx.vm(), path, || {
-            SteelVal::NumV(Self::DEFAULT_GAIN as f64)
+            param_state(Self::DEFAULT_GAIN as f64)
         })
         .unwrap()
     }
@@ -168,10 +170,10 @@ impl NodeUi for Out {
         body: &mut egui_extras::TableBody,
     ) -> InspectorRowsResponse {
         let mut resp = InspectorRowsResponse::default();
-        let mut value = ctx
-            .extract::<f64>()
-            .ok()
-            .flatten()
+        let state = ctx.extract_value().ok().flatten();
+        let mut value = state
+            .as_ref()
+            .and_then(param_value)
             .unwrap_or(Self::DEFAULT_GAIN as f64) as f32;
         let mut lag = self.gain_lag;
         let dv = egui::DragValue::new(&mut value)
@@ -179,7 +181,9 @@ impl NodeUi for Out {
             .speed(0.005);
         let (value_changed, lag_changed) = param_row(body, "gain", dv, &mut lag);
         if value_changed {
-            let _ = ctx.update::<f64>(value as f64);
+            // Preserve any queued `pending` updates; only the value changes.
+            let prev = state.unwrap_or_else(|| param_state(Self::DEFAULT_GAIN as f64));
+            let _ = ctx.update_value(with_value(prev, value as f64));
         }
         if lag_changed {
             self.gain_lag = lag;

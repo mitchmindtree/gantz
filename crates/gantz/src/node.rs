@@ -393,7 +393,9 @@ mod tests {
         let (mut vm, _compiled) =
             gantz_core::vm::init(&get_node, &g, &eps, &config).expect("compile number -> ~sine");
 
-        // Set the number's value, then fire its push entrypoint.
+        // Stamp the firing time the queued control update should carry, set the
+        // number's value, then fire its push entrypoint.
+        vm.update_value(gantz_core::ARGS, gantz_core::args::time(1.25));
         gantz_core::node::state::update_value(&mut vm, &[num.index()], SteelVal::NumV(440.0))
             .expect("set number state");
         let ep = eps
@@ -406,13 +408,15 @@ mod tests {
         vm.call_function_by_name_with_args(&entry_fn_name(&ep.id()), vec![])
             .expect("push number");
 
-        // The control value landed in ~sine's freq state.
-        let freq = gantz_core::node::state::extract::<f64>(&vm, &[sine.index()])
-            .expect("extract ~sine state")
-            .expect("~sine state present");
+        // The control value landed in ~sine's freq param: the current value is
+        // updated, and the timestamped update is queued for the audio driver.
+        let (value, pending) = gantz_plyphon::param::drain_param(&mut vm, &[sine.index()])
+            .expect("~sine param state present");
+        assert_eq!(value, 440.0, "control input must update the param value");
         assert_eq!(
-            freq, 440.0,
-            "control input must write the dsp node's freq state",
+            pending,
+            vec![(1.25, 440.0)],
+            "control input must queue (time, value) for sample-accurate scheduling",
         );
     }
 

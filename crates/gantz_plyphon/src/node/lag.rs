@@ -2,7 +2,6 @@
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, RegCtx};
-use gantz_core::steel::SteelVal;
 use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
@@ -12,7 +11,7 @@ use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
-use crate::param::{param_name, plyphon_param, value_row};
+use crate::param::{param_name, param_state, param_value, plyphon_param, value_row, with_value};
 
 /// A one-pole lag (smoother). Emits a `Lag.ar(in, lagTime)` UGen that smooths its
 /// input signal over the `lag` duration.
@@ -52,7 +51,7 @@ impl gantz_core::Node for Lag {
     fn register(&self, mut ctx: RegCtx<'_, '_>) {
         let path = ctx.path();
         gantz_core::node::state::init_value_if_absent(ctx.vm(), path, || {
-            SteelVal::NumV(Self::DEFAULT_DUR as f64)
+            param_state(Self::DEFAULT_DUR as f64)
         })
         .unwrap()
     }
@@ -120,10 +119,10 @@ impl NodeUi for Lag {
     ) -> InspectorRowsResponse {
         // The lag duration lives in VM state (a value edit must NOT change the
         // content address), shown as a single duration row.
-        let mut value = ctx
-            .extract::<f64>()
-            .ok()
-            .flatten()
+        let state = ctx.extract_value().ok().flatten();
+        let mut value = state
+            .as_ref()
+            .and_then(param_value)
             .unwrap_or(Self::DEFAULT_DUR as f64) as f32;
         let dv = egui::DragValue::new(&mut value)
             .range(0.0..=10.0)
@@ -131,7 +130,8 @@ impl NodeUi for Lag {
             .fixed_decimals(3)
             .suffix(" s");
         if value_row(body, "lag", dv) {
-            let _ = ctx.update::<f64>(value as f64);
+            let prev = state.unwrap_or_else(|| param_state(Self::DEFAULT_DUR as f64));
+            let _ = ctx.update_value(with_value(prev, value as f64));
         }
         InspectorRowsResponse::default()
     }

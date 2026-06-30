@@ -6,8 +6,13 @@ resolver = "3"
 authors = ["nannou-org"]
 edition = "2024"
 homepage = "https://github.com/nannou-org/gantz"
-license = "Apache-2.0"
 repository = "https://github.com/nannou-org/gantz"
+# NOTE: no `license` here on purpose - each crate must declare its own `license`
+# explicitly. This repo is multi-license: the pure-library crates are
+# `MIT OR Apache-2.0`, while the plyphon-linked crates (`gantz_plyphon`,
+# `bevy_gantz_plyphon`) and the `gantz` app are `GPL-3.0-or-later` (plyphon is
+# GPL). Requiring an explicit per-crate license avoids silently mis-licensing a
+# newly added crate.
 
 [workspace.dependencies]
 async-channel = "2.5"

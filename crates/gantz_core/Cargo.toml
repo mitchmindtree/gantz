@@ -5,7 +5,7 @@ description = "The core types and traits for gantz, an environment for creative 
 edition.workspace = true
 authors.workspace = true
 homepage.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 [dependencies]

@@ -5,7 +5,7 @@ description = "A standard library of commonly useful nodes for gantz, an environ
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 [dependencies]

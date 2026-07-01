@@ -8,7 +8,9 @@
 pub use lag::Lag;
 pub use out::Out;
 pub use sine::Sine;
+pub use tap::Tap;
 
 pub mod lag;
 pub mod out;
 pub mod sine;
+pub mod tap;

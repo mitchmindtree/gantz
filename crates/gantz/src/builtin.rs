@@ -144,6 +144,9 @@ fn primitives() -> Primitives {
     register_primitive(&mut p, "~lag", || {
         Box::new(gantz_plyphon::Lag::default()) as Box<_>
     });
+    register_primitive(&mut p, "~tap", || {
+        Box::new(gantz_plyphon::Tap::default()) as Box<_>
+    });
     p
 }
 

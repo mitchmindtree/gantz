@@ -5,7 +5,7 @@
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    Backend, DeriveError, Embedded, Lag, NodeDsp, Out, Sine, ToNodeDsp, derive_synthdef,
+    Backend, DeriveError, Embedded, Lag, NodeDsp, Out, Sine, Tap, ToNodeDsp, derive_synthdef,
     structural_sig,
 };
 use plyphon::synthdef::InputRef;
@@ -19,6 +19,7 @@ enum N {
     Sine(Sine),
     Lag(Lag),
     Out(Out),
+    Tap(Tap),
     Other,
 }
 
@@ -28,6 +29,7 @@ impl ToNodeDsp for N {
             N::Sine(s) => Some(s),
             N::Lag(l) => Some(l),
             N::Out(o) => Some(o),
+            N::Tap(t) => Some(t),
             N::Other => None,
         }
     }
@@ -210,6 +212,116 @@ fn graph_without_sink_is_rejected() {
         derive_synthdef(&g, 1, "nope"),
         Err(DeriveError::NoSink)
     ));
+}
+
+#[test]
+fn tap_joins_output_in_one_def() {
+    // `~sine -> ~out` and `~sine -> ~tap`: the tap is a second sink that shares the
+    // sine's chain, so one synthdef carries SinOsc, Out, Impulse and SendTrig, with
+    // a single monitor binding at the tap's node path - and the shared SinOsc is
+    // emitted only once.
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::Sine(Sine::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    let t = g.add_node(N::Tap(Tap::default()));
+    g.add_edge(s, o, Edge::new(0.into(), 0.into())); // sine -> ~out (audio)
+    g.add_edge(s, t, Edge::new(0.into(), 0.into())); // sine -> ~tap (dsp input 0)
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let names: Vec<&str> = derived.def.units.iter().map(|u| u.name.as_str()).collect();
+    assert!(names.contains(&"SinOsc"), "units: {names:?}");
+    assert!(names.contains(&"Out"), "units: {names:?}");
+    assert!(names.contains(&"Impulse"), "units: {names:?}");
+    assert!(names.contains(&"SendTrig"), "units: {names:?}");
+    assert_eq!(
+        names.iter().filter(|n| **n == "SinOsc").count(),
+        1,
+        "the signal feeding both sinks is emitted once",
+    );
+
+    assert_eq!(derived.monitors.len(), 1, "one ~tap -> one monitor binding");
+    assert_eq!(derived.monitors[0].node_path, vec![t.index()]);
+    assert_eq!(derived.monitors[0].size, Tap::DEFAULT_SIZE);
+
+    // The SendTrig's id input is the monitor id, and its value input is the sine.
+    let send_trig = derived
+        .def
+        .units
+        .iter()
+        .find(|u| u.name == "SendTrig")
+        .expect("SendTrig unit");
+    assert!(
+        matches!(send_trig.inputs[1], InputRef::Constant(c) if c == derived.monitors[0].id as f32),
+        "SendTrig id input carries the monitor id",
+    );
+    assert!(
+        matches!(send_trig.inputs[2], InputRef::Unit { .. }),
+        "SendTrig value input is the tapped signal",
+    );
+}
+
+#[test]
+fn tap_without_output_still_derives() {
+    // A monitor-only graph (`~sine -> ~tap`, no `~out`) derives a silent synthdef:
+    // a `~tap` is a sink in its own right, so there is something to root at.
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::Sine(Sine::default()));
+    let t = g.add_node(N::Tap(Tap::default()));
+    g.add_edge(s, t, Edge::new(0.into(), 0.into()));
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let names: Vec<&str> = derived.def.units.iter().map(|u| u.name.as_str()).collect();
+    assert!(
+        names.contains(&"SinOsc") && names.contains(&"SendTrig"),
+        "{names:?}"
+    );
+    assert!(
+        !names.contains(&"Out"),
+        "no ~out means no Out unit: {names:?}"
+    );
+    assert_eq!(derived.monitors.len(), 1);
+}
+
+#[test]
+fn tap_emits_triggers() {
+    // Running a `~sine -> ~tap` synth offline, the tap's SendTrig fires `/tr`
+    // triggers carrying sampled signal values - the stream the audio driver drains
+    // into the node's ring state.
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::Sine(Sine::default()));
+    let t = g.add_node(N::Tap(Tap::default()));
+    g.add_edge(s, t, Edge::new(0.into(), 0.into()));
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let mon_id = derived.monitors[0].id;
+
+    let (mut controller, mut nrt, mut world) = engine(Options {
+        sample_rate: SR as f64,
+        output_channels: 1,
+        ..Options::default()
+    });
+    controller.add_synthdef(derived.def);
+    controller
+        .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
+        .expect("synth_new");
+
+    // Render ~0.1 s of audio; at the 2 kHz sample rate that is ~200 `/tr`s (well
+    // under the engine's trigger-ring capacity, so none are dropped).
+    let _ = render(&mut world, SR as usize / 10);
+    let mut triggers = Vec::new();
+    while let Some(tr) = nrt.poll_trigger() {
+        triggers.push(tr);
+    }
+
+    assert!(!triggers.is_empty(), "the ~tap must fire `/tr` triggers");
+    assert!(
+        triggers.iter().all(|tr| tr.id == mon_id),
+        "each `/tr` carries the tap's monitor id",
+    );
+    assert!(
+        triggers.iter().any(|tr| tr.value.abs() > 0.01),
+        "triggers carry the sampled 220 Hz signal, not silence",
+    );
 }
 
 /// Goertzel magnitude estimate at `freq` (Hz) over mono `samples` sampled at [`SR`].

@@ -35,6 +35,7 @@ impl Node for gantz_egui::node::Plot {}
 impl Node for gantz_plyphon::Sine {}
 impl Node for gantz_plyphon::Out {}
 impl Node for gantz_plyphon::Lag {}
+impl Node for gantz_plyphon::Tap {}
 
 // `Box<dyn Node>`'s `Serialize`/`Deserialize`: compiled dispatch over the
 // full node set, keyed by each type's `gantz_nodetag::NodeTag`. Adding a
@@ -62,6 +63,7 @@ gantz_format::impl_node_set_serde! {
         gantz_plyphon::Sine,
         gantz_plyphon::Out,
         gantz_plyphon::Lag,
+        gantz_plyphon::Tap,
     }
 }
 
@@ -111,6 +113,9 @@ impl gantz_plyphon::ToNodeDsp for Box<dyn Node> {
             return Some(n);
         }
         if let Some(n) = any.downcast_ref::<gantz_plyphon::Lag>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Tap>() {
             return Some(n);
         }
         None
@@ -244,6 +249,8 @@ mod tests {
             node_datum("Sine", vec![]),
             node_datum("Out", vec![]),
             node_datum("Lag", vec![]),
+            node_datum("Tap", vec![]),
+            node_datum("Tap", vec![("size", Datum::U64(64))]),
         ];
         for value in cases {
             let node: Box<dyn Node> = from_datum(value.clone())
@@ -345,10 +352,11 @@ mod tests {
         use gantz_format::{NodeSugar, Sugar, to_datum};
 
         let sugar = <Box<dyn Node> as NodeSugar>::sugar();
-        let cases: [(Box<dyn Node>, &str, &str); 3] = [
+        let cases: [(Box<dyn Node>, &str, &str); 4] = [
             (Box::new(gantz_plyphon::Sine::default()), "Sine", "~sine"),
             (Box::new(gantz_plyphon::Out::default()), "Out", "~out"),
             (Box::new(gantz_plyphon::Lag::default()), "Lag", "~lag"),
+            (Box::new(gantz_plyphon::Tap::default()), "Tap", "~tap"),
         ];
         for (node, tag, expected) in cases {
             let datum = to_datum(&node).expect("to_datum");
@@ -448,6 +456,79 @@ mod tests {
             pending,
             vec![(1.25, 440.0)],
             "control input must queue (time, value) for sample-accurate scheduling",
+        );
+    }
+
+    /// `~tap`'s control side: firing its trigger input outputs the ring-buffer
+    /// state (which the audio driver fills) as a list, unchanged. Here the ring is
+    /// seeded directly (standing in for the driver's `push_ring`), a `number`
+    /// pushes the trigger, and the list lands downstream in an `inspect`. Guards the
+    /// dsp->control read-out path on the Steel side (the `expr` returns `state`).
+    #[test]
+    fn tap_trigger_outputs_ring() {
+        use gantz_core::compile::{EvalKind, entry_fn_name, push_pull_entrypoints};
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_core::steel::SteelVal;
+        type G = Graph<Box<dyn Node>>;
+
+        // number (a push source) -> ~tap.trigger (input 1); ~tap -> inspect.
+        let mut g: G = Graph::default();
+        let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
+        let tap = g.add_node(Box::new(gantz_plyphon::Tap::default()) as Box<dyn Node>);
+        let inspect = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
+        g.add_edge(num, tap, Edge::new(0.into(), 1.into()));
+        g.add_edge(tap, inspect, Edge::new(0.into(), 0.into()));
+
+        let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+        let config = gantz_core::compile::Config::default();
+        let eps = push_pull_entrypoints(&get_node, &g);
+        let (mut vm, _compiled) =
+            gantz_core::vm::init(&get_node, &g, &eps, &config).expect("compile number -> ~tap");
+
+        // Seed the tap's ring with known samples (as the audio driver would).
+        let ring: SteelVal = SteelVal::ListV(
+            vec![
+                SteelVal::NumV(1.0),
+                SteelVal::NumV(2.0),
+                SteelVal::NumV(3.0),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        gantz_core::node::state::update_value(&mut vm, &[tap.index()], ring).expect("seed ring");
+
+        // Fire the number's push entrypoint: it triggers the tap, which outputs its
+        // ring list downstream into the inspect node's state.
+        let ep = eps
+            .iter()
+            .find(|ep| {
+                ep.0.iter()
+                    .any(|s| s.kind == EvalKind::Push && s.path == [num.index()])
+            })
+            .expect("number push entrypoint");
+        vm.call_function_by_name_with_args(&entry_fn_name(&ep.id()), vec![])
+            .expect("push number");
+
+        // The inspect node received the tap's ring list, unchanged.
+        let got = gantz_core::node::state::extract_value(&vm, &[inspect.index()])
+            .expect("extract inspect state")
+            .expect("inspect state present");
+        let SteelVal::ListV(list) = got else {
+            panic!("~tap must output its ring as a list, got {got:?}");
+        };
+        let values: Vec<f64> = list
+            .iter()
+            .filter_map(|v| match v {
+                SteelVal::NumV(f) => Some(*f),
+                SteelVal::IntV(i) => Some(*i as f64),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            values,
+            vec![1.0, 2.0, 3.0],
+            "the trigger must output the ring buffer unchanged",
         );
     }
 

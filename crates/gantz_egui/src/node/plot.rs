@@ -139,35 +139,68 @@ impl Default for Plot {
 /// result holds at most `cap` items. Registered on the VM as `plot-push` and
 /// called from the generated [`PlotMode::Scope`] expression.
 ///
-/// A numeric `val` is appended; a list `val` extends the history with its
-/// numeric elements; anything else is ignored. `cap` is passed as an argument
-/// (not captured) so a single shared `plot-push` serves every plot node with its
-/// own, always-current capacity.
+/// A numeric `val` is appended; a list `val` extends the history with its numeric
+/// elements; anything else is ignored. `cap` is passed as an argument (not captured)
+/// so a single shared `plot-push` serves every plot node with its own, always-current
+/// capacity.
+///
+/// The list case is *specialised*: steel's list is an unrolled persistent list whose
+/// `push_back` is O(n) (it must clone the shared tail), so appending a whole incoming
+/// window element-by-element was O(window x history) - the source of the slow scope
+/// when a `~scopeout` window is plotted. Instead the capped result is rebuilt in a
+/// single `collect` (O(cap)); and when the incoming window alone fills the scope, the
+/// prior history is dropped without even being read.
 fn plot_push(state: SteelVal, val: SteelVal, cap: SteelVal) -> SteelVal {
     let cap = match cap {
         SteelVal::IntV(n) if n > 0 => n as usize,
         _ => 0,
     };
-    // Reuse the existing list, or start fresh if state isn't a list yet.
-    let mut list = match state {
-        SteelVal::ListV(list) => list,
-        _ => Default::default(),
-    };
+    let is_num = |v: &SteelVal| matches!(v, SteelVal::NumV(_) | SteelVal::IntV(_));
+
     match val {
+        // Bulk list append: rebuild the capped history once instead of `push_back`
+        // per element.
         SteelVal::ListV(items) => {
-            for item in items.iter() {
-                if matches!(item, SteelVal::NumV(_) | SteelVal::IntV(_)) {
-                    list.push_back(item.clone());
-                }
+            let new_count = items.iter().filter(|v| is_num(v)).count();
+            let new = items.iter().filter(|v| is_num(v)).cloned();
+            if new_count >= cap {
+                // The incoming window alone fills (or overfills) the scope: keep its
+                // last `cap` numeric samples and drop the prior history entirely.
+                return SteelVal::ListV(new.skip(new_count - cap).collect());
             }
+            // Keep the tail of the history so it plus the new samples total `cap`.
+            let keep = cap - new_count;
+            let hist = match state {
+                SteelVal::ListV(list) => list,
+                _ => Default::default(),
+            };
+            let skip = hist.len().saturating_sub(keep);
+            SteelVal::ListV(hist.iter().cloned().skip(skip).chain(new).collect())
         }
-        num @ (SteelVal::NumV(_) | SteelVal::IntV(_)) => list.push_back(num),
-        _ => {}
+        // A single sample: append and trim (cheap - one element).
+        num @ (SteelVal::NumV(_) | SteelVal::IntV(_)) => {
+            let mut list = match state {
+                SteelVal::ListV(list) => list,
+                _ => Default::default(),
+            };
+            list.push_back(num);
+            while list.len() > cap {
+                list.pop_front();
+            }
+            SteelVal::ListV(list)
+        }
+        // Non-numeric: leave the history unchanged (bar a trim if capacity shrank).
+        _ => {
+            let mut list = match state {
+                SteelVal::ListV(list) => list,
+                _ => Default::default(),
+            };
+            while list.len() > cap {
+                list.pop_front();
+            }
+            SteelVal::ListV(list)
+        }
     }
-    while list.len() > cap {
-        list.pop_front();
-    }
-    SteelVal::ListV(list)
 }
 
 /// Read the node's stored series as `f64`s. A list yields its numeric elements;
@@ -830,6 +863,46 @@ mod tests {
         let mut vm = vm_for(&g);
         fire(&mut vm, &g, s, 2);
         assert_eq!(list_of(&vm, p), vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+    }
+
+    // A pushed list at least as long as the capacity keeps only its last `cap`
+    // samples - the bulk fast path drops the prior history without reading it.
+    #[test]
+    fn scope_list_over_capacity_keeps_tail() {
+        let src = gantz_core::node::expr("(list 1 2 3 4 5)")
+            .unwrap()
+            .with_push_eval();
+        let plot = Plot {
+            mode: PlotMode::Scope,
+            capacity: 3,
+            ..Default::default()
+        };
+        let (g, s, p) = graph_with(Box::new(src) as Box<dyn Node>, plot);
+        let mut vm = vm_for(&g);
+        fire(&mut vm, &g, s, 1);
+        assert_eq!(list_of(&vm, p), vec![3.0, 4.0, 5.0]);
+        // A second identical window still yields just its last 3 (history dropped).
+        fire(&mut vm, &g, s, 1);
+        assert_eq!(list_of(&vm, p), vec![3.0, 4.0, 5.0]);
+    }
+
+    // When a pushed list overflows the *remaining* capacity, the oldest history is
+    // trimmed so history-tail + new totals `cap`.
+    #[test]
+    fn scope_list_trims_oldest_to_cap() {
+        let src = gantz_core::node::expr("(list 1 2 3)")
+            .unwrap()
+            .with_push_eval();
+        let plot = Plot {
+            mode: PlotMode::Scope,
+            capacity: 4,
+            ..Default::default()
+        };
+        let (g, s, p) = graph_with(Box::new(src) as Box<dyn Node>, plot);
+        let mut vm = vm_for(&g);
+        // [1,2,3], then keep the last 4 of [1,2,3] ++ [1,2,3] = [3,1,2,3].
+        fire(&mut vm, &g, s, 2);
+        assert_eq!(list_of(&vm, p), vec![3.0, 1.0, 2.0, 3.0]);
     }
 
     // `split_channels` treats a list-of-lists as one series per inner list (for the

@@ -86,9 +86,15 @@ pub fn cahash_lag(hasher: &mut gantz_ca::Hasher, lag: f32) {
     }
 }
 
+/// The fixed width (px) for a controllable param's value dialer, so the smoothing
+/// `lag` dialer to its right stays put (and readable) as the value's text width
+/// changes while dragging - mirrors `node_inspector::DIAL_W`, but wider to fit a
+/// frequency like `20000 Hz`.
+const VALUE_W: f32 = 80.0;
+
 /// One inspector row for a DSP param: the table key column is `name`; the value
-/// column shows `value` (a caller-configured dialer) with the smoothing `lag` to
-/// its right (e.g. `0.234   0.010 s lag`).
+/// column shows `value` (a caller-configured dialer, at a fixed width) with the
+/// smoothing `lag` to its right (e.g. `0.234   0.010 s lag`).
 ///
 /// Returns `(value_changed, lag_changed)`. The caller writes the value to VM node
 /// state (no `mark_changed` - it is not content-addressed) and the lag to the node
@@ -108,7 +114,10 @@ pub fn param_row(
         });
         row.col(|ui| {
             ui.horizontal(|ui| {
-                value_changed = ui.add(value).changed();
+                // Fixed width so the following lag dialer does not flicker as the
+                // value's width changes while dragging.
+                let value_h = ui.spacing().interact_size.y;
+                value_changed = ui.add_sized([VALUE_W, value_h], value).changed();
                 let lag_dv = egui::DragValue::new(lag)
                     .range(0.0..=10.0)
                     .speed(0.001)

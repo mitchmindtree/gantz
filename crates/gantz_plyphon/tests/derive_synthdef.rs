@@ -3,7 +3,7 @@
 //! through the real engine offline.
 
 use gantz_core::edge::Edge;
-use gantz_core::node::graph::{Graph, NodeIx};
+use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
     Backend, DeriveError, Embedded, Lag, NodeDsp, Out, Sine, ToNodeDsp, derive_synthdef,
     structural_sig,
@@ -33,19 +33,19 @@ impl ToNodeDsp for N {
     }
 }
 
-/// Build a `~sine -> ~out` graph (default params), with the `~out` node index.
-fn sine_to_out() -> (Graph<N>, NodeIx) {
+/// Build a `~sine -> ~out` graph (default params).
+fn sine_to_out() -> Graph<N> {
     let mut g = Graph::<N>::default();
     let s = g.add_node(N::Sine(Sine::default()));
     let o = g.add_node(N::Out(Out::default()));
     g.add_edge(s, o, Edge::new(0.into(), 0.into()));
-    (g, o)
+    g
 }
 
 #[test]
 fn derives_expected_units() {
-    let (g, out_ix) = sine_to_out();
-    let derived = derive_synthdef(&g, out_ix, 1, "test").expect("derive");
+    let g = sine_to_out();
+    let derived = derive_synthdef(&g, 1, "test").expect("derive");
     let def = &derived.def;
 
     assert_eq!(def.units.len(), 3, "SinOsc + gain-mul + Out");
@@ -99,8 +99,8 @@ fn derives_expected_units() {
 fn lag_change_changes_structural_sig() {
     // The param *value* is no longer in the synthdef (it lives in node state), so a
     // value change cannot alter the def. The *lag* is structural, so it does.
-    let (g, out_ix) = sine_to_out();
-    let base = derive_synthdef(&g, out_ix, 1, "t").expect("derive").def;
+    let g = sine_to_out();
+    let base = derive_synthdef(&g, 1, "t").expect("derive").def;
 
     let mut g2 = Graph::<N>::default();
     let mut lagged_sine = Sine::default();
@@ -108,7 +108,7 @@ fn lag_change_changes_structural_sig() {
     let s = g2.add_node(N::Sine(lagged_sine));
     let o = g2.add_node(N::Out(Out::default()));
     g2.add_edge(s, o, Edge::new(0.into(), 0.into()));
-    let lagged = derive_synthdef(&g2, o, 1, "t").expect("derive").def;
+    let lagged = derive_synthdef(&g2, 1, "t").expect("derive").def;
 
     assert_ne!(
         structural_sig(&base),
@@ -136,8 +136,8 @@ fn lag_is_part_of_node_identity() {
 
 #[test]
 fn fans_output_across_channels() {
-    let (g, out_ix) = sine_to_out();
-    let def = derive_synthdef(&g, out_ix, 2, "test").expect("derive").def;
+    let g = sine_to_out();
+    let def = derive_synthdef(&g, 2, "test").expect("derive").def;
     // `Out` gets the bus index followed by one signal input per channel.
     assert_eq!(def.units[2].name, "Out");
     assert_eq!(def.units[2].inputs.len(), 1 + 2);
@@ -153,7 +153,7 @@ fn lag_node_wired_into_chain() {
     let o = g.add_node(N::Out(Out::default()));
     g.add_edge(s, l, Edge::new(0.into(), 0.into()));
     g.add_edge(l, o, Edge::new(0.into(), 0.into()));
-    let def = derive_synthdef(&g, o, 1, "t").expect("derive").def;
+    let def = derive_synthdef(&g, 1, "t").expect("derive").def;
 
     // Units: SinOsc(0), Lag(1), BinaryOpUGen(2), Out(3).
     assert_eq!(def.units.len(), 4);
@@ -193,7 +193,7 @@ fn control_edge_on_root_does_not_panic() {
     g.add_edge(s, o, Edge::new(0.into(), 0.into())); // audio -> ~out input 0
     g.add_edge(ctrl, o, Edge::new(0.into(), 1.into())); // control -> ~out gain (input 1)
 
-    let derived = derive_synthdef(&g, o, 1, "t").expect("derive must not panic");
+    let derived = derive_synthdef(&g, 1, "t").expect("derive must not panic");
     // The control source is filtered out; the dsp graph is still SinOsc + mul + Out.
     assert_eq!(derived.def.units.len(), 3, "SinOsc + gain-mul + Out");
     assert_eq!(derived.def.units[0].name, "SinOsc");
@@ -201,12 +201,14 @@ fn control_edge_on_root_does_not_panic() {
 }
 
 #[test]
-fn non_dsp_root_is_rejected() {
+fn graph_without_sink_is_rejected() {
+    // A graph with no dsp sink (no `~out`, no `~tap`) has nothing to root a
+    // synthdef at.
     let mut g = Graph::<N>::default();
-    let root = g.add_node(N::Other);
+    g.add_node(N::Other);
     assert!(matches!(
-        derive_synthdef(&g, root, 1, "nope"),
-        Err(DeriveError::RootNotDsp)
+        derive_synthdef(&g, 1, "nope"),
+        Err(DeriveError::NoSink)
     ));
 }
 
@@ -246,8 +248,8 @@ fn render(world: &mut World, frames: usize) -> Vec<f32> {
 
 #[test]
 fn derived_synth_plays_expected_tone() {
-    let (g, out_ix) = sine_to_out();
-    let def = derive_synthdef(&g, out_ix, 1, "test").expect("derive").def;
+    let g = sine_to_out();
+    let def = derive_synthdef(&g, 1, "test").expect("derive").def;
 
     let (mut controller, _nrt, mut world) = engine(Options {
         sample_rate: SR as f64,
@@ -288,8 +290,8 @@ fn scheduled_control_change_takes_effect_at_its_time() {
     const OSC_UNITS_PER_SEC: f64 = 4_294_967_296.0;
     const BLOCK: usize = 64;
 
-    let (g, out_ix) = sine_to_out();
-    let derived = derive_synthdef(&g, out_ix, 1, "test").expect("derive");
+    let g = sine_to_out();
+    let derived = derive_synthdef(&g, 1, "test").expect("derive");
     // The sine's freq param (the node at path `[0]`) and its index within the synth.
     let freq_index = derived
         .params

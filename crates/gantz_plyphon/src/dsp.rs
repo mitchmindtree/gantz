@@ -32,6 +32,15 @@ pub trait NodeDsp {
         false
     }
 
+    /// Whether this node is a synthdef *monitor* (e.g. `~tap`) - a sink that
+    /// reads its dsp input back to the control world rather than to the speakers.
+    /// Like [`is_output`](Self::is_output) it roots a synthdef pull, but instead
+    /// of an `Out` it emits a `SendTrig` (via [`DspBuilder::push_monitor`]) whose
+    /// `/tr`s the audio driver samples into the node's VM state.
+    fn is_monitor(&self) -> bool {
+        false
+    }
+
     /// Emit this node's UGens into `b`, given the resolved source for each DSP
     /// input, returning one [`InputRef`] per DSP output (so downstream nodes can
     /// reference them).
@@ -67,6 +76,19 @@ pub struct ParamBinding {
     pub index: usize,
 }
 
+/// Records a monitor (`~tap`) node's `SendTrig` id, so the audio driver can route
+/// each polled `/tr` trigger (matched by synth node id + this `id`) into the right
+/// node's ring-buffer state, capped at `size`.
+#[derive(Clone, Debug)]
+pub struct MonitorBinding {
+    /// The monitor node's path within the graph (where its ring state lives).
+    pub node_path: Vec<usize>,
+    /// The `SendTrig` id carried by this monitor's `/tr`s (unique within the def).
+    pub id: i32,
+    /// The ring buffer length (samples) the driver caps the node's state at.
+    pub size: usize,
+}
+
 /// Accumulates the [`UnitSpec`]s and [`Param`]s of a synthdef as nodes emit them.
 ///
 /// Also carries the engine's output-channel count so a sink node (`~out`) can
@@ -76,6 +98,7 @@ pub struct DspBuilder {
     units: Vec<UnitSpec>,
     params: Vec<Param>,
     bindings: Vec<ParamBinding>,
+    monitors: Vec<MonitorBinding>,
     out_channels: usize,
 }
 
@@ -86,6 +109,7 @@ impl DspBuilder {
             units: Vec::new(),
             params: Vec::new(),
             bindings: Vec::new(),
+            monitors: Vec::new(),
             out_channels: out_channels.max(1),
         }
     }
@@ -109,18 +133,36 @@ impl DspBuilder {
         index as u32
     }
 
+    /// Declare a monitor for the dsp node at `path`, returning the `SendTrig` `id`
+    /// (unique within the synthdef) the node should give its `SendTrig` unit and
+    /// recording its [`MonitorBinding`] (so the driver routes the resulting `/tr`s
+    /// into the node's ring state, capped at `size`).
+    pub fn push_monitor(&mut self, path: &[usize], size: usize) -> i32 {
+        let id = self.monitors.len() as i32;
+        self.monitors.push(MonitorBinding {
+            node_path: path.to_vec(),
+            id,
+            size,
+        });
+        id
+    }
+
     /// The number of output-bus channels a sink should fan its signal across.
     pub fn out_channels(&self) -> usize {
         self.out_channels
     }
 
-    /// Consume the builder into a finished [`SynthDef`] and its param bindings.
-    pub fn finish(self, name: impl Into<String>) -> (SynthDef, Vec<ParamBinding>) {
+    /// Consume the builder into a finished [`SynthDef`], its param bindings, and
+    /// its monitor bindings.
+    pub fn finish(
+        self,
+        name: impl Into<String>,
+    ) -> (SynthDef, Vec<ParamBinding>, Vec<MonitorBinding>) {
         let def = SynthDef {
             name: name.into(),
             params: self.params,
             units: self.units,
         };
-        (def, self.bindings)
+        (def, self.bindings, self.monitors)
     }
 }

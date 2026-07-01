@@ -369,7 +369,7 @@ mod tests {
     fn dsp_nodes_are_steel_inert_and_derive() {
         use gantz_core::edge::Edge;
         use gantz_core::node::graph::Graph;
-        use gantz_plyphon::{ToNodeDsp, derive_synthdef};
+        use gantz_plyphon::derive_synthdef;
         type G = Graph<Box<dyn Node>>;
 
         let mut g: G = Graph::default();
@@ -384,12 +384,8 @@ mod tests {
         gantz_core::vm::init(&get_node, &g, &[], &config)
             .expect("DSP graph must compile in the Steel VM");
 
-        // The `~out` root is discoverable via `ToNodeDsp` and a synthdef derives.
-        let root = g
-            .node_indices()
-            .find(|&ix| g[ix].to_node_dsp().is_some_and(|d| d.is_output()))
-            .expect("~out root");
-        let derived = derive_synthdef(&g, root, 2, "test").expect("derive");
+        // The `~out` sink is discoverable via `ToNodeDsp` and a synthdef derives.
+        let derived = derive_synthdef(&g, 2, "test").expect("derive");
         assert_eq!(derived.def.units.len(), 3, "SinOsc + gain-mul + Out");
     }
 

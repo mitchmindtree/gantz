@@ -4,9 +4,13 @@
 //! stream (its own audio thread, running [`plyphon::World::fill_at`] so the engine
 //! clock is anchored to the host) and keeps the [`plyphon::Controller`] +
 //! [`plyphon::Nrt`] handles. Each update, after [`bevy_gantz::VmSet`], it derives a
-//! synthdef from each open head's DSP subgraph (rooted at its `~out` node) and
-//! installs/respawns the synth via the [`gantz_plyphon::Backend`] seam whenever the
-//! head's committed graph changes.
+//! synthdef from each open head's DSP subgraph (rooted at its `~out` output and any
+//! `~tap` monitors) and installs/respawns the synth via the [`gantz_plyphon::Backend`]
+//! seam whenever the head's committed graph changes.
+//!
+//! The bridge runs both ways: control values drive dsp params via `set_control`,
+//! and each `~tap` monitor's `SendTrig` `/tr`s are drained here into the node's
+//! ring-buffer state (so the control world can scope an audio signal).
 //!
 //! Mixing across heads is free: every head's `~out` synth writes to output bus 0,
 //! and plyphon sums all synths on that bus.
@@ -20,8 +24,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 
 use gantz_ca as ca;
-use gantz_core::node::graph::{Graph, NodeIx};
-use gantz_plyphon::{Backend, Embedded, ToNodeDsp, derive_synthdef, structural_sig};
+use gantz_core::node::graph::Graph;
+use gantz_plyphon::{
+    Backend, Embedded, MonitorBinding, ToNodeDsp, derive_synthdef, structural_sig,
+};
 use plyphon::{Controller, Nrt, Options, World, engine};
 
 /// Re-export of [`plyphon`] so downstream crates can implement custom units
@@ -160,6 +166,10 @@ struct HeadSynth {
     /// One slot per control param, binding a dsp node's state value to its synth
     /// param index, with the last value pushed via `set_control`.
     params: Vec<ParamSlot>,
+    /// One binding per `~tap` monitor: routes this synth's `/tr`s into the right
+    /// node's ring state. Refreshed on every derive (a ring-size edit is not a
+    /// structural change, so it must update without a respawn).
+    monitors: Vec<MonitorBinding>,
 }
 
 /// Binds one synth control param to a dsp node's VM state value.
@@ -218,6 +228,17 @@ fn drive_synths<N>(
     audio.nrt.process();
     while audio.nrt.poll().is_some() {}
 
+    // Drain this frame's monitor triggers (`~tap` `SendTrig` `/tr`s), batched per
+    // (synth node id, `SendTrig` id) so each `~tap`'s ring takes a single state
+    // write below. Best-effort: the engine drops `/tr`s past its ring capacity.
+    let mut trig_batches: HashMap<(i32, i32), Vec<f32>> = HashMap::new();
+    while let Some(t) = audio.nrt.poll_trigger() {
+        trig_batches
+            .entry((t.node, t.id))
+            .or_default()
+            .push(t.value);
+    }
+
     let out_channels = audio.out_channels;
     let mut live: HashSet<Entity> = HashSet::new();
 
@@ -275,6 +296,14 @@ fn drive_synths<N>(
                     slot.last = Some(value);
                 }
             }
+
+            // Write each `~tap`'s freshly sampled values into its ring state (the
+            // list its control `expr` surfaces on a trigger push).
+            for mon in &synth.monitors {
+                if let Some(values) = trig_batches.get(&(node_id, mon.id)) {
+                    gantz_plyphon::monitor::push_ring(vm, &mon.node_path, values, mon.size);
+                }
+            }
         }
     }
 
@@ -291,8 +320,9 @@ fn drive_synths<N>(
 }
 
 /// Re-derive `entity`'s synthdef and respawn the synth if its *structure* changed
-/// (else keep the running synth, just recording the new graph address). Tears the
-/// synth down if the head no longer has a `~out`.
+/// (else keep the running synth, just recording the new graph address and
+/// refreshing its monitor bindings). Tears the synth down if the head has no dsp
+/// sink (no `~out` and no `~tap`).
 fn structural_sync<N>(
     controller: &mut Controller,
     synths: &mut HashMap<Entity, HeadSynth>,
@@ -303,26 +333,25 @@ fn structural_sync<N>(
 ) where
     N: ToNodeDsp,
 {
-    let Some(root) = find_output(graph) else {
-        teardown(controller, synths.remove(&entity));
-        return;
-    };
-
     let def_name = format!("gantz-head-{}", entity.index());
-    let derived = match derive_synthdef(graph, root, out_channels, def_name.clone()) {
+    let derived = match derive_synthdef(graph, out_channels, def_name.clone()) {
         Ok(derived) => derived,
-        Err(e) => {
-            log::error!("bevy_gantz_plyphon: synthdef derivation failed: {e:?}");
+        // No dsp sink to root a synthdef at: tear down any running synth.
+        Err(gantz_plyphon::DeriveError::NoSink) => {
+            teardown(controller, synths.remove(&entity));
             return;
         }
     };
     let sig = structural_sig(&derived.def);
 
-    // Structure unchanged (e.g. a non-dsp edit changed the head address): keep the
-    // running synth + its param slots; just record the new graph address.
+    // Structure unchanged (e.g. a non-dsp edit, or a ring-size edit that is not in
+    // the def): keep the running synth + its param slots; record the new graph
+    // address and refresh the monitor bindings (their sizes/paths may have changed
+    // without changing the structural signature).
     if synths.get(&entity).map(|s| s.sig) == Some(sig) {
         if let Some(prev) = synths.get_mut(&entity) {
             prev.graph = graph_ca;
+            prev.monitors = derived.monitors;
         }
         return;
     }
@@ -355,21 +384,12 @@ fn structural_sync<N>(
                     node_id,
                     sig,
                     params,
+                    monitors: derived.monitors,
                 },
             );
         }
         Err(e) => log::error!("bevy_gantz_plyphon: synth spawn failed: {e:?}"),
     }
-}
-
-/// The first `~out` (output sink) node in `graph`, if any.
-fn find_output<N>(graph: &Graph<N>) -> Option<NodeIx>
-where
-    N: ToNodeDsp,
-{
-    graph
-        .node_indices()
-        .find(|&ix| graph[ix].to_node_dsp().is_some_and(|d| d.is_output()))
 }
 
 /// Free a head's running synth and its synthdef, if it had one.

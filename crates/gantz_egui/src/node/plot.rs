@@ -8,7 +8,9 @@
 //!   like an oscilloscope. Each pushed number is appended; a pushed list extends
 //!   the history with its elements.
 //! - [`PlotMode::Signal`]: plot the incoming value directly (a list as a series,
-//!   a single number as one bar), replacing it on each evaluation.
+//!   a single number as one bar), replacing it on each evaluation. A list *of
+//!   lists* (a list of channels, e.g. from `~scopeout` + `deinterleave`) is drawn
+//!   as one stacked sub-plot per channel.
 //!
 //! In both modes the node is a pass-through: its output forwards the input
 //! value unchanged (like [`super::Inspect`]), so a value can be observed without
@@ -170,11 +172,27 @@ fn plot_push(state: SteelVal, val: SteelVal, cap: SteelVal) -> SteelVal {
 
 /// Read the node's stored series as `f64`s. A list yields its numeric elements;
 /// a lone number yields a single sample; anything else is empty.
-fn series(ctx: &NodeCtx) -> Vec<f64> {
+fn series(ctx: &NodeCtx) -> Vec<Vec<f64>> {
     match ctx.extract_value() {
-        Ok(Some(SteelVal::ListV(list))) => list.iter().filter_map(steel_num).collect(),
-        Ok(Some(ref val)) => steel_num(val).into_iter().collect(),
+        Ok(Some(val)) => split_channels(&val),
         _ => Vec::new(),
+    }
+}
+
+/// Split a stored plot value into per-channel series: a list *of lists* is one series
+/// per inner list (`~scopeout` + `deinterleave` produces this); a flat numeric list -
+/// or a lone number - is a single channel.
+fn split_channels(val: &SteelVal) -> Vec<Vec<f64>> {
+    match val {
+        SteelVal::ListV(list) if list.iter().any(|v| matches!(v, SteelVal::ListV(_))) => list
+            .iter()
+            .map(|v| match v {
+                SteelVal::ListV(inner) => inner.iter().filter_map(steel_num).collect(),
+                other => steel_num(other).into_iter().collect(),
+            })
+            .collect(),
+        SteelVal::ListV(list) => vec![list.iter().filter_map(steel_num).collect()],
+        other => vec![steel_num(other).into_iter().collect()],
     }
 }
 
@@ -247,10 +265,40 @@ impl gantz_core::Node for Plot {
 }
 
 impl Plot {
-    /// Render the plot itself (axes, grid, series and bounds) filling `size`,
-    /// returning the plot's response. Shared by the in-graph node body
+    /// Render the plot filling `size`: a single channel fills it; multiple channels
+    /// (a list-of-lists, e.g. from `~scopeout` + `deinterleave`) are stacked as one
+    /// sub-plot each. Returns the combined response. Shared by the in-graph node body
     /// ([`NodeUi::ui`]) and the detached view ([`NodeUi::view_ui`]).
     fn plot_body(
+        &self,
+        channels: &[Vec<f64>],
+        plot_id: egui::Id,
+        size: egui::Vec2,
+        ui: &mut egui::Ui,
+    ) -> egui::Response {
+        // No data yet: draw a single empty plot so the node still has a body.
+        if channels.len() <= 1 {
+            let ys = channels.first().map(Vec::as_slice).unwrap_or(&[]);
+            return self.plot_channel(ys, plot_id, size, ui);
+        }
+        // Stack one sub-plot per channel, splitting the height evenly.
+        let sub_h = size.y / channels.len() as f32;
+        ui.vertical(|ui| {
+            let mut resp: Option<egui::Response> = None;
+            for (i, ch) in channels.iter().enumerate() {
+                let r = self.plot_channel(ch, plot_id.with(i), egui::vec2(size.x, sub_h), ui);
+                resp = Some(match resp.take() {
+                    Some(prev) => prev.union(r),
+                    None => r,
+                });
+            }
+            resp.expect("at least two channels")
+        })
+        .inner
+    }
+
+    /// Render one channel's series (axes, grid, line/bars and bounds) filling `size`.
+    fn plot_channel(
         &self,
         ys: &[f64],
         plot_id: egui::Id,
@@ -435,13 +483,19 @@ impl NodeUi for Plot {
 
         // A summarised replacement for the (suppressed) default state row - the
         // raw history would be a huge list.
-        let n_samples = series(ctx).len();
+        let chans = series(ctx);
+        let total: usize = chans.iter().map(Vec::len).sum();
+        let summary = if chans.len() > 1 {
+            format!("{total} samples · {} channels", chans.len())
+        } else {
+            format!("{total} samples")
+        };
         body.row(row_h, |mut row| {
             row.col(|ui| {
                 ui.label("state");
             });
             row.col(|ui| {
-                ui.label(format!("{n_samples} samples"));
+                ui.label(summary);
             });
         });
 
@@ -776,6 +830,30 @@ mod tests {
         let mut vm = vm_for(&g);
         fire(&mut vm, &g, s, 2);
         assert_eq!(list_of(&vm, p), vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+    }
+
+    // `split_channels` treats a list-of-lists as one series per inner list (for the
+    // stacked multi-channel plot), and a flat list / lone number as a single channel.
+    #[test]
+    fn split_channels_by_shape() {
+        let num = |n: f64| SteelVal::NumV(n);
+        let list = |xs: Vec<SteelVal>| SteelVal::ListV(xs.into_iter().collect());
+
+        // A flat numeric list is one channel.
+        assert_eq!(
+            split_channels(&list(vec![num(1.0), num(2.0), num(3.0)])),
+            vec![vec![1.0, 2.0, 3.0]],
+        );
+        // A lone number is one single-sample channel.
+        assert_eq!(split_channels(&num(7.0)), vec![vec![7.0]]);
+        // A list of lists is one channel per inner list (interleaving undone).
+        assert_eq!(
+            split_channels(&list(vec![
+                list(vec![num(1.0), num(3.0)]),
+                list(vec![num(2.0), num(4.0)]),
+            ])),
+            vec![vec![1.0, 3.0], vec![2.0, 4.0]],
+        );
     }
 
     // Signal mode stores the incoming list verbatim, preserving order.

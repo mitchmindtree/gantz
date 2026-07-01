@@ -14,15 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
 use crate::param::value_row;
 
-/// The rate (Hz) at which `~tap` samples its dsp input. A fixed decimation of the
-/// audio signal for monitoring - not a full-bandwidth scope; each sample is one
-/// `SendTrig` `/tr` (drained best-effort, so a stalled frame drops the oldest).
-/// A per-node configurable rate is a later refinement.
-const MONITOR_RATE_HZ: f32 = 2000.0;
-
-/// A signal *tap*: samples its dsp input into a ring buffer held in VM state (the
-/// audio driver writes it via `SendTrig` `/tr`s), and on a control trigger outputs
-/// the ring's current samples as a list.
+/// A signal *tap*: streams every sample of its dsp input into a ring buffer held in
+/// VM state (the audio driver writes it, draining a plyphon `ScopeOut` scope stream),
+/// and on a control trigger outputs the ring's current samples as a list.
 ///
 /// Wire a signal into the dsp input to monitor it, drive the trigger input (e.g.
 /// with a `tick!`), and plug the list output into a `plot` (or any widget) to see
@@ -112,30 +106,17 @@ impl NodeDsp for Tap {
 
     fn ugens(&self, path: &[usize], inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
         let sig = inputs.first().copied().unwrap_or(InputRef::Constant(0.0));
-        // Register the monitor: the driver routes this id's `/tr`s into the node's
-        // ring state, capped at `size`.
-        let id = b.push_monitor(path, self.size);
-        // `SendTrig.ar(Impulse.ar(rate), id, sig)`: sample `sig` at `rate` and fire
-        // each sample back to the control plane as a `/tr`.
-        let impulse = b.push_unit(UnitSpec::new(
-            "Impulse",
+        // `ScopeOut.ar(bufnum, sig)`: stream *every* sample of `sig` off the audio
+        // thread into a cued scope stream the driver drains into this node's ring.
+        // `bufnum` is a placeholder here; the driver allocates a globally-unique cued
+        // index and patches it into this unit before installing the def.
+        let scope_unit = b.push_unit(UnitSpec::new(
+            "ScopeOut",
             Rate::Audio,
-            vec![InputRef::Constant(MONITOR_RATE_HZ), InputRef::Constant(0.0)],
-            1,
-        ));
-        b.push_unit(UnitSpec::new(
-            "SendTrig",
-            Rate::Audio,
-            vec![
-                InputRef::Unit {
-                    unit: impulse,
-                    output: 0,
-                },
-                InputRef::Constant(id as f32),
-                sig,
-            ],
+            vec![InputRef::Constant(0.0), sig],
             0,
         ));
+        b.push_monitor(path, self.size, scope_unit as usize);
         vec![]
     }
 }

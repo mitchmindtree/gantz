@@ -217,9 +217,8 @@ fn graph_without_sink_is_rejected() {
 #[test]
 fn tap_joins_output_in_one_def() {
     // `~sine -> ~out` and `~sine -> ~tap`: the tap is a second sink that shares the
-    // sine's chain, so one synthdef carries SinOsc, Out, Impulse and SendTrig, with
-    // a single monitor binding at the tap's node path - and the shared SinOsc is
-    // emitted only once.
+    // sine's chain, so one synthdef carries SinOsc, Out and a ScopeOut, with a single
+    // monitor binding at the tap's node path - and the shared SinOsc is emitted once.
     let mut g = Graph::<N>::default();
     let s = g.add_node(N::Sine(Sine::default()));
     let o = g.add_node(N::Out(Out::default()));
@@ -231,8 +230,7 @@ fn tap_joins_output_in_one_def() {
     let names: Vec<&str> = derived.def.units.iter().map(|u| u.name.as_str()).collect();
     assert!(names.contains(&"SinOsc"), "units: {names:?}");
     assert!(names.contains(&"Out"), "units: {names:?}");
-    assert!(names.contains(&"Impulse"), "units: {names:?}");
-    assert!(names.contains(&"SendTrig"), "units: {names:?}");
+    assert!(names.contains(&"ScopeOut"), "units: {names:?}");
     assert_eq!(
         names.iter().filter(|n| **n == "SinOsc").count(),
         1,
@@ -240,23 +238,21 @@ fn tap_joins_output_in_one_def() {
     );
 
     assert_eq!(derived.monitors.len(), 1, "one ~tap -> one monitor binding");
-    assert_eq!(derived.monitors[0].node_path, vec![t.index()]);
-    assert_eq!(derived.monitors[0].size, Tap::DEFAULT_SIZE);
+    let mon = &derived.monitors[0];
+    assert_eq!(mon.node_path, vec![t.index()]);
+    assert_eq!(mon.size, Tap::DEFAULT_SIZE);
 
-    // The SendTrig's id input is the monitor id, and its value input is the sine.
-    let send_trig = derived
-        .def
-        .units
-        .iter()
-        .find(|u| u.name == "SendTrig")
-        .expect("SendTrig unit");
+    // The binding's `scope_unit` names the ScopeOut; its bufnum (input 0) is the
+    // placeholder the driver patches, and its value input (1) is the tapped sine.
+    let scope = &derived.def.units[mon.scope_unit];
+    assert_eq!(scope.name, "ScopeOut", "scope_unit must name the ScopeOut");
     assert!(
-        matches!(send_trig.inputs[1], InputRef::Constant(c) if c == derived.monitors[0].id as f32),
-        "SendTrig id input carries the monitor id",
+        matches!(scope.inputs[0], InputRef::Constant(_)),
+        "bufnum is a patchable constant placeholder",
     );
     assert!(
-        matches!(send_trig.inputs[2], InputRef::Unit { .. }),
-        "SendTrig value input is the tapped signal",
+        matches!(scope.inputs[1], InputRef::Unit { .. }),
+        "ScopeOut value input is the tapped signal",
     );
 }
 
@@ -272,7 +268,7 @@ fn tap_without_output_still_derives() {
     let derived = derive_synthdef(&g, 1, "t").expect("derive");
     let names: Vec<&str> = derived.def.units.iter().map(|u| u.name.as_str()).collect();
     assert!(
-        names.contains(&"SinOsc") && names.contains(&"SendTrig"),
+        names.contains(&"SinOsc") && names.contains(&"ScopeOut"),
         "{names:?}"
     );
     assert!(
@@ -283,44 +279,69 @@ fn tap_without_output_still_derives() {
 }
 
 #[test]
-fn tap_emits_triggers() {
-    // Running a `~sine -> ~tap` synth offline, the tap's SendTrig fires `/tr`
-    // triggers carrying sampled signal values - the stream the audio driver drains
-    // into the node's ring state.
+fn tap_scope_streams_samples() {
+    // `~sine -> ~tap` (no ~out): the tap's ScopeOut streams *every* sample of the
+    // sine off the audio thread into a cued scope stream. Draining it recovers the
+    // full-rate 220 Hz signal - the stream the driver appends into the tap's ring.
+    const BLOCK: usize = 64;
     let mut g = Graph::<N>::default();
     let s = g.add_node(N::Sine(Sine::default()));
     let t = g.add_node(N::Tap(Tap::default()));
     g.add_edge(s, t, Edge::new(0.into(), 0.into()));
 
-    let derived = derive_synthdef(&g, 1, "t").expect("derive");
-    let mon_id = derived.monitors[0].id;
+    let mut derived = derive_synthdef(&g, 1, "t").expect("derive");
+    // The driver patches the ScopeOut's bufnum (at the monitor's `scope_unit`) to the
+    // cued scope index; here that index is 0.
+    let scope_unit = derived.monitors[0].scope_unit;
+    assert_eq!(derived.def.units[scope_unit].name, "ScopeOut");
+    derived.def.units[scope_unit].inputs[0] = InputRef::Constant(0.0);
 
-    let (mut controller, mut nrt, mut world) = engine(Options {
+    // A pool generous enough to hold the whole run, so nothing overruns before the
+    // single drain at the end (one chunk per block).
+    let blocks = 128;
+    let (mut controller, _nrt, mut world) = engine(Options {
         sample_rate: SR as f64,
         output_channels: 1,
+        block_size: BLOCK,
         ..Options::default()
     });
+    let mut consumer = controller
+        .cue_scope(0, 1, SR as f64, BLOCK, blocks + 2)
+        .expect("cue_scope");
     controller.add_synthdef(derived.def);
     controller
         .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
         .expect("synth_new");
 
-    // Render ~0.1 s of audio; at the 2 kHz sample rate that is ~200 `/tr`s (well
-    // under the engine's trigger-ring capacity, so none are dropped).
-    let _ = render(&mut world, SR as usize / 10);
-    let mut triggers = Vec::new();
-    while let Some(tr) = nrt.poll_trigger() {
-        triggers.push(tr);
+    // Render a stretch of audio, then drain every streamed sample.
+    let mut buf = vec![0.0f32; BLOCK];
+    for _ in 0..blocks {
+        world.fill(&mut buf, 1);
+    }
+    let mut got = Vec::new();
+    while let Some(chunk) = consumer.pop_filled() {
+        got.extend_from_slice(chunk.filled_samples());
+        consumer.recycle(chunk);
     }
 
-    assert!(!triggers.is_empty(), "the ~tap must fire `/tr` triggers");
-    assert!(
-        triggers.iter().all(|tr| tr.id == mon_id),
-        "each `/tr` carries the tap's monitor id",
+    assert_eq!(
+        got.len(),
+        blocks * BLOCK,
+        "the scope must stream every input sample",
     );
     assert!(
-        triggers.iter().any(|tr| tr.value.abs() > 0.01),
-        "triggers carry the sampled 220 Hz signal, not silence",
+        got.iter().any(|&s| s.abs() > 0.1),
+        "scope stream was silent"
+    );
+    assert!(
+        got.iter().all(|&s| s.abs() <= 1.001),
+        "scope exceeded full scale",
+    );
+    // It carries the real 220 Hz signal, not aliased garbage.
+    let (m220, m440) = (goertzel(&got, 220.0), goertzel(&got, 440.0));
+    assert!(
+        m220 > 5.0 * m440,
+        "scope must carry the 220 Hz signal: m220={m220}, m440={m440}",
     );
 }
 

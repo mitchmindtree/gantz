@@ -76,17 +76,20 @@ pub struct ParamBinding {
     pub index: usize,
 }
 
-/// Records a monitor (`~tap`) node's `SendTrig` id, so the audio driver can route
-/// each polled `/tr` trigger (matched by synth node id + this `id`) into the right
-/// node's ring-buffer state, capped at `size`.
+/// Records a monitor (`~tap`) node's `ScopeOut`, so the audio driver can cue a live
+/// scope stream and route its samples into the right node's ring-buffer state,
+/// capped at `size`. The `ScopeOut`'s `bufnum` input is a placeholder in the derived
+/// def; the driver allocates a globally-unique cued index and patches the unit at
+/// `scope_unit` before installing the def.
 #[derive(Clone, Debug)]
 pub struct MonitorBinding {
     /// The monitor node's path within the graph (where its ring state lives).
     pub node_path: Vec<usize>,
-    /// The `SendTrig` id carried by this monitor's `/tr`s (unique within the def).
-    pub id: i32,
     /// The ring buffer length (samples) the driver caps the node's state at.
     pub size: usize,
+    /// The index within the def's `units` of this monitor's `ScopeOut`, so the driver
+    /// can patch its `bufnum` (input 0) to the cued scope-stream index.
+    pub scope_unit: usize,
 }
 
 /// Accumulates the [`UnitSpec`]s and [`Param`]s of a synthdef as nodes emit them.
@@ -133,18 +136,16 @@ impl DspBuilder {
         index as u32
     }
 
-    /// Declare a monitor for the dsp node at `path`, returning the `SendTrig` `id`
-    /// (unique within the synthdef) the node should give its `SendTrig` unit and
-    /// recording its [`MonitorBinding`] (so the driver routes the resulting `/tr`s
-    /// into the node's ring state, capped at `size`).
-    pub fn push_monitor(&mut self, path: &[usize], size: usize) -> i32 {
-        let id = self.monitors.len() as i32;
+    /// Declare a monitor for the dsp node at `path`, recording its [`MonitorBinding`]
+    /// so the driver can cue a scope stream and route its samples into the node's ring
+    /// state (capped at `size`). `scope_unit` is the index of the node's `ScopeOut`
+    /// unit (from [`push_unit`](Self::push_unit)), so the driver can patch its `bufnum`.
+    pub fn push_monitor(&mut self, path: &[usize], size: usize, scope_unit: usize) {
         self.monitors.push(MonitorBinding {
             node_path: path.to_vec(),
-            id,
             size,
+            scope_unit,
         });
-        id
     }
 
     /// The number of output-bus channels a sink should fan its signal across.

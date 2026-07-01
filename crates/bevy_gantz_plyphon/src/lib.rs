@@ -25,10 +25,8 @@ use cpal::{FromSample, SizedSample};
 
 use gantz_ca as ca;
 use gantz_core::node::graph::Graph;
-use gantz_plyphon::{
-    Backend, Embedded, MonitorBinding, ToNodeDsp, derive_synthdef, structural_sig,
-};
-use plyphon::{Controller, Nrt, Options, World, engine};
+use gantz_plyphon::{Backend, Embedded, ToNodeDsp, derive_synthdef, structural_sig};
+use plyphon::{Controller, InputRef, Nrt, Options, StreamConsumer, World, engine};
 
 /// Re-export of [`plyphon`] so downstream crates can implement custom units
 /// (`Unit`, `UnitDef`, `unit_spec`, …) against the exact version this runtime
@@ -44,6 +42,12 @@ use bevy_gantz::{AudioConfig, AudioStatus, EntrypointSet, EvalEpoch, Registry, V
 
 /// OSC/NTP fixed-point units per second (OSC time is 32.32 fixed point: 2^32).
 const OSC_UNITS_PER_SEC: f64 = 4_294_967_296.0;
+
+/// Frames per chunk in a `~tap`'s scope stream (one plyphon block).
+const CHUNK_FRAMES: usize = 64;
+/// Chunks pre-allocated per `~tap` scope stream (~43 ms of slack at 48 kHz before a
+/// bounded overrun drops surplus - harmless, as the ring only keeps the last `size`).
+const NUM_CHUNKS: usize = 32;
 
 /// Convert monotonic [`EvalEpoch`] seconds to an absolute OSC/NTP engine-clock time.
 fn osc(secs: f64) -> u64 {
@@ -129,8 +133,9 @@ where
         app.insert_resource(status);
         // `.after(EntrypointSet)`: run once the `tick!`/`update!` drivers' triggered
         // evaluations have flushed, so the control values they queue are visible to
-        // the param drain below in the same frame.
-        app.init_resource::<HeadSynths>()
+        // the param drain below in the same frame. `HeadSynths` is a NonSend resource:
+        // it holds each `~tap`'s scope `StreamConsumer` (a `!Sync` SPSC handle).
+        app.insert_non_send(HeadSynths::default())
             .add_systems(Update, drive_synths::<N>.after(VmSet).after(EntrypointSet));
     }
 }
@@ -150,10 +155,39 @@ struct AudioEngine {
     stream: cpal::Stream,
 }
 
-/// Per-head synth bookkeeping: which committed graph produced the currently
-/// installed synthdef and running synth, so we only re-derive on change.
-#[derive(Default, Resource)]
-struct HeadSynths(HashMap<Entity, HeadSynth>);
+/// Per-head synth bookkeeping (which committed graph produced the currently
+/// installed synthdef and running synth, so we only re-derive on change), plus the
+/// allocator of global scope-stream indices for `~tap`s. A NonSend resource - a
+/// `~tap`'s scope `StreamConsumer` is `Send` but not `Sync`.
+#[derive(Default)]
+struct HeadSynths {
+    synths: HashMap<Entity, HeadSynth>,
+    scope_alloc: ScopeAlloc,
+}
+
+/// Allocates globally-unique scope-stream indices (plyphon recording-slot ids) for
+/// live `~tap`s, reusing freed ones so a long editing session doesn't exhaust them.
+#[derive(Default)]
+struct ScopeAlloc {
+    free: Vec<usize>,
+    next: usize,
+}
+
+impl ScopeAlloc {
+    /// A free index (reused if available, else a fresh one).
+    fn alloc(&mut self) -> usize {
+        self.free.pop().unwrap_or_else(|| {
+            let index = self.next;
+            self.next += 1;
+            index
+        })
+    }
+
+    /// Return an index for reuse.
+    fn free(&mut self, index: usize) {
+        self.free.push(index);
+    }
+}
 
 /// The installed synthdef + running synth for one open head.
 struct HeadSynth {
@@ -166,10 +200,9 @@ struct HeadSynth {
     /// One slot per control param, binding a dsp node's state value to its synth
     /// param index, with the last value pushed via `set_control`.
     params: Vec<ParamSlot>,
-    /// One binding per `~tap` monitor: routes this synth's `/tr`s into the right
-    /// node's ring state. Refreshed on every derive (a ring-size edit is not a
-    /// structural change, so it must update without a respawn).
-    monitors: Vec<MonitorBinding>,
+    /// One slot per `~tap`: the cued scope stream whose samples the driver drains into
+    /// the node's ring state each frame.
+    scopes: Vec<ScopeSlot>,
 }
 
 /// Binds one synth control param to a dsp node's VM state value.
@@ -180,6 +213,20 @@ struct ParamSlot {
     index: usize,
     /// The last value pushed via `set_control` (`None` until first applied).
     last: Option<f32>,
+}
+
+/// A `~tap`'s live scope stream: every sample of its dsp input arrives here (via
+/// plyphon `ScopeOut` → `cue_scope`) for the driver to append into the node's ring.
+struct ScopeSlot {
+    /// The `~tap` node's path in the graph (where its ring state lives).
+    node_path: Vec<usize>,
+    /// The ring buffer length (samples) the appended stream is capped at.
+    size: usize,
+    /// The cued scope-stream index (a global recording-slot id, baked into the def's
+    /// `ScopeOut` and freed on teardown).
+    index: usize,
+    /// The consumer the driver drains (`pop_filled`/`recycle`) each frame.
+    consumer: StreamConsumer,
 }
 
 /// Keep each open head's synth in sync, `.after(VmSet)` and `.after(EntrypointSet)`.
@@ -193,6 +240,8 @@ struct ParamSlot {
 ///   sample-accurately; a direct inspector edit (no queue) is applied immediately.
 ///   Either way the synth is not respawned (preserving phase), and value/automation
 ///   edits no longer change the graph address.
+/// - *Scope sync* (every frame): drain each `~tap`'s scope stream and append its
+///   samples into the node's ring state (capped at the tap's `size`).
 ///
 /// Also tears down synths for closed heads.
 fn drive_synths<N>(
@@ -200,7 +249,7 @@ fn drive_synths<N>(
     audio: Option<NonSendMut<AudioEngine>>,
     audio_config: Res<AudioConfig>,
     mut enabled_applied: Local<Option<bool>>,
-    mut state: ResMut<HeadSynths>,
+    state: NonSendMut<HeadSynths>,
     mut vms: NonSendMut<HeadVms>,
     heads: Query<(Entity, &HeadRef, &WorkingGraph<N>), With<OpenHead>>,
 ) where
@@ -210,6 +259,7 @@ fn drive_synths<N>(
         return;
     };
     let audio = audio.into_inner();
+    let state = state.into_inner();
 
     // Apply the enable/mute toggle by pausing/playing the output stream on change.
     if *enabled_applied != Some(audio_config.enabled) {
@@ -228,18 +278,8 @@ fn drive_synths<N>(
     audio.nrt.process();
     while audio.nrt.poll().is_some() {}
 
-    // Drain this frame's monitor triggers (`~tap` `SendTrig` `/tr`s), batched per
-    // (synth node id, `SendTrig` id) so each `~tap`'s ring takes a single state
-    // write below. Best-effort: the engine drops `/tr`s past its ring capacity.
-    let mut trig_batches: HashMap<(i32, i32), Vec<f32>> = HashMap::new();
-    while let Some(t) = audio.nrt.poll_trigger() {
-        trig_batches
-            .entry((t.node, t.id))
-            .or_default()
-            .push(t.value);
-    }
-
     let out_channels = audio.out_channels;
+    let sample_rate = audio.sample_rate;
     let mut live: HashSet<Entity> = HashSet::new();
 
     for (entity, head_ref, wg) in heads.iter() {
@@ -249,21 +289,23 @@ fn drive_synths<N>(
         };
 
         // --- Structural sync: only when the committed graph changed. ---
-        if state.0.get(&entity).map(|h| h.graph) != Some(graph_ca) {
+        if state.synths.get(&entity).map(|h| h.graph) != Some(graph_ca) {
             structural_sync(
                 &mut audio.controller,
-                &mut state.0,
+                &mut state.synths,
+                &mut state.scope_alloc,
                 entity,
                 graph_ca,
                 &wg.0,
                 out_channels,
+                sample_rate,
             );
         }
 
         // --- Param sync: drain each param's queued control updates and schedule
         // them ahead of the audio clock; direct (untimestamped) value edits apply
         // immediately. ---
-        if let (Some(synth), Some(vm)) = (state.0.get_mut(&entity), vms.get_mut(&entity)) {
+        if let (Some(synth), Some(vm)) = (state.synths.get_mut(&entity), vms.get_mut(&entity)) {
             let node_id = synth.node_id;
             let mut backend = Embedded::new(&mut audio.controller);
             for slot in &mut synth.params {
@@ -297,11 +339,17 @@ fn drive_synths<N>(
                 }
             }
 
-            // Write each `~tap`'s freshly sampled values into its ring state (the
-            // list its control `expr` surfaces on a trigger push).
-            for mon in &synth.monitors {
-                if let Some(values) = trig_batches.get(&(node_id, mon.id)) {
-                    gantz_plyphon::monitor::push_ring(vm, &mon.node_path, values, mon.size);
+            // Scope sync: drain each `~tap`'s scope stream and append every streamed
+            // sample into its ring state (the list its control `expr` surfaces on a
+            // trigger push; `push_ring` keeps the last `size`).
+            for scope in &mut synth.scopes {
+                let mut samples = Vec::new();
+                while let Some(chunk) = scope.consumer.pop_filled() {
+                    samples.extend_from_slice(chunk.filled_samples());
+                    scope.consumer.recycle(chunk);
+                }
+                if !samples.is_empty() {
+                    gantz_plyphon::monitor::push_ring(vm, &scope.node_path, &samples, scope.size);
                 }
             }
         }
@@ -309,60 +357,94 @@ fn drive_synths<N>(
 
     // Tear down synths whose heads are no longer open.
     let stale: Vec<Entity> = state
-        .0
+        .synths
         .keys()
         .copied()
         .filter(|e| !live.contains(e))
         .collect();
     for e in stale {
-        teardown(&mut audio.controller, state.0.remove(&e));
+        let synth = state.synths.remove(&e);
+        teardown(&mut audio.controller, &mut state.scope_alloc, synth);
     }
 }
 
 /// Re-derive `entity`'s synthdef and respawn the synth if its *structure* changed
-/// (else keep the running synth, just recording the new graph address and
-/// refreshing its monitor bindings). Tears the synth down if the head has no dsp
-/// sink (no `~out` and no `~tap`).
+/// (else keep the running synth, just recording the new graph address and refreshing
+/// its `~tap` ring sizes). Tears the synth down if the head has no dsp sink (no `~out`
+/// and no `~tap`).
+///
+/// The structural signature is computed on the *unpatched* def - every `~tap`'s
+/// `ScopeOut` `bufnum` is still the `0.0` placeholder - so it is stable regardless of
+/// the global scope indices we allocate below (a re-derive of the same graph does not
+/// spuriously respawn). On a respawn, each `~tap` gets a freshly-cued scope stream and
+/// its `ScopeOut` `bufnum` patched to that stream's index before the def is installed.
 fn structural_sync<N>(
     controller: &mut Controller,
     synths: &mut HashMap<Entity, HeadSynth>,
+    scope_alloc: &mut ScopeAlloc,
     entity: Entity,
     graph_ca: ca::GraphAddr,
     graph: &Graph<N>,
     out_channels: usize,
+    sample_rate: f64,
 ) where
     N: ToNodeDsp,
 {
     let def_name = format!("gantz-head-{}", entity.index());
-    let derived = match derive_synthdef(graph, out_channels, def_name.clone()) {
+    let mut derived = match derive_synthdef(graph, out_channels, def_name.clone()) {
         Ok(derived) => derived,
         // No dsp sink to root a synthdef at: tear down any running synth.
         Err(gantz_plyphon::DeriveError::NoSink) => {
-            teardown(controller, synths.remove(&entity));
+            teardown(controller, scope_alloc, synths.remove(&entity));
             return;
         }
     };
     let sig = structural_sig(&derived.def);
 
-    // Structure unchanged (e.g. a non-dsp edit, or a ring-size edit that is not in
-    // the def): keep the running synth + its param slots; record the new graph
-    // address and refresh the monitor bindings (their sizes/paths may have changed
-    // without changing the structural signature).
+    // Structure unchanged (e.g. a non-dsp edit, or a ring-`size` edit that is not in
+    // the def): keep the running synth + its param slots + its cued scope streams;
+    // record the new graph address and refresh each tap's ring `size` (matched by
+    // node path) in case a size edit changed it.
     if synths.get(&entity).map(|s| s.sig) == Some(sig) {
         if let Some(prev) = synths.get_mut(&entity) {
             prev.graph = graph_ca;
-            prev.monitors = derived.monitors;
+            for m in &derived.monitors {
+                if let Some(slot) = prev.scopes.iter_mut().find(|s| s.node_path == m.node_path) {
+                    slot.size = m.size;
+                }
+            }
         }
         return;
     }
 
-    // Structural change (or this head's first synth): respawn.
-    let mut backend = Embedded::new(controller);
-    if let Some(prev) = synths.get(&entity) {
-        let _ = backend.free_node(prev.node_id);
+    // Structural change (or this head's first synth): free the old synth + its scope
+    // streams, cue a fresh scope stream per `~tap` (patching its `ScopeOut` bufnum to
+    // the cued index), then install + respawn.
+    teardown(controller, scope_alloc, synths.remove(&entity));
+
+    let mut scopes = Vec::new();
+    for m in &derived.monitors {
+        let index = scope_alloc.alloc();
+        derived.def.units[m.scope_unit].inputs[0] = InputRef::Constant(index as f32);
+        match controller.cue_scope(index, 1, sample_rate, CHUNK_FRAMES, NUM_CHUNKS) {
+            Ok(consumer) => scopes.push(ScopeSlot {
+                node_path: m.node_path.clone(),
+                size: m.size,
+                index,
+                consumer,
+            }),
+            Err(e) => {
+                log::error!("bevy_gantz_plyphon: cue_scope failed: {e:?}");
+                scope_alloc.free(index);
+            }
+        }
     }
+
+    let mut backend = Embedded::new(controller);
     if let Err(e) = backend.install_synthdef(derived.def) {
         log::error!("bevy_gantz_plyphon: synthdef install failed: {e:?}");
+        drop(backend);
+        free_scopes(controller, scope_alloc, scopes);
         return;
     }
     match backend.spawn(&def_name) {
@@ -384,20 +466,36 @@ fn structural_sync<N>(
                     node_id,
                     sig,
                     params,
-                    monitors: derived.monitors,
+                    scopes,
                 },
             );
         }
-        Err(e) => log::error!("bevy_gantz_plyphon: synth spawn failed: {e:?}"),
+        Err(e) => {
+            log::error!("bevy_gantz_plyphon: synth spawn failed: {e:?}");
+            let _ = backend.free_synthdef(&def_name);
+            drop(backend);
+            free_scopes(controller, scope_alloc, scopes);
+        }
     }
 }
 
-/// Free a head's running synth and its synthdef, if it had one.
-fn teardown(controller: &mut Controller, synth: Option<HeadSynth>) {
+/// Free a head's running synth, its synthdef, and its `~tap` scope streams, if any.
+fn teardown(controller: &mut Controller, scope_alloc: &mut ScopeAlloc, synth: Option<HeadSynth>) {
     if let Some(s) = synth {
         let mut backend = Embedded::new(controller);
         let _ = backend.free_node(s.node_id);
         let _ = backend.free_synthdef(&s.def_name);
+        drop(backend);
+        free_scopes(controller, scope_alloc, s.scopes);
+    }
+}
+
+/// Close each scope stream's cued recording slot and return its index to the
+/// allocator for reuse (the `StreamConsumer`s drop with the vec).
+fn free_scopes(controller: &mut Controller, scope_alloc: &mut ScopeAlloc, scopes: Vec<ScopeSlot>) {
+    for scope in scopes {
+        let _ = controller.close_recording(scope.index);
+        scope_alloc.free(scope.index);
     }
 }
 

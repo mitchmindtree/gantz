@@ -1,8 +1,8 @@
 //! `.gantz` keyword sugar for the DSP node set.
 //!
 //! [`PlyphonSugar`] provides the human-friendly keywords for this crate's nodes:
-//! bare `~sine`/`~out`/`~lag`/`~tap`, with optional `(~sine #:freq-lag s)`,
-//! `(~out #:gain-lag s)` and `(~tap #:size n)` forms carrying the (structural)
+//! bare `~sinosc`/`~out`/`~lag`/`~scopeout`, with optional `(~sinosc #:freq-lag s)`,
+//! `(~out #:gain-lag s)` and `(~scopeout #:size n)` forms carrying the (structural)
 //! smoothing lag / ring length. The `freq`/`gain`/`dur` param *values* live in VM
 //! state (not the node weight), so they are not serialized and never appear here.
 //! Compose it with [`gantz_format::CoreSugar`] (and the other crates' sugars) via
@@ -10,17 +10,17 @@
 
 use gantz_format::{Datum, FormatError, Sugar, SugarArgs, node_datum};
 
-/// Keyword sugar for the plyphon DSP nodes ([`Sine`](crate::Sine),
-/// [`Out`](crate::Out), [`Lag`](crate::Lag), [`Tap`](crate::Tap)).
+/// Keyword sugar for the plyphon DSP nodes ([`SinOsc`](crate::SinOsc),
+/// [`Out`](crate::Out), [`Lag`](crate::Lag), [`ScopeOut`](crate::ScopeOut)).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlyphonSugar;
 
 /// Sugar keyword -> typetag tag.
 const KEYWORD_TAG: &[(&str, &str)] = &[
-    ("~sine", "Sine"),
+    ("~sinosc", "SinOsc"),
     ("~out", "Out"),
     ("~lag", "Lag"),
-    ("~tap", "Tap"),
+    ("~scopeout", "ScopeOut"),
 ];
 
 /// The typetag tag for a sugar keyword.
@@ -42,10 +42,10 @@ fn keyword_for_tag(tag: &str) -> Option<&'static str> {
 impl Sugar for PlyphonSugar {
     fn read_spec(&self, head: &str, args: SugarArgs<'_>) -> Result<Option<Datum>, FormatError> {
         let datum = match head {
-            "~sine" => lag_spec("Sine", "freq_lag", "freq-lag", args)?,
+            "~sinosc" => lag_spec("SinOsc", "freq_lag", "freq-lag", args)?,
             "~out" => lag_spec("Out", "gain_lag", "gain-lag", args)?,
             "~lag" => node_datum("Lag", vec![]),
-            "~tap" => size_spec(args)?,
+            "~scopeout" => size_spec(args)?,
             _ => return Ok(None),
         };
         Ok(Some(datum))
@@ -57,11 +57,11 @@ impl Sugar for PlyphonSugar {
 
     fn write_spec(&self, tag: &str, node: &Datum) -> Option<String> {
         match tag {
-            "Sine" => Some(write_lag(
-                "~sine",
+            "SinOsc" => Some(write_lag(
+                "~sinosc",
                 "freq_lag",
                 "freq-lag",
-                crate::Sine::DEFAULT_FREQ_LAG,
+                crate::SinOsc::DEFAULT_FREQ_LAG,
                 node,
             )),
             "Out" => Some(write_lag(
@@ -71,7 +71,7 @@ impl Sugar for PlyphonSugar {
                 crate::Out::DEFAULT_GAIN_LAG,
                 node,
             )),
-            "Tap" => Some(write_size(node)),
+            "ScopeOut" => Some(write_size(node)),
             other => keyword_for_tag(other).map(str::to_string),
         }
     }
@@ -107,24 +107,24 @@ fn write_lag(kw: &str, field: &str, keyword: &str, default: f32, node: &Datum) -
     }
 }
 
-/// Read a `(~tap [#:size n])` form into a `Tap` node datum, carrying the ring
+/// Read a `(~scopeout [#:size n])` form into a `ScopeOut` node datum, carrying the ring
 /// `size` only when the keyword is present (so a bare form stays bare).
 fn size_spec(args: SugarArgs<'_>) -> Result<Datum, FormatError> {
     let mut fields = Vec::new();
     if let Some(size) = args.keyword_int("size")? {
         fields.push(("size", Datum::U64(size.max(1) as u64)));
     }
-    Ok(node_datum("Tap", fields))
+    Ok(node_datum("ScopeOut", fields))
 }
 
-/// Write a `Tap`: the bare `~tap` when the ring `size` is at its default, else
-/// `(~tap #:size n)`.
+/// Write a `ScopeOut`: the bare `~scopeout` when the ring `size` is at its default, else
+/// `(~scopeout #:size n)`.
 fn write_size(node: &Datum) -> String {
     match node.get("size").and_then(Datum::as_i64) {
-        Some(size) if size != crate::Tap::DEFAULT_SIZE as i64 => {
-            format!("(~tap #:size {size})")
+        Some(size) if size != crate::ScopeOut::DEFAULT_SIZE as i64 => {
+            format!("(~scopeout #:size {size})")
         }
-        _ => "~tap".to_string(),
+        _ => "~scopeout".to_string(),
     }
 }
 
@@ -146,18 +146,18 @@ mod tests {
     #[test]
     fn sine_round_trips() {
         let s = PlyphonSugar;
-        // A default `~sine` stays bare, read as a bare keyword or an empty spec.
-        let bare = s.read_bare("~sine").expect("bare");
-        assert_eq!(bare.get("type").and_then(Datum::as_str), Some("Sine"));
-        assert_eq!(s.write_spec("Sine", &bare).as_deref(), Some("~sine"));
-        let empty = read_spec("(~sine)").expect("empty");
-        assert_eq!(s.write_spec("Sine", &empty).as_deref(), Some("~sine"));
+        // A default `~sinosc` stays bare, read as a bare keyword or an empty spec.
+        let bare = s.read_bare("~sinosc").expect("bare");
+        assert_eq!(bare.get("type").and_then(Datum::as_str), Some("SinOsc"));
+        assert_eq!(s.write_spec("SinOsc", &bare).as_deref(), Some("~sinosc"));
+        let empty = read_spec("(~sinosc)").expect("empty");
+        assert_eq!(s.write_spec("SinOsc", &empty).as_deref(), Some("~sinosc"));
         // A non-default freq lag round-trips.
-        let lagged = read_spec("(~sine #:freq-lag 0.5)").expect("lagged");
+        let lagged = read_spec("(~sinosc #:freq-lag 0.5)").expect("lagged");
         assert_eq!(lagged.get("freq_lag").and_then(Datum::as_f64), Some(0.5));
         assert_eq!(
-            s.write_spec("Sine", &lagged).as_deref(),
-            Some("(~sine #:freq-lag 0.5)"),
+            s.write_spec("SinOsc", &lagged).as_deref(),
+            Some("(~sinosc #:freq-lag 0.5)"),
         );
     }
 
@@ -198,24 +198,33 @@ mod tests {
     #[test]
     fn tap_round_trips() {
         let s = PlyphonSugar;
-        // A default `~tap` stays bare (read as a bare keyword or an empty spec).
-        let bare = s.read_bare("~tap").expect("bare");
-        assert_eq!(bare.get("type").and_then(Datum::as_str), Some("Tap"));
-        assert_eq!(s.write_spec("Tap", &bare).as_deref(), Some("~tap"));
-        let empty = read_spec("(~tap)").expect("empty");
-        assert_eq!(s.write_spec("Tap", &empty).as_deref(), Some("~tap"));
-        // A `Tap` carrying the default size still writes bare.
-        let defaulted = node_datum(
-            "Tap",
-            vec![("size", Datum::U64(crate::Tap::DEFAULT_SIZE as u64))],
+        // A default `~scopeout` stays bare (read as a bare keyword or an empty spec).
+        let bare = s.read_bare("~scopeout").expect("bare");
+        assert_eq!(bare.get("type").and_then(Datum::as_str), Some("ScopeOut"));
+        assert_eq!(
+            s.write_spec("ScopeOut", &bare).as_deref(),
+            Some("~scopeout")
         );
-        assert_eq!(s.write_spec("Tap", &defaulted).as_deref(), Some("~tap"));
+        let empty = read_spec("(~scopeout)").expect("empty");
+        assert_eq!(
+            s.write_spec("ScopeOut", &empty).as_deref(),
+            Some("~scopeout")
+        );
+        // A `ScopeOut` carrying the default size still writes bare.
+        let defaulted = node_datum(
+            "ScopeOut",
+            vec![("size", Datum::U64(crate::ScopeOut::DEFAULT_SIZE as u64))],
+        );
+        assert_eq!(
+            s.write_spec("ScopeOut", &defaulted).as_deref(),
+            Some("~scopeout")
+        );
         // A non-default size round-trips.
-        let sized = read_spec("(~tap #:size 512)").expect("sized");
+        let sized = read_spec("(~scopeout #:size 512)").expect("sized");
         assert_eq!(sized.get("size").and_then(Datum::as_i64), Some(512));
         assert_eq!(
-            s.write_spec("Tap", &sized).as_deref(),
-            Some("(~tap #:size 512)"),
+            s.write_spec("ScopeOut", &sized).as_deref(),
+            Some("(~scopeout #:size 512)"),
         );
     }
 

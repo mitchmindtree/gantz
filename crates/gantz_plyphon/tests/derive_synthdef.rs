@@ -5,8 +5,8 @@
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    Backend, DeriveError, Embedded, Lag, NodeDsp, Out, Sine, Tap, ToNodeDsp, derive_synthdef,
-    structural_sig,
+    Backend, DeriveError, Embedded, Lag, NodeDsp, Out, ScopeOut, SinOsc, ToNodeDsp,
+    derive_synthdef, structural_sig,
 };
 use plyphon::synthdef::InputRef;
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, World, engine};
@@ -16,29 +16,29 @@ const SR: f32 = 48_000.0;
 /// A minimal erased node enum, standing in for the app's `Box<dyn Node>`.
 /// `Other` is a non-DSP node (a stand-in for any control-rate node).
 enum N {
-    Sine(Sine),
+    SinOsc(SinOsc),
     Lag(Lag),
     Out(Out),
-    Tap(Tap),
+    ScopeOut(ScopeOut),
     Other,
 }
 
 impl ToNodeDsp for N {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         match self {
-            N::Sine(s) => Some(s),
+            N::SinOsc(s) => Some(s),
             N::Lag(l) => Some(l),
             N::Out(o) => Some(o),
-            N::Tap(t) => Some(t),
+            N::ScopeOut(t) => Some(t),
             N::Other => None,
         }
     }
 }
 
-/// Build a `~sine -> ~out` graph (default params).
+/// Build a `~sinosc -> ~out` graph (default params).
 fn sine_to_out() -> Graph<N> {
     let mut g = Graph::<N>::default();
-    let s = g.add_node(N::Sine(Sine::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
     let o = g.add_node(N::Out(Out::default()));
     g.add_edge(s, o, Edge::new(0.into(), 0.into()));
     g
@@ -57,7 +57,7 @@ fn derives_expected_units() {
     // in node state and is applied via set_control.
     assert_eq!(def.params.len(), 2);
     assert!(def.params[0].name.ends_with("/freq"));
-    assert_eq!(def.params[0].default, Sine::DEFAULT_FREQ);
+    assert_eq!(def.params[0].default, SinOsc::DEFAULT_FREQ);
     assert_eq!(def.params[0].lag, None, "freq is unsmoothed by default");
     assert!(def.params[1].name.ends_with("/gain"));
     assert_eq!(def.params[1].default, Out::DEFAULT_GAIN);
@@ -105,9 +105,9 @@ fn lag_change_changes_structural_sig() {
     let base = derive_synthdef(&g, 1, "t").expect("derive").def;
 
     let mut g2 = Graph::<N>::default();
-    let mut lagged_sine = Sine::default();
+    let mut lagged_sine = SinOsc::default();
     lagged_sine.set_freq_lag(0.5);
-    let s = g2.add_node(N::Sine(lagged_sine));
+    let s = g2.add_node(N::SinOsc(lagged_sine));
     let o = g2.add_node(N::Out(Out::default()));
     g2.add_edge(s, o, Edge::new(0.into(), 0.into()));
     let lagged = derive_synthdef(&g2, 1, "t").expect("derive").def;
@@ -123,14 +123,14 @@ fn lag_change_changes_structural_sig() {
 fn lag_is_part_of_node_identity() {
     use gantz_ca::content_addr;
     assert_eq!(
-        content_addr(&Sine::default()),
-        content_addr(&Sine::default()),
+        content_addr(&SinOsc::default()),
+        content_addr(&SinOsc::default()),
         "identical nodes share a content address",
     );
-    let mut lagged = Sine::default();
+    let mut lagged = SinOsc::default();
     lagged.set_freq_lag(0.5);
     assert_ne!(
-        content_addr(&Sine::default()),
+        content_addr(&SinOsc::default()),
         content_addr(&lagged),
         "the freq lag is part of the node's content address",
     );
@@ -147,10 +147,10 @@ fn fans_output_across_channels() {
 
 #[test]
 fn lag_node_wired_into_chain() {
-    // `~sine -> ~lag -> ~out`: the Lag UGen sits between the SinOsc and the gain
+    // `~sinosc -> ~lag -> ~out`: the Lag UGen sits between the SinOsc and the gain
     // mul, smoothing the signal, with its own `dur` control param.
     let mut g = Graph::<N>::default();
-    let s = g.add_node(N::Sine(Sine::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
     let l = g.add_node(N::Lag(Lag::default()));
     let o = g.add_node(N::Out(Out::default()));
     g.add_edge(s, l, Edge::new(0.into(), 0.into()));
@@ -189,7 +189,7 @@ fn control_edge_on_root_does_not_panic() {
     // seeded over only the dsp inputs, so the control edge falls outside the eval
     // conns and is simply ignored. Regression for the `eval_neighbors` unwrap.
     let mut g = Graph::<N>::default();
-    let s = g.add_node(N::Sine(Sine::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
     let o = g.add_node(N::Out(Out::default()));
     let ctrl = g.add_node(N::Other);
     g.add_edge(s, o, Edge::new(0.into(), 0.into())); // audio -> ~out input 0
@@ -204,7 +204,7 @@ fn control_edge_on_root_does_not_panic() {
 
 #[test]
 fn graph_without_sink_is_rejected() {
-    // A graph with no dsp sink (no `~out`, no `~tap`) has nothing to root a
+    // A graph with no dsp sink (no `~out`, no `~scopeout`) has nothing to root a
     // synthdef at.
     let mut g = Graph::<N>::default();
     g.add_node(N::Other);
@@ -216,15 +216,15 @@ fn graph_without_sink_is_rejected() {
 
 #[test]
 fn tap_joins_output_in_one_def() {
-    // `~sine -> ~out` and `~sine -> ~tap`: the tap is a second sink that shares the
+    // `~sinosc -> ~out` and `~sinosc -> ~scopeout`: the tap is a second sink that shares the
     // sine's chain, so one synthdef carries SinOsc, Out and a ScopeOut, with a single
     // monitor binding at the tap's node path - and the shared SinOsc is emitted once.
     let mut g = Graph::<N>::default();
-    let s = g.add_node(N::Sine(Sine::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
     let o = g.add_node(N::Out(Out::default()));
-    let t = g.add_node(N::Tap(Tap::default()));
+    let t = g.add_node(N::ScopeOut(ScopeOut::default()));
     g.add_edge(s, o, Edge::new(0.into(), 0.into())); // sine -> ~out (audio)
-    g.add_edge(s, t, Edge::new(0.into(), 0.into())); // sine -> ~tap (dsp input 0)
+    g.add_edge(s, t, Edge::new(0.into(), 0.into())); // sine -> ~scopeout (dsp input 0)
 
     let derived = derive_synthdef(&g, 1, "t").expect("derive");
     let names: Vec<&str> = derived.def.units.iter().map(|u| u.name.as_str()).collect();
@@ -237,10 +237,14 @@ fn tap_joins_output_in_one_def() {
         "the signal feeding both sinks is emitted once",
     );
 
-    assert_eq!(derived.monitors.len(), 1, "one ~tap -> one monitor binding");
+    assert_eq!(
+        derived.monitors.len(),
+        1,
+        "one ~scopeout -> one monitor binding"
+    );
     let mon = &derived.monitors[0];
     assert_eq!(mon.node_path, vec![t.index()]);
-    assert_eq!(mon.size, Tap::DEFAULT_SIZE);
+    assert_eq!(mon.size, ScopeOut::DEFAULT_SIZE);
 
     // The binding's `scope_unit` names the ScopeOut; its bufnum (input 0) is the
     // placeholder the driver patches, and its value input (1) is the tapped sine.
@@ -258,11 +262,11 @@ fn tap_joins_output_in_one_def() {
 
 #[test]
 fn tap_without_output_still_derives() {
-    // A monitor-only graph (`~sine -> ~tap`, no `~out`) derives a silent synthdef:
-    // a `~tap` is a sink in its own right, so there is something to root at.
+    // A monitor-only graph (`~sinosc -> ~scopeout`, no `~out`) derives a silent synthdef:
+    // a `~scopeout` is a sink in its own right, so there is something to root at.
     let mut g = Graph::<N>::default();
-    let s = g.add_node(N::Sine(Sine::default()));
-    let t = g.add_node(N::Tap(Tap::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let t = g.add_node(N::ScopeOut(ScopeOut::default()));
     g.add_edge(s, t, Edge::new(0.into(), 0.into()));
 
     let derived = derive_synthdef(&g, 1, "t").expect("derive");
@@ -280,13 +284,13 @@ fn tap_without_output_still_derives() {
 
 #[test]
 fn tap_scope_streams_samples() {
-    // `~sine -> ~tap` (no ~out): the tap's ScopeOut streams *every* sample of the
+    // `~sinosc -> ~scopeout` (no ~out): the tap's ScopeOut streams *every* sample of the
     // sine off the audio thread into a cued scope stream. Draining it recovers the
     // full-rate 220 Hz signal - the stream the driver appends into the tap's ring.
     const BLOCK: usize = 64;
     let mut g = Graph::<N>::default();
-    let s = g.add_node(N::Sine(Sine::default()));
-    let t = g.add_node(N::Tap(Tap::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let t = g.add_node(N::ScopeOut(ScopeOut::default()));
     g.add_edge(s, t, Edge::new(0.into(), 0.into()));
 
     let mut derived = derive_synthdef(&g, 1, "t").expect("derive");

@@ -5,11 +5,11 @@
 //! clock is anchored to the host) and keeps the [`plyphon::Controller`] +
 //! [`plyphon::Nrt`] handles. Each update, after [`bevy_gantz::VmSet`], it derives a
 //! synthdef from each open head's DSP subgraph (rooted at its `~out` output and any
-//! `~tap` monitors) and installs/respawns the synth via the [`gantz_plyphon::Backend`]
+//! `~scopeout` monitors) and installs/respawns the synth via the [`gantz_plyphon::Backend`]
 //! seam whenever the head's committed graph changes.
 //!
 //! The bridge runs both ways: control values drive dsp params via `set_control`,
-//! and each `~tap` monitor's `SendTrig` `/tr`s are drained here into the node's
+//! and each `~scopeout` monitor's `SendTrig` `/tr`s are drained here into the node's
 //! ring-buffer state (so the control world can scope an audio signal).
 //!
 //! Mixing across heads is free: every head's `~out` synth writes to output bus 0,
@@ -43,9 +43,9 @@ use bevy_gantz::{AudioConfig, AudioStatus, EntrypointSet, EvalEpoch, Registry, V
 /// OSC/NTP fixed-point units per second (OSC time is 32.32 fixed point: 2^32).
 const OSC_UNITS_PER_SEC: f64 = 4_294_967_296.0;
 
-/// Frames per chunk in a `~tap`'s scope stream (one plyphon block).
+/// Frames per chunk in a `~scopeout`'s scope stream (one plyphon block).
 const CHUNK_FRAMES: usize = 64;
-/// Chunks pre-allocated per `~tap` scope stream (~43 ms of slack at 48 kHz before a
+/// Chunks pre-allocated per `~scopeout` scope stream (~43 ms of slack at 48 kHz before a
 /// bounded overrun drops surplus - harmless, as the ring only keeps the last `size`).
 const NUM_CHUNKS: usize = 32;
 
@@ -134,7 +134,7 @@ where
         // `.after(EntrypointSet)`: run once the `tick!`/`update!` drivers' triggered
         // evaluations have flushed, so the control values they queue are visible to
         // the param drain below in the same frame. `HeadSynths` is a NonSend resource:
-        // it holds each `~tap`'s scope `StreamConsumer` (a `!Sync` SPSC handle).
+        // it holds each `~scopeout`'s scope `StreamConsumer` (a `!Sync` SPSC handle).
         app.insert_non_send(HeadSynths::default())
             .add_systems(Update, drive_synths::<N>.after(VmSet).after(EntrypointSet));
     }
@@ -157,8 +157,8 @@ struct AudioEngine {
 
 /// Per-head synth bookkeeping (which committed graph produced the currently
 /// installed synthdef and running synth, so we only re-derive on change), plus the
-/// allocator of global scope-stream indices for `~tap`s. A NonSend resource - a
-/// `~tap`'s scope `StreamConsumer` is `Send` but not `Sync`.
+/// allocator of global scope-stream indices for `~scopeout`s. A NonSend resource - a
+/// `~scopeout`'s scope `StreamConsumer` is `Send` but not `Sync`.
 #[derive(Default)]
 struct HeadSynths {
     synths: HashMap<Entity, HeadSynth>,
@@ -166,7 +166,7 @@ struct HeadSynths {
 }
 
 /// Allocates globally-unique scope-stream indices (plyphon recording-slot ids) for
-/// live `~tap`s, reusing freed ones so a long editing session doesn't exhaust them.
+/// live `~scopeout`s, reusing freed ones so a long editing session doesn't exhaust them.
 #[derive(Default)]
 struct ScopeAlloc {
     free: Vec<usize>,
@@ -200,7 +200,7 @@ struct HeadSynth {
     /// One slot per control param, binding a dsp node's state value to its synth
     /// param index, with the last value pushed via `set_control`.
     params: Vec<ParamSlot>,
-    /// One slot per `~tap`: the cued scope stream whose samples the driver drains into
+    /// One slot per `~scopeout`: the cued scope stream whose samples the driver drains into
     /// the node's ring state each frame.
     scopes: Vec<ScopeSlot>,
 }
@@ -215,10 +215,10 @@ struct ParamSlot {
     last: Option<f32>,
 }
 
-/// A `~tap`'s live scope stream: every sample of its dsp input arrives here (via
+/// A `~scopeout`'s live scope stream: every sample of its dsp input arrives here (via
 /// plyphon `ScopeOut` → `cue_scope`) for the driver to append into the node's ring.
 struct ScopeSlot {
-    /// The `~tap` node's path in the graph (where its ring state lives).
+    /// The `~scopeout` node's path in the graph (where its ring state lives).
     node_path: Vec<usize>,
     /// The ring buffer length (samples) the appended stream is capped at.
     size: usize,
@@ -240,7 +240,7 @@ struct ScopeSlot {
 ///   sample-accurately; a direct inspector edit (no queue) is applied immediately.
 ///   Either way the synth is not respawned (preserving phase), and value/automation
 ///   edits no longer change the graph address.
-/// - *Scope sync* (every frame): drain each `~tap`'s scope stream and append its
+/// - *Scope sync* (every frame): drain each `~scopeout`'s scope stream and append its
 ///   samples into the node's ring state (capped at the tap's `size`).
 ///
 /// Also tears down synths for closed heads.
@@ -339,7 +339,7 @@ fn drive_synths<N>(
                 }
             }
 
-            // Scope sync: drain each `~tap`'s scope stream and append every streamed
+            // Scope sync: drain each `~scopeout`'s scope stream and append every streamed
             // sample into its ring state (the list its control `expr` surfaces on a
             // trigger push; `push_ring` keeps the last `size`).
             for scope in &mut synth.scopes {
@@ -370,13 +370,13 @@ fn drive_synths<N>(
 
 /// Re-derive `entity`'s synthdef and respawn the synth if its *structure* changed
 /// (else keep the running synth, just recording the new graph address and refreshing
-/// its `~tap` ring sizes). Tears the synth down if the head has no dsp sink (no `~out`
-/// and no `~tap`).
+/// its `~scopeout` ring sizes). Tears the synth down if the head has no dsp sink (no `~out`
+/// and no `~scopeout`).
 ///
-/// The structural signature is computed on the *unpatched* def - every `~tap`'s
+/// The structural signature is computed on the *unpatched* def - every `~scopeout`'s
 /// `ScopeOut` `bufnum` is still the `0.0` placeholder - so it is stable regardless of
 /// the global scope indices we allocate below (a re-derive of the same graph does not
-/// spuriously respawn). On a respawn, each `~tap` gets a freshly-cued scope stream and
+/// spuriously respawn). On a respawn, each `~scopeout` gets a freshly-cued scope stream and
 /// its `ScopeOut` `bufnum` patched to that stream's index before the def is installed.
 fn structural_sync<N>(
     controller: &mut Controller,
@@ -418,7 +418,7 @@ fn structural_sync<N>(
     }
 
     // Structural change (or this head's first synth): free the old synth + its scope
-    // streams, cue a fresh scope stream per `~tap` (patching its `ScopeOut` bufnum to
+    // streams, cue a fresh scope stream per `~scopeout` (patching its `ScopeOut` bufnum to
     // the cued index), then install + respawn.
     teardown(controller, scope_alloc, synths.remove(&entity));
 
@@ -479,7 +479,7 @@ fn structural_sync<N>(
     }
 }
 
-/// Free a head's running synth, its synthdef, and its `~tap` scope streams, if any.
+/// Free a head's running synth, its synthdef, and its `~scopeout` scope streams, if any.
 fn teardown(controller: &mut Controller, scope_alloc: &mut ScopeAlloc, synth: Option<HeadSynth>) {
     if let Some(s) = synth {
         let mut backend = Embedded::new(controller);

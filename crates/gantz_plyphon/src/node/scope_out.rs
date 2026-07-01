@@ -1,4 +1,4 @@
-//! The `~tap` node: monitor a dsp signal into a ring buffer, read out on a trigger.
+//! The `~scopeout` node: monitor a dsp signal into a ring buffer, read out on a trigger.
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, RegCtx};
@@ -22,15 +22,15 @@ use crate::param::value_row;
 /// with a `tick!`), and plug the list output into a `plot` (or any widget) to see
 /// it. Set `size` to 1 to monitor a single latest value; larger for a waveform
 /// window. It is a dsp *sink* (no passthrough); to keep hearing a signal, also wire
-/// it to `~out`. A `~peak`/`~rms` node placed before a `~tap` gives level metering.
+/// it to `~out`. A `~peak`/`~rms` node placed before a `~scopeout` gives level metering.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
-pub struct Tap {
+pub struct ScopeOut {
     #[serde(default = "default_size")]
     size: usize,
 }
 
-impl Tap {
-    /// The default ring-buffer length (samples) a fresh `~tap` starts at.
+impl ScopeOut {
+    /// The default ring-buffer length (samples) a fresh `~scopeout` starts at.
     pub const DEFAULT_SIZE: usize = 256;
 
     /// The ring-buffer length (samples).
@@ -44,22 +44,22 @@ impl Tap {
     }
 }
 
-impl Default for Tap {
+impl Default for ScopeOut {
     fn default() -> Self {
-        Tap {
+        ScopeOut {
             size: default_size(),
         }
     }
 }
 
-impl CaHash for Tap {
+impl CaHash for ScopeOut {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-        hasher.update(b"gantz.plyphon.tap");
+        hasher.update(b"gantz.plyphon.scopeout");
         hasher.update(&self.size.to_le_bytes());
     }
 }
 
-impl gantz_core::Node for Tap {
+impl gantz_core::Node for ScopeOut {
     fn n_inputs(&self, _ctx: MetaCtx) -> usize {
         // Input 0 is the audio signal (a dsp edge); input 1 is the control trigger
         // that reads the buffer out the outlet.
@@ -90,7 +90,7 @@ impl gantz_core::Node for Tap {
     }
 }
 
-impl NodeDsp for Tap {
+impl NodeDsp for ScopeOut {
     fn n_dsp_inputs(&self) -> usize {
         1
     }
@@ -121,26 +121,26 @@ impl NodeDsp for Tap {
     }
 }
 
-impl ToNodeDsp for Tap {
+impl ToNodeDsp for ScopeOut {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         Some(self)
     }
 }
 
-impl NodeUi for Tap {
+impl NodeUi for ScopeOut {
     fn name(&self, _: &dyn Registry) -> &str {
-        "~tap"
+        "~scopeout"
     }
 
     fn description(&self) -> Option<&'static str> {
-        Some("Tap a dsp signal into a ring buffer; read it out on a trigger")
+        Some("Scope a dsp signal into a ring buffer; read it out on a trigger")
     }
 
     fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
         // The body shows just the node name; the buffered samples surface via the
         // outlet (into a `plot`), and the ring length is edited in the inspector.
         let framed =
-            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~tap").selectable(false)));
+            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~scopeout").selectable(false)));
         NodeUiResponse::new(framed)
     }
 
@@ -183,5 +183,5 @@ impl NodeUi for Tap {
 }
 
 fn default_size() -> usize {
-    Tap::DEFAULT_SIZE
+    ScopeOut::DEFAULT_SIZE
 }

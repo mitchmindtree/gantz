@@ -7,10 +7,10 @@
 
 pub use lag::Lag;
 pub use out::Out;
-pub use sine::Sine;
-pub use tap::Tap;
+pub use scope_out::ScopeOut;
+pub use sin_osc::SinOsc;
 
 pub mod lag;
 pub mod out;
-pub mod sine;
-pub mod tap;
+pub mod scope_out;
+pub mod sin_osc;

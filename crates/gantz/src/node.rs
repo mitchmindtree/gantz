@@ -32,10 +32,10 @@ impl Node for bevy_gantz_egui::node::TickBang {}
 impl Node for gantz_egui::node::Inspect {}
 impl Node for gantz_egui::node::Plot {}
 
-impl Node for gantz_plyphon::Sine {}
+impl Node for gantz_plyphon::SinOsc {}
 impl Node for gantz_plyphon::Out {}
 impl Node for gantz_plyphon::Lag {}
-impl Node for gantz_plyphon::Tap {}
+impl Node for gantz_plyphon::ScopeOut {}
 
 // `Box<dyn Node>`'s `Serialize`/`Deserialize`: compiled dispatch over the
 // full node set, keyed by each type's `gantz_nodetag::NodeTag`. Adding a
@@ -60,10 +60,10 @@ gantz_format::impl_node_set_serde! {
         bevy_gantz_egui::node::TickBang,
         gantz_egui::node::Inspect,
         gantz_egui::node::Plot,
-        gantz_plyphon::Sine,
+        gantz_plyphon::SinOsc,
         gantz_plyphon::Out,
         gantz_plyphon::Lag,
-        gantz_plyphon::Tap,
+        gantz_plyphon::ScopeOut,
     }
 }
 
@@ -106,7 +106,7 @@ impl bevy_gantz_egui::node::ToTickBang for Box<dyn Node> {
 impl gantz_plyphon::ToNodeDsp for Box<dyn Node> {
     fn to_node_dsp(&self) -> Option<&dyn gantz_plyphon::NodeDsp> {
         let any: &dyn Any = &**self;
-        if let Some(n) = any.downcast_ref::<gantz_plyphon::Sine>() {
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::SinOsc>() {
             return Some(n);
         }
         if let Some(n) = any.downcast_ref::<gantz_plyphon::Out>() {
@@ -115,7 +115,7 @@ impl gantz_plyphon::ToNodeDsp for Box<dyn Node> {
         if let Some(n) = any.downcast_ref::<gantz_plyphon::Lag>() {
             return Some(n);
         }
-        if let Some(n) = any.downcast_ref::<gantz_plyphon::Tap>() {
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::ScopeOut>() {
             return Some(n);
         }
         None
@@ -246,11 +246,11 @@ mod tests {
                     ("y_max", Datum::Null),
                 ],
             ),
-            node_datum("Sine", vec![]),
+            node_datum("SinOsc", vec![]),
             node_datum("Out", vec![]),
             node_datum("Lag", vec![]),
-            node_datum("Tap", vec![]),
-            node_datum("Tap", vec![("size", Datum::U64(64))]),
+            node_datum("ScopeOut", vec![]),
+            node_datum("ScopeOut", vec![("size", Datum::U64(64))]),
         ];
         for value in cases {
             let node: Box<dyn Node> = from_datum(value.clone())
@@ -346,17 +346,25 @@ mod tests {
 
     /// `PlyphonSugar` is composed into the app's `NodeSugar`, so the DSP nodes
     /// serialize as their `~`-prefixed keyword forms (not the generic
-    /// `(node "Sine" ...)` fallback). Guards that the sugar stays wired in.
+    /// `(node "SinOsc" ...)` fallback). Guards that the sugar stays wired in.
     #[test]
     fn dsp_nodes_use_plyphon_keyword_sugar() {
         use gantz_format::{NodeSugar, Sugar, to_datum};
 
         let sugar = <Box<dyn Node> as NodeSugar>::sugar();
         let cases: [(Box<dyn Node>, &str, &str); 4] = [
-            (Box::new(gantz_plyphon::Sine::default()), "Sine", "~sine"),
+            (
+                Box::new(gantz_plyphon::SinOsc::default()),
+                "SinOsc",
+                "~sinosc",
+            ),
             (Box::new(gantz_plyphon::Out::default()), "Out", "~out"),
             (Box::new(gantz_plyphon::Lag::default()), "Lag", "~lag"),
-            (Box::new(gantz_plyphon::Tap::default()), "Tap", "~tap"),
+            (
+                Box::new(gantz_plyphon::ScopeOut::default()),
+                "ScopeOut",
+                "~scopeout",
+            ),
         ];
         for (node, tag, expected) in cases {
             let datum = to_datum(&node).expect("to_datum");
@@ -369,7 +377,7 @@ mod tests {
     }
 
     /// The DSP nodes are inert in the control-rate Steel world (they emit
-    /// placeholder exprs and declare no entrypoints), so a `~sine -> ~out` graph
+    /// placeholder exprs and declare no entrypoints), so a `~sinosc -> ~out` graph
     /// still compiles through the VM without error - and the app's `ToNodeDsp`
     /// impl lets a synthdef derive from the same graph. This guards the
     /// two-independent-backends design end to end.
@@ -381,7 +389,7 @@ mod tests {
         type G = Graph<Box<dyn Node>>;
 
         let mut g: G = Graph::default();
-        let s = g.add_node(Box::new(gantz_plyphon::Sine::default()) as Box<dyn Node>);
+        let s = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
         let o = g.add_node(Box::new(gantz_plyphon::Out::default()) as Box<dyn Node>);
         g.add_edge(s, o, Edge::new(0.into(), 0.into()));
 
@@ -397,8 +405,8 @@ mod tests {
         assert_eq!(derived.def.units.len(), 3, "SinOsc + gain-mul + Out");
     }
 
-    /// A control input on a DSP node: connecting a `number` to `~sine`'s freq
-    /// socket and pushing the number writes the number's value into `~sine`'s VM
+    /// A control input on a DSP node: connecting a `number` to `~sinosc`'s freq
+    /// socket and pushing the number writes the number's value into `~sinosc`'s VM
     /// state (which the audio driver then applies via `set_control`). Guards the
     /// ctrl/dsp bridge end to end on the Steel side.
     #[test]
@@ -409,17 +417,17 @@ mod tests {
         use gantz_core::steel::SteelVal;
         type G = Graph<Box<dyn Node>>;
 
-        // number (a push source) -> ~sine.freq (control input at index 0).
+        // number (a push source) -> ~sinosc.freq (control input at index 0).
         let mut g: G = Graph::default();
         let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
-        let sine = g.add_node(Box::new(gantz_plyphon::Sine::default()) as Box<dyn Node>);
+        let sine = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
         g.add_edge(num, sine, Edge::new(0.into(), 0.into()));
 
         let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
         let config = gantz_core::compile::Config::default();
         let eps = push_pull_entrypoints(&get_node, &g);
         let (mut vm, _compiled) =
-            gantz_core::vm::init(&get_node, &g, &eps, &config).expect("compile number -> ~sine");
+            gantz_core::vm::init(&get_node, &g, &eps, &config).expect("compile number -> ~sinosc");
 
         // Stamp the firing time the queued control update should carry, set the
         // number's value, then fire its push entrypoint.
@@ -439,18 +447,18 @@ mod tests {
         // A non-draining peek reports the queued-update count (the state-row summary
         // the inspector shows) - it must NOT drain the queue.
         let queued = gantz_core::node::state::extract_value(&vm, &[sine.index()])
-            .expect("extract ~sine state")
-            .expect("~sine state present");
+            .expect("extract ~sinosc state")
+            .expect("~sinosc state present");
         assert_eq!(
             gantz_plyphon::param::pending_len(&queued),
             1,
             "pending_len must count the queued update without draining",
         );
 
-        // The control value landed in ~sine's freq param: the current value is
+        // The control value landed in ~sinosc's freq param: the current value is
         // updated, and the timestamped update is queued for the audio driver.
         let (value, pending) = gantz_plyphon::param::drain_param(&mut vm, &[sine.index()])
-            .expect("~sine param state present");
+            .expect("~sinosc param state present");
         assert_eq!(value, 440.0, "control input must update the param value");
         assert_eq!(
             pending,
@@ -459,7 +467,7 @@ mod tests {
         );
     }
 
-    /// `~tap`'s control side: firing its trigger input outputs the ring-buffer
+    /// `~scopeout`'s control side: firing its trigger input outputs the ring-buffer
     /// state (which the audio driver fills) as a list, unchanged. Here the ring is
     /// seeded directly (standing in for the driver's `push_ring`), a `number`
     /// pushes the trigger, and the list lands downstream in an `inspect`. Guards the
@@ -472,10 +480,10 @@ mod tests {
         use gantz_core::steel::SteelVal;
         type G = Graph<Box<dyn Node>>;
 
-        // number (a push source) -> ~tap.trigger (input 1); ~tap -> inspect.
+        // number (a push source) -> ~scopeout.trigger (input 1); ~scopeout -> inspect.
         let mut g: G = Graph::default();
         let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
-        let tap = g.add_node(Box::new(gantz_plyphon::Tap::default()) as Box<dyn Node>);
+        let tap = g.add_node(Box::new(gantz_plyphon::ScopeOut::default()) as Box<dyn Node>);
         let inspect = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
         g.add_edge(num, tap, Edge::new(0.into(), 1.into()));
         g.add_edge(tap, inspect, Edge::new(0.into(), 0.into()));
@@ -483,8 +491,8 @@ mod tests {
         let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
         let config = gantz_core::compile::Config::default();
         let eps = push_pull_entrypoints(&get_node, &g);
-        let (mut vm, _compiled) =
-            gantz_core::vm::init(&get_node, &g, &eps, &config).expect("compile number -> ~tap");
+        let (mut vm, _compiled) = gantz_core::vm::init(&get_node, &g, &eps, &config)
+            .expect("compile number -> ~scopeout");
 
         // Seed the tap's ring with known samples (as the audio driver would).
         let ring: SteelVal = SteelVal::ListV(
@@ -515,7 +523,7 @@ mod tests {
             .expect("extract inspect state")
             .expect("inspect state present");
         let SteelVal::ListV(list) = got else {
-            panic!("~tap must output its ring as a list, got {got:?}");
+            panic!("~scopeout must output its ring as a list, got {got:?}");
         };
         let values: Vec<f64> = list
             .iter()

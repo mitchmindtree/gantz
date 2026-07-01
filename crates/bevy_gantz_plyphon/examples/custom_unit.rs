@@ -12,7 +12,7 @@
 //! 4. a headless bevy app that registers the unit via
 //!    [`PlyphonPlugin::with_units`], builds the graph, and plays it.
 //!
-//! `Saw`'s frequency is baked in for brevity; see `gantz_plyphon`'s `~sine` for the
+//! `Saw`'s frequency is baked in for brevity; see `gantz_plyphon`'s `~sinosc` for the
 //! settable-control-param pattern (a `push_param` + node VM state the driver reads).
 
 use bevy::app::ScheduleRunnerPlugin;
@@ -109,7 +109,7 @@ impl NodeDsp for SawNode {
     }
 
     fn ugens(&self, _path: &[usize], _inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
-        // Name our custom unit; freq is a baked constant (see ~sine for a param).
+        // Name our custom unit; freq is a baked constant (see ~sinosc for a param).
         let unit = b.push_unit(UnitSpec::new(
             "Saw",
             Rate::Audio,

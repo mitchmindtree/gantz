@@ -1,4 +1,4 @@
-//! Deriving a [`plyphon::SynthDef`] from a connected subgraph of [`NodeDsp`]
+//! Deriving a [`plyphon::SynthDef`] from a connected subgraph of [`NodeDsp`](crate::NodeDsp)
 //! nodes.
 
 use std::collections::{HashMap, HashSet};
@@ -13,12 +13,12 @@ use gantz_core::compile::pull_eval_order;
 use gantz_core::node::Conns;
 use gantz_core::node::graph::{Graph, NodeIx};
 
-use crate::dsp::{DspBuilder, MonitorBinding, ParamBinding, ToNodeDsp};
+use crate::dsp::{DspBuilder, ParamBinding, ScopeOutBinding, ToNodeDsp};
 
 /// An error deriving a synthdef from a graph.
 #[derive(Debug)]
 pub enum DeriveError {
-    /// The graph has no dsp *sink* (no `~out` output and no `~tap` monitor), so
+    /// The graph has no dsp *sink* (no `~out` output and no `~scopeout` monitor), so
     /// there is nothing to root a synthdef at.
     NoSink,
 }
@@ -26,21 +26,21 @@ pub enum DeriveError {
 /// The output of [`derive_synthdef`]: the synthdef plus the bindings the audio
 /// driver uses to bridge dsp node state and the running synth - [`ParamBinding`]s
 /// (push each dsp node's live value to a synth param via `set_control`) and
-/// [`MonitorBinding`]s (route each monitor's `/tr`s back into node state).
+/// [`ScopeOutBinding`]s (route each monitor's `/tr`s back into node state).
 pub struct Derived {
     /// The compiled synth definition.
     pub def: SynthDef,
     /// One binding per control param, in param-index order.
     pub params: Vec<ParamBinding>,
-    /// One binding per monitor (`~tap`), in `SendTrig`-id order.
-    pub monitors: Vec<MonitorBinding>,
+    /// One binding per monitor (`~scopeout`), in `SendTrig`-id order.
+    pub monitors: Vec<ScopeOutBinding>,
 }
 
 /// Derive a [`SynthDef`] named `name` from a graph's DSP subgraph, fanning the
 /// output across `out_channels` channels.
 ///
 /// A graph's dsp *sinks* are its `~out` outputs ([`is_output`](crate::NodeDsp::is_output))
-/// and its `~tap` monitors ([`is_monitor`](crate::NodeDsp::is_monitor)); a graph
+/// and its `~scopeout` monitors ([`is_monitor`](crate::NodeDsp::is_monitor)); a graph
 /// may have several of each (e.g. an output plus a couple of taps of interior
 /// signals). Every sink seeds a pull over its *dsp* inputs in gantz_core's
 /// pull-eval order ([`pull_eval_order`]) - the same order Steel uses - and the
@@ -49,11 +49,11 @@ pub struct Derived {
 /// precedes its dependents, so the earliest occurrence of any source still
 /// precedes the earliest occurrence of its consumer. Each node then emits its
 /// UGens via [`NodeDsp::ugens`](crate::NodeDsp::ugens) once, threading its outputs
-/// into its consumers' inputs, so a signal feeding both `~out` and a `~tap`
+/// into its consumers' inputs, so a signal feeding both `~out` and a `~scopeout`
 /// compiles into one shared unit chain.
 ///
 /// Seeding each sink's pull with its `n_dsp_inputs` (not `n_inputs`) means a
-/// control edge at a higher input index (e.g. `~out`'s gain, `~tap`'s trigger)
+/// control edge at a higher input index (e.g. `~out`'s gain, `~scopeout`'s trigger)
 /// falls outside the traversal - it is a Steel/state concern, not part of the dsp
 /// signal graph.
 ///
@@ -67,7 +67,7 @@ pub fn derive_synthdef<N>(
 where
     N: ToNodeDsp,
 {
-    // Every dsp sink: an audio output (`~out`) or a monitor (`~tap`).
+    // Every dsp sink: an audio output (`~out`) or a monitor (`~scopeout`).
     let sinks: Vec<NodeIx> = graph
         .node_indices()
         .filter(|&n| {

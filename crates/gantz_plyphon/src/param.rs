@@ -40,7 +40,7 @@ pub fn plyphon_param(name: impl Into<String>, default: f32, lag: f32) -> Param {
 /// `tick!`-driven chain animates the param sample-accurately rather than bunched at
 /// the frame boundary; `value` is the driver's immediate fallback for direct
 /// inspector edits. The expr always evaluates to `output`: the node's placeholder
-/// dsp output (`"state"` for a source like `~sine`, `"'()"` for a sink like
+/// dsp output (`"state"` for a source like `~sinosc`, `"'()"` for a sink like
 /// `~out`). DSP nodes are otherwise Steel-inert.
 pub fn control_input_expr(ctx: &ExprCtx<'_, '_>, control_ix: usize, output: &str) -> ExprResult {
     let expr = match ctx.inputs().get(control_ix) {
@@ -179,7 +179,7 @@ pub fn param_state_row(body: &mut egui_extras::TableBody, state: Option<&SteelVa
 ///
 /// `value` is the current scalar (seeded with `default`); `pending` starts as an
 /// empty list of `(time value)` updates a control input will queue. Seed it from a
-/// node's `register` (mirrors `~sine`).
+/// node's `register` (mirrors `~sinosc`).
 pub fn param_state(default: f64) -> SteelVal {
     let map = HashMap::new()
         .update(sym(VALUE), SteelVal::NumV(default))

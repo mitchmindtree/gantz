@@ -1,4 +1,4 @@
-//! The `~sine` sine-oscillator node.
+//! The `~sinosc` sine-oscillator node.
 
 use std::hash::{Hash, Hasher};
 
@@ -25,13 +25,13 @@ use crate::param::{
 /// driver applies value changes via `set_control`. Only the smoothing `freq_lag`
 /// (structural) lives in the node weight.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, NodeTag)]
-pub struct Sine {
+pub struct SinOsc {
     #[serde(default)]
     freq_lag: f32,
 }
 
-impl Sine {
-    /// The default frequency (Hz) a fresh `~sine` starts at.
+impl SinOsc {
+    /// The default frequency (Hz) a fresh `~sinosc` starts at.
     pub const DEFAULT_FREQ: f32 = 220.0;
 
     /// The default frequency smoothing lag in seconds (`0.0` = instant/unsmoothed).
@@ -48,28 +48,28 @@ impl Sine {
     }
 }
 
-impl PartialEq for Sine {
+impl PartialEq for SinOsc {
     fn eq(&self, other: &Self) -> bool {
         self.freq_lag.to_bits() == other.freq_lag.to_bits()
     }
 }
 
-impl Eq for Sine {}
+impl Eq for SinOsc {}
 
-impl Hash for Sine {
+impl Hash for SinOsc {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Hash::hash(&self.freq_lag.to_bits(), state);
     }
 }
 
-impl CaHash for Sine {
+impl CaHash for SinOsc {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-        hasher.update(b"gantz.plyphon.sine");
+        hasher.update(b"gantz.plyphon.sinosc");
         cahash_lag(hasher, self.freq_lag);
     }
 }
 
-impl gantz_core::Node for Sine {
+impl gantz_core::Node for SinOsc {
     fn n_inputs(&self, _ctx: MetaCtx) -> usize {
         // A single control input: the frequency. (No dsp signal inputs.)
         1
@@ -100,7 +100,7 @@ impl gantz_core::Node for Sine {
     }
 }
 
-impl NodeDsp for Sine {
+impl NodeDsp for SinOsc {
     fn n_dsp_outputs(&self) -> usize {
         1
     }
@@ -122,15 +122,15 @@ impl NodeDsp for Sine {
     }
 }
 
-impl ToNodeDsp for Sine {
+impl ToNodeDsp for SinOsc {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         Some(self)
     }
 }
 
-impl NodeUi for Sine {
+impl NodeUi for SinOsc {
     fn name(&self, _: &dyn Registry) -> &str {
-        "~sine"
+        "~sinosc"
     }
 
     fn description(&self) -> Option<&'static str> {
@@ -140,7 +140,7 @@ impl NodeUi for Sine {
     fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
         // The body shows just the node name; params are edited in the inspector.
         let framed =
-            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~sine").selectable(false)));
+            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~sinosc").selectable(false)));
         NodeUiResponse::new(framed)
     }
 

@@ -18,7 +18,7 @@ use crate::param::{
 /// A one-pole lag (smoother). Emits a `Lag.ar(in, lagTime)` UGen that smooths its
 /// input signal over the `lag` duration.
 ///
-/// The `lag` duration (seconds) lives in the node's VM state (like `~sine`'s
+/// The `lag` duration (seconds) lives in the node's VM state (like `~sinosc`'s
 /// freq), edited via the inspector and applied to the running synth via
 /// `set_control` (the `Lag` UGen recomputes its coefficient on change, so it is
 /// click-free). The node weight is empty - its identity is just its type.

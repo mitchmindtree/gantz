@@ -32,11 +32,11 @@ pub trait NodeDsp {
         false
     }
 
-    /// Whether this node is a synthdef *monitor* (e.g. `~tap`) - a sink that
+    /// Whether this node is a synthdef *monitor* (e.g. `~scopeout`) - a sink that
     /// reads its dsp input back to the control world rather than to the speakers.
     /// Like [`is_output`](Self::is_output) it roots a synthdef pull, but instead
-    /// of an `Out` it emits a `SendTrig` (via [`DspBuilder::push_monitor`]) whose
-    /// `/tr`s the audio driver samples into the node's VM state.
+    /// of an `Out` it emits a `ScopeOut` (via [`DspBuilder::push_monitor`]) whose
+    /// samples the audio driver streams into the node's VM state.
     fn is_monitor(&self) -> bool {
         false
     }
@@ -76,13 +76,13 @@ pub struct ParamBinding {
     pub index: usize,
 }
 
-/// Records a monitor (`~tap`) node's `ScopeOut`, so the audio driver can cue a live
+/// Records a monitor (`~scopeout`) node's `ScopeOut`, so the audio driver can cue a live
 /// scope stream and route its samples into the right node's ring-buffer state,
 /// capped at `size`. The `ScopeOut`'s `bufnum` input is a placeholder in the derived
 /// def; the driver allocates a globally-unique cued index and patches the unit at
 /// `scope_unit` before installing the def.
 #[derive(Clone, Debug)]
-pub struct MonitorBinding {
+pub struct ScopeOutBinding {
     /// The monitor node's path within the graph (where its ring state lives).
     pub node_path: Vec<usize>,
     /// The ring buffer length (samples) the driver caps the node's state at.
@@ -101,7 +101,7 @@ pub struct DspBuilder {
     units: Vec<UnitSpec>,
     params: Vec<Param>,
     bindings: Vec<ParamBinding>,
-    monitors: Vec<MonitorBinding>,
+    monitors: Vec<ScopeOutBinding>,
     out_channels: usize,
 }
 
@@ -136,12 +136,12 @@ impl DspBuilder {
         index as u32
     }
 
-    /// Declare a monitor for the dsp node at `path`, recording its [`MonitorBinding`]
+    /// Declare a monitor for the dsp node at `path`, recording its [`ScopeOutBinding`]
     /// so the driver can cue a scope stream and route its samples into the node's ring
     /// state (capped at `size`). `scope_unit` is the index of the node's `ScopeOut`
     /// unit (from [`push_unit`](Self::push_unit)), so the driver can patch its `bufnum`.
     pub fn push_monitor(&mut self, path: &[usize], size: usize, scope_unit: usize) {
-        self.monitors.push(MonitorBinding {
+        self.monitors.push(ScopeOutBinding {
             node_path: path.to_vec(),
             size,
             scope_unit,
@@ -158,7 +158,7 @@ impl DspBuilder {
     pub fn finish(
         self,
         name: impl Into<String>,
-    ) -> (SynthDef, Vec<ParamBinding>, Vec<MonitorBinding>) {
+    ) -> (SynthDef, Vec<ParamBinding>, Vec<ScopeOutBinding>) {
         let def = SynthDef {
             name: name.into(),
             params: self.params,

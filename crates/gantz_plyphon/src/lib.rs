@@ -7,11 +7,18 @@
 //! inert in the Steel world (their [`Node::expr`](gantz_core::Node::expr) is a
 //! placeholder); an audio driver (see `bevy_gantz_plyphon`) installs and runs
 //! the derived synthdefs through a [`Backend`].
+//!
+//! # Naming convention
+//!
+//! A DSP node's keyword and type mirror the underlying plyphon UGen it emits:
+//! `~sinosc`/[`SinOsc`] → `SinOsc`, `~scopeout`/[`ScopeOut`] → `ScopeOut`,
+//! `~out`/[`Out`] → `Out`, `~lag`/[`Lag`] → `Lag`. A node that composes *several*
+//! UGens into one gantz node gets its own descriptive name instead.
 
 pub use backend::{Backend, BackendError, Embedded};
 pub use compile::{DeriveError, Derived, derive_synthdef, structural_sig};
-pub use dsp::{DspBuilder, MonitorBinding, NodeDsp, ParamBinding, ToNodeDsp};
-pub use node::{Lag, Out, Sine, Tap};
+pub use dsp::{DspBuilder, NodeDsp, ParamBinding, ScopeOutBinding, ToNodeDsp};
+pub use node::{Lag, Out, ScopeOut, SinOsc};
 pub use sugar::PlyphonSugar;
 
 pub mod backend;

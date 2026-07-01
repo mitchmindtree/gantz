@@ -1,6 +1,6 @@
 //! Writing sampled dsp values back into a monitor node's ring-buffer state.
 //!
-//! A monitor node (`~tap`) holds its recent samples as a plain Steel list
+//! A monitor node (`~scopeout`) holds its recent samples as a plain Steel list
 //! ([`SteelVal::ListV`]) in VM state - the same representation `plot` uses for a
 //! scope history. The audio driver drains each frame's `SendTrig` `/tr`s and calls
 //! [`push_ring`] to append them, capping the ring at the node's configured length.

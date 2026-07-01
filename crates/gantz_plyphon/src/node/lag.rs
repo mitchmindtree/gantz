@@ -11,7 +11,9 @@ use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
-use crate::param::{param_name, param_state, param_value, plyphon_param, value_row, with_value};
+use crate::param::{
+    param_name, param_state, param_state_row, param_value, plyphon_param, value_row, with_value,
+};
 
 /// A one-pole lag (smoother). Emits a `Lag.ar(in, lagTime)` UGen that smooths its
 /// input signal over the `lag` duration.
@@ -112,6 +114,12 @@ impl NodeUi for Lag {
         NodeUiResponse::new(framed)
     }
 
+    fn show_state(&self) -> bool {
+        // A summarised "N queued" state row (in `inspector_rows`) replaces the raw
+        // `{value, pending}` dump.
+        false
+    }
+
     fn inspector_rows(
         &mut self,
         ctx: &mut NodeCtx,
@@ -120,6 +128,7 @@ impl NodeUi for Lag {
         // The lag duration lives in VM state (a value edit must NOT change the
         // content address), shown as a single duration row.
         let state = ctx.extract_value().ok().flatten();
+        param_state_row(body, state.as_ref());
         let mut value = state
             .as_ref()
             .and_then(param_value)

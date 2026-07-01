@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
 use crate::param::{
-    cahash_lag, control_input_expr, param_name, param_row, param_state, param_value, plyphon_param,
-    with_value,
+    cahash_lag, control_input_expr, param_name, param_row, param_state, param_state_row,
+    param_value, plyphon_param, with_value,
 };
 
 /// A sine oscillator. Emits a single `SinOsc.ar(freq)` UGen.
@@ -144,6 +144,12 @@ impl NodeUi for Sine {
         NodeUiResponse::new(framed)
     }
 
+    fn show_state(&self) -> bool {
+        // A summarised "N queued" state row (in `inspector_rows`) replaces the raw
+        // `{value, pending}` dump.
+        false
+    }
+
     fn inspector_rows(
         &mut self,
         ctx: &mut NodeCtx,
@@ -153,6 +159,7 @@ impl NodeUi for Sine {
         // The value lives in VM state (a value edit must NOT change the content
         // address); the lag lives in the weight (a lag edit is structural).
         let state = ctx.extract_value().ok().flatten();
+        param_state_row(body, state.as_ref());
         let mut value = state
             .as_ref()
             .and_then(param_value)

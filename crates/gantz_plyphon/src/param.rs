@@ -155,6 +155,26 @@ pub fn value_row(
     changed
 }
 
+/// One inspector row summarising a DSP node's queued control updates: the key column
+/// is `"state"`, the value column shows `"{n} queued"` - the number of pending
+/// (scheduled-but-not-yet-drained) control updates across the node's param(s).
+///
+/// DSP nodes emit this (via `show_state() -> false` + a call here) in place of the
+/// inspector's default raw `{value, pending}` state dump.
+pub fn param_state_row(body: &mut egui_extras::TableBody, state: Option<&SteelVal>) {
+    let row_h = gantz_egui::widget::node_inspector::table_row_h(body.ui_mut());
+    let n = state.map(pending_len).unwrap_or(0);
+    body.row(row_h, |mut row| {
+        row.col(|ui| {
+            ui.label("state");
+        });
+        row.col(|ui| {
+            ui.label(format!("{n} queued"))
+                .on_hover_text("pending scheduled control updates");
+        });
+    });
+}
+
 /// The structured VM state of a DSP param: a hashmap `{ value, pending }`.
 ///
 /// `value` is the current scalar (seeded with `default`); `pending` starts as an
@@ -173,6 +193,19 @@ pub fn param_value(state: &SteelVal) -> Option<f64> {
         SteelVal::HashMapV(map) => map.get(&sym(VALUE)).and_then(steel_num),
         // Tolerate a bare scalar (e.g. older state) as the value.
         other => steel_num(other),
+    }
+}
+
+/// The number of queued `pending` control updates in a DSP param's state, WITHOUT
+/// draining them (a non-mutating peek for a UI readout). `0` for a bare scalar, a
+/// missing queue, or an empty one.
+pub fn pending_len(state: &SteelVal) -> usize {
+    match state {
+        SteelVal::HashMapV(map) => match map.get(&sym(PENDING)) {
+            Some(SteelVal::ListV(list)) => list.len(),
+            _ => 0,
+        },
+        _ => 0,
     }
 }
 

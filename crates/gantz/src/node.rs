@@ -432,6 +432,17 @@ mod tests {
         vm.call_function_by_name_with_args(&entry_fn_name(&ep.id()), vec![])
             .expect("push number");
 
+        // A non-draining peek reports the queued-update count (the state-row summary
+        // the inspector shows) - it must NOT drain the queue.
+        let queued = gantz_core::node::state::extract_value(&vm, &[sine.index()])
+            .expect("extract ~sine state")
+            .expect("~sine state present");
+        assert_eq!(
+            gantz_plyphon::param::pending_len(&queued),
+            1,
+            "pending_len must count the queued update without draining",
+        );
+
         // The control value landed in ~sine's freq param: the current value is
         // updated, and the timestamped update is queued for the audio driver.
         let (value, pending) = gantz_plyphon::param::drain_param(&mut vm, &[sine.index()])

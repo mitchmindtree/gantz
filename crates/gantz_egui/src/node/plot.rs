@@ -5,12 +5,15 @@
 //!
 //! Two modes are supported:
 //! - [`PlotMode::Scope`]: accumulate a bounded, scrolling history and plot it
-//!   like an oscilloscope. Each pushed number is appended; a pushed list extends
-//!   the history with its elements.
-//! - [`PlotMode::Signal`]: plot the incoming value directly (a list as a series,
-//!   a single number as one bar), replacing it on each evaluation. A list *of
-//!   lists* (a list of channels, e.g. from `~scopeout` + `deinterleave`) is drawn
-//!   as one stacked sub-plot per channel.
+//!   like an oscilloscope. Each pushed number is appended; a pushed list or vector
+//!   extends the history with its numeric elements.
+//! - [`PlotMode::Signal`]: plot the incoming value directly (a list or vector as a
+//!   series, a single number as one bar), replacing it on each evaluation. A list or
+//!   vector *of lists/vectors* (a list of channels, e.g. from `~scopeout` +
+//!   `deinterleave`) is drawn as one stacked sub-plot per channel.
+//!
+//! Steel lists ([`SteelVal::ListV`]) and vectors ([`SteelVal::VectorV`]) are accepted
+//! interchangeably throughout; the scope history is stored as a vector.
 //!
 //! In both modes the node is a pass-through: its output forwards the input
 //! value unchanged (like [`super::Inspect`]), so a value can be observed without
@@ -27,6 +30,7 @@ use gantz_core::node::{self, ExprCtx, ExprResult, MetaCtx, RegCtx};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 use steel::SteelVal;
+use steel::gc::Gc;
 use steel::steel_vm::register_fn::RegisterFn;
 
 /// An `f32` that participates in content addressing and `Hash` via its bit
@@ -135,76 +139,63 @@ impl Default for Plot {
     }
 }
 
-/// Append `val` to the scope history `state`, dropping oldest entries so the
-/// result holds at most `cap` items. Registered on the VM as `plot-push` and
-/// called from the generated [`PlotMode::Scope`] expression.
+/// Append `val` to the scope history `state`, dropping oldest entries so the result
+/// holds at most `cap` items. Registered on the VM as `plot-push` and called from the
+/// generated [`PlotMode::Scope`] expression.
 ///
-/// A numeric `val` is appended; a list `val` extends the history with its numeric
-/// elements; anything else is ignored. `cap` is passed as an argument (not captured)
-/// so a single shared `plot-push` serves every plot node with its own, always-current
-/// capacity.
+/// A numeric `val` is appended; a list *or vector* `val` extends the history with its
+/// numeric elements; anything else is ignored. `cap` is passed as an argument (not
+/// captured) so a single shared `plot-push` serves every plot node with its own,
+/// always-current capacity.
 ///
-/// The list case is *specialised*: steel's list is an unrolled persistent list whose
-/// `push_back` is O(n) (it must clone the shared tail), so appending a whole incoming
-/// window element-by-element was O(window x history) - the source of the slow scope
-/// when a `~scopeout` window is plotted. Instead the capped result is rebuilt in a
-/// single `collect` (O(cap)); and when the incoming window alone fills the scope, the
-/// prior history is dropped without even being read.
+/// The history is kept as a persistent vector ([`SteelVal::VectorV`], an `im_rc::Vector`)
+/// rather than a list: `push_back`/`pop_front` are O(1) amortised (vs a steel list's O(n)
+/// `push_back`), so a whole incoming `~scopeout` window can be appended sample-by-sample
+/// cheaply - no full rebuild, and the single-sample scope push is O(log n) instead of O(n).
 fn plot_push(state: SteelVal, val: SteelVal, cap: SteelVal) -> SteelVal {
+    fn is_num(v: &SteelVal) -> bool {
+        matches!(v, SteelVal::NumV(_) | SteelVal::IntV(_))
+    }
     let cap = match cap {
         SteelVal::IntV(n) if n > 0 => n as usize,
         _ => 0,
     };
-    let is_num = |v: &SteelVal| matches!(v, SteelVal::NumV(_) | SteelVal::IntV(_));
 
+    // The scope history is a persistent vector (`im_rc::Vector`): `push_back` and
+    // `pop_front` are O(1) amortised, so appending is efficient element-by-element
+    // (no full rebuild). Start from the existing vector - a structural, O(1) clone -
+    // tolerating a prior list state (e.g. after a signal->scope switch), else empty.
+    let mut vec = match state {
+        SteelVal::VectorV(v) => (*v).clone(),
+        SteelVal::ListV(list) => list.iter().filter(|v| is_num(v)).cloned().collect(),
+        _ => Default::default(),
+    };
+
+    // Append the incoming value's numeric samples: a list or vector contributes its
+    // numeric elements; a lone number contributes itself; anything else nothing.
     match val {
-        // Bulk list append: rebuild the capped history once instead of `push_back`
-        // per element.
         SteelVal::ListV(items) => {
-            let new_count = items.iter().filter(|v| is_num(v)).count();
-            let new = items.iter().filter(|v| is_num(v)).cloned();
-            if new_count >= cap {
-                // The incoming window alone fills (or overfills) the scope: keep its
-                // last `cap` numeric samples and drop the prior history entirely.
-                return SteelVal::ListV(new.skip(new_count - cap).collect());
+            for v in items.iter().filter(|v| is_num(v)) {
+                vec.push_back(v.clone());
             }
-            // Keep the tail of the history so it plus the new samples total `cap`.
-            let keep = cap - new_count;
-            let hist = match state {
-                SteelVal::ListV(list) => list,
-                _ => Default::default(),
-            };
-            let skip = hist.len().saturating_sub(keep);
-            SteelVal::ListV(hist.iter().cloned().skip(skip).chain(new).collect())
         }
-        // A single sample: append and trim (cheap - one element).
-        num @ (SteelVal::NumV(_) | SteelVal::IntV(_)) => {
-            let mut list = match state {
-                SteelVal::ListV(list) => list,
-                _ => Default::default(),
-            };
-            list.push_back(num);
-            while list.len() > cap {
-                list.pop_front();
+        SteelVal::VectorV(items) => {
+            for v in items.iter().filter(|v| is_num(v)) {
+                vec.push_back(v.clone());
             }
-            SteelVal::ListV(list)
         }
-        // Non-numeric: leave the history unchanged (bar a trim if capacity shrank).
-        _ => {
-            let mut list = match state {
-                SteelVal::ListV(list) => list,
-                _ => Default::default(),
-            };
-            while list.len() > cap {
-                list.pop_front();
-            }
-            SteelVal::ListV(list)
-        }
+        num @ (SteelVal::NumV(_) | SteelVal::IntV(_)) => vec.push_back(num),
+        _ => {}
     }
+    while vec.len() > cap {
+        vec.pop_front();
+    }
+    SteelVal::VectorV(Gc::new(vec).into())
 }
 
-/// Read the node's stored series as `f64`s. A list yields its numeric elements;
-/// a lone number yields a single sample; anything else is empty.
+/// Read the node's stored series as per-channel `f64`s (see [`split_channels`]): a
+/// list or vector yields its numeric elements; a lone number a single sample; anything
+/// else is empty.
 fn series(ctx: &NodeCtx) -> Vec<Vec<f64>> {
     match ctx.extract_value() {
         Ok(Some(val)) => split_channels(&val),
@@ -212,20 +203,40 @@ fn series(ctx: &NodeCtx) -> Vec<Vec<f64>> {
     }
 }
 
-/// Split a stored plot value into per-channel series: a list *of lists* is one series
-/// per inner list (`~scopeout` + `deinterleave` produces this); a flat numeric list -
-/// or a lone number - is a single channel.
+/// Split a stored plot value into per-channel series. A list or vector *of lists/vectors*
+/// is one series per inner container (`~scopeout` + `deinterleave` produces this); a flat
+/// numeric list or vector - or a lone number - is a single channel. Lists and vectors are
+/// treated identically ([`SteelVal::ListV`] and [`SteelVal::VectorV`]).
 fn split_channels(val: &SteelVal) -> Vec<Vec<f64>> {
+    // The top-level elements of a list or vector; `None` if `val` is not a container.
+    let elems: Option<Vec<&SteelVal>> = match val {
+        SteelVal::ListV(list) => Some(list.iter().collect()),
+        SteelVal::VectorV(vec) => Some(vec.iter().collect()),
+        _ => None,
+    };
+    match elems {
+        // A container whose elements are themselves containers: one series each.
+        Some(elems) if elems.iter().any(|v| is_container(v)) => {
+            elems.iter().map(|v| channel_numerics(v)).collect()
+        }
+        // A flat numeric container: a single channel.
+        Some(elems) => vec![elems.iter().filter_map(|v| steel_num(v)).collect()],
+        // A lone number: one single-sample channel.
+        None => vec![steel_num(val).into_iter().collect()],
+    }
+}
+
+/// Whether `v` is a list or vector (a channel container).
+fn is_container(v: &SteelVal) -> bool {
+    matches!(v, SteelVal::ListV(_) | SteelVal::VectorV(_))
+}
+
+/// One channel's numeric samples: a list's or vector's numeric elements, or a lone number.
+fn channel_numerics(val: &SteelVal) -> Vec<f64> {
     match val {
-        SteelVal::ListV(list) if list.iter().any(|v| matches!(v, SteelVal::ListV(_))) => list
-            .iter()
-            .map(|v| match v {
-                SteelVal::ListV(inner) => inner.iter().filter_map(steel_num).collect(),
-                other => steel_num(other).into_iter().collect(),
-            })
-            .collect(),
-        SteelVal::ListV(list) => vec![list.iter().filter_map(steel_num).collect()],
-        other => vec![steel_num(other).into_iter().collect()],
+        SteelVal::ListV(list) => list.iter().filter_map(steel_num).collect(),
+        SteelVal::VectorV(vec) => vec.iter().filter_map(steel_num).collect(),
+        other => steel_num(other).into_iter().collect(),
     }
 }
 
@@ -283,8 +294,10 @@ impl gantz_core::Node for Plot {
 
     fn register(&self, mut ctx: RegCtx<'_, '_>) {
         let path = ctx.path();
-        node::state::init_value_if_absent(ctx.vm(), path, || SteelVal::ListV(Default::default()))
-            .unwrap();
+        node::state::init_value_if_absent(ctx.vm(), path, || {
+            SteelVal::VectorV(std::iter::empty::<SteelVal>().collect())
+        })
+        .unwrap();
         // Register the shared `plot-push` helper, but only if absent. Steel's
         // `register_fn` allocates a *new* global slot and shadows the previous
         // binding rather than overwriting it, so re-registering on every
@@ -700,7 +713,8 @@ impl NodeUi for Plot {
             .clicked()
         {
             // VM runtime state, not content-addressed: do not mark changed.
-            ctx.update_value(SteelVal::ListV(Default::default())).ok();
+            ctx.update_value(SteelVal::VectorV(std::iter::empty::<SteelVal>().collect()))
+                .ok();
             ui.close();
         }
         ContextMenuResponse::default()
@@ -814,10 +828,12 @@ mod tests {
         }
     }
 
-    fn list_of(vm: &Engine, ix: usize) -> Vec<f64> {
+    // Read a node's stored numeric samples, whether stored as a list or a vector.
+    fn samples_of(vm: &Engine, ix: usize) -> Vec<f64> {
         match node::state::extract_value(vm, &[ix]).unwrap().unwrap() {
             SteelVal::ListV(list) => list.iter().filter_map(steel_num).collect(),
-            other => panic!("expected list state, got {other:?}"),
+            SteelVal::VectorV(vec) => vec.iter().filter_map(steel_num).collect(),
+            other => panic!("expected list/vector state, got {other:?}"),
         }
     }
 
@@ -845,7 +861,7 @@ mod tests {
         let (g, s, p) = graph_with(Box::new(src) as Box<dyn Node>, plot);
         let mut vm = vm_for(&g);
         fire(&mut vm, &g, s, 5);
-        assert_eq!(list_of(&vm, p), vec![5.0, 5.0, 5.0]);
+        assert_eq!(samples_of(&vm, p), vec![5.0, 5.0, 5.0]);
     }
 
     // Scope mode extends the history with a pushed list's elements.
@@ -862,7 +878,7 @@ mod tests {
         let (g, s, p) = graph_with(Box::new(src) as Box<dyn Node>, plot);
         let mut vm = vm_for(&g);
         fire(&mut vm, &g, s, 2);
-        assert_eq!(list_of(&vm, p), vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
+        assert_eq!(samples_of(&vm, p), vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
     }
 
     // A pushed list at least as long as the capacity keeps only its last `cap`
@@ -880,10 +896,10 @@ mod tests {
         let (g, s, p) = graph_with(Box::new(src) as Box<dyn Node>, plot);
         let mut vm = vm_for(&g);
         fire(&mut vm, &g, s, 1);
-        assert_eq!(list_of(&vm, p), vec![3.0, 4.0, 5.0]);
+        assert_eq!(samples_of(&vm, p), vec![3.0, 4.0, 5.0]);
         // A second identical window still yields just its last 3 (history dropped).
         fire(&mut vm, &g, s, 1);
-        assert_eq!(list_of(&vm, p), vec![3.0, 4.0, 5.0]);
+        assert_eq!(samples_of(&vm, p), vec![3.0, 4.0, 5.0]);
     }
 
     // When a pushed list overflows the *remaining* capacity, the oldest history is
@@ -902,31 +918,77 @@ mod tests {
         let mut vm = vm_for(&g);
         // [1,2,3], then keep the last 4 of [1,2,3] ++ [1,2,3] = [3,1,2,3].
         fire(&mut vm, &g, s, 2);
-        assert_eq!(list_of(&vm, p), vec![3.0, 1.0, 2.0, 3.0]);
+        assert_eq!(samples_of(&vm, p), vec![3.0, 1.0, 2.0, 3.0]);
     }
 
-    // `split_channels` treats a list-of-lists as one series per inner list (for the
-    // stacked multi-channel plot), and a flat list / lone number as a single channel.
+    // `split_channels` treats a list-or-vector-of-containers as one series per inner
+    // container (for the stacked multi-channel plot), and a flat list/vector or lone
+    // number as a single channel. Lists and vectors are interchangeable, including mixed.
     #[test]
     fn split_channels_by_shape() {
         let num = |n: f64| SteelVal::NumV(n);
         let list = |xs: Vec<SteelVal>| SteelVal::ListV(xs.into_iter().collect());
+        let vector = |xs: Vec<SteelVal>| SteelVal::VectorV(xs.into_iter().collect());
 
-        // A flat numeric list is one channel.
+        // A flat numeric list or vector is one channel.
         assert_eq!(
             split_channels(&list(vec![num(1.0), num(2.0), num(3.0)])),
             vec![vec![1.0, 2.0, 3.0]],
         );
+        assert_eq!(
+            split_channels(&vector(vec![num(1.0), num(2.0), num(3.0)])),
+            vec![vec![1.0, 2.0, 3.0]],
+        );
         // A lone number is one single-sample channel.
         assert_eq!(split_channels(&num(7.0)), vec![vec![7.0]]);
-        // A list of lists is one channel per inner list (interleaving undone).
+        // A list of lists, a vector of vectors, and a mixed list of vectors all give
+        // one channel per inner container.
+        let expected = vec![vec![1.0, 3.0], vec![2.0, 4.0]];
         assert_eq!(
             split_channels(&list(vec![
                 list(vec![num(1.0), num(3.0)]),
                 list(vec![num(2.0), num(4.0)]),
             ])),
-            vec![vec![1.0, 3.0], vec![2.0, 4.0]],
+            expected,
         );
+        assert_eq!(
+            split_channels(&vector(vec![
+                vector(vec![num(1.0), num(3.0)]),
+                vector(vec![num(2.0), num(4.0)]),
+            ])),
+            expected,
+        );
+        assert_eq!(
+            split_channels(&list(vec![
+                vector(vec![num(1.0), num(3.0)]),
+                vector(vec![num(2.0), num(4.0)]),
+            ])),
+            expected,
+        );
+    }
+
+    // `plot_push` accepts a vector input, accumulating its numeric elements into the
+    // vector-backed scope history and capping at `cap`. (A vector-emitting Steel expr
+    // isn't available under `new_base`, so exercise the fn directly.)
+    #[test]
+    fn plot_push_accepts_vector() {
+        let num = |n: f64| SteelVal::NumV(n);
+        let vector = |xs: Vec<SteelVal>| SteelVal::VectorV(xs.into_iter().collect());
+        let empty = SteelVal::VectorV(std::iter::empty::<SteelVal>().collect());
+
+        let s1 = plot_push(
+            empty,
+            vector(vec![num(1.0), num(2.0), num(3.0)]),
+            SteelVal::IntV(4),
+        );
+        let s2 = plot_push(s1, vector(vec![num(4.0), num(5.0)]), SteelVal::IntV(4));
+
+        // The history is a VectorV of the last 4 samples, in order.
+        let got: Vec<f64> = match s2 {
+            SteelVal::VectorV(v) => v.iter().filter_map(steel_num).collect(),
+            other => panic!("expected vector state, got {other:?}"),
+        };
+        assert_eq!(got, vec![2.0, 3.0, 4.0, 5.0]);
     }
 
     // Signal mode stores the incoming list verbatim, preserving order.
@@ -942,7 +1004,7 @@ mod tests {
         let (g, s, p) = graph_with(Box::new(src) as Box<dyn Node>, plot);
         let mut vm = vm_for(&g);
         fire(&mut vm, &g, s, 1);
-        assert_eq!(list_of(&vm, p), vec![1.0, 2.0, 3.0]);
+        assert_eq!(samples_of(&vm, p), vec![1.0, 2.0, 3.0]);
     }
 
     // Signal mode also accepts a single number (drawn as one bar).
@@ -978,6 +1040,6 @@ mod tests {
         // A second registration pass over the same engine.
         gantz_core::graph::register(&no_lookup, &g, &[], &mut vm);
         fire(&mut vm, &g, s, 5);
-        assert_eq!(list_of(&vm, p), vec![5.0, 5.0, 5.0]);
+        assert_eq!(samples_of(&vm, p), vec![5.0, 5.0, 5.0]);
     }
 }

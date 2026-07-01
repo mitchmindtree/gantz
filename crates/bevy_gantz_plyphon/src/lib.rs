@@ -220,8 +220,11 @@ struct ParamSlot {
 struct ScopeSlot {
     /// The `~scopeout` node's path in the graph (where its ring state lives).
     node_path: Vec<usize>,
-    /// The ring buffer length (samples) the appended stream is capped at.
+    /// The ring buffer length in *frames*; the flat ring is capped at `size * channels`
+    /// interleaved samples.
     size: usize,
+    /// The number of interleaved channels the stream carries (`cue_scope`'s width).
+    channels: usize,
     /// The cued scope-stream index (a global recording-slot id, baked into the def's
     /// `ScopeOut` and freed on teardown).
     index: usize,
@@ -349,7 +352,9 @@ fn drive_synths<N>(
                     scope.consumer.recycle(chunk);
                 }
                 if !samples.is_empty() {
-                    gantz_plyphon::monitor::push_ring(vm, &scope.node_path, &samples, scope.size);
+                    // Cap the flat ring at `size` frames = `size * channels` samples.
+                    let cap = scope.size.saturating_mul(scope.channels.max(1));
+                    gantz_plyphon::monitor::push_ring(vm, &scope.node_path, &samples, cap);
                 }
             }
         }
@@ -426,10 +431,12 @@ fn structural_sync<N>(
     for m in &derived.monitors {
         let index = scope_alloc.alloc();
         derived.def.units[m.scope_unit].inputs[0] = InputRef::Constant(index as f32);
-        match controller.cue_scope(index, 1, sample_rate, CHUNK_FRAMES, NUM_CHUNKS) {
+        let channels = m.channels.max(1);
+        match controller.cue_scope(index, channels, sample_rate, CHUNK_FRAMES, NUM_CHUNKS) {
             Ok(consumer) => scopes.push(ScopeSlot {
                 node_path: m.node_path.clone(),
                 size: m.size,
+                channels,
                 index,
                 consumer,
             }),

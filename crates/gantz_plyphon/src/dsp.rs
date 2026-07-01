@@ -85,8 +85,11 @@ pub struct ParamBinding {
 pub struct ScopeOutBinding {
     /// The monitor node's path within the graph (where its ring state lives).
     pub node_path: Vec<usize>,
-    /// The ring buffer length (samples) the driver caps the node's state at.
+    /// The ring buffer length (frames) the driver caps the node's state at (the flat
+    /// ring holds `size * channels` interleaved samples).
     pub size: usize,
+    /// The number of interleaved channels the `ScopeOut` streams (`cue_scope`'s width).
+    pub channels: usize,
     /// The index within the def's `units` of this monitor's `ScopeOut`, so the driver
     /// can patch its `bufnum` (input 0) to the cued scope-stream index.
     pub scope_unit: usize,
@@ -137,13 +140,21 @@ impl DspBuilder {
     }
 
     /// Declare a monitor for the dsp node at `path`, recording its [`ScopeOutBinding`]
-    /// so the driver can cue a scope stream and route its samples into the node's ring
-    /// state (capped at `size`). `scope_unit` is the index of the node's `ScopeOut`
-    /// unit (from [`push_unit`](Self::push_unit)), so the driver can patch its `bufnum`.
-    pub fn push_monitor(&mut self, path: &[usize], size: usize, scope_unit: usize) {
+    /// so the driver can cue a `channels`-wide scope stream and route its samples into
+    /// the node's ring state (capped at `size` frames). `scope_unit` is the index of the
+    /// node's `ScopeOut` unit (from [`push_unit`](Self::push_unit)), so the driver can
+    /// patch its `bufnum`.
+    pub fn push_monitor(
+        &mut self,
+        path: &[usize],
+        size: usize,
+        channels: usize,
+        scope_unit: usize,
+    ) {
         self.monitors.push(ScopeOutBinding {
             node_path: path.to_vec(),
             size,
+            channels,
             scope_unit,
         });
     }

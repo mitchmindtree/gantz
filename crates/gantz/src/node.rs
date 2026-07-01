@@ -142,6 +142,40 @@ impl gantz_format::NodeSugar for Box<dyn Node> {
 mod tests {
     use super::Node;
 
+    /// Fire the push entrypoint of the node at `node_ix` (a flat-graph index).
+    fn fire_push(
+        vm: &mut gantz_core::steel::steel_vm::engine::Engine,
+        eps: &[gantz_core::compile::Entrypoint],
+        node_ix: usize,
+    ) {
+        use gantz_core::compile::{EvalKind, entry_fn_name};
+        let ep = eps
+            .iter()
+            .find(|ep| {
+                ep.0.iter()
+                    .any(|s| s.kind == EvalKind::Push && s.path == [node_ix])
+            })
+            .expect("push entrypoint");
+        vm.call_function_by_name_with_args(&entry_fn_name(&ep.id()), vec![])
+            .expect("push entrypoint");
+    }
+
+    /// Read an `inspect` node's stored value as a list of `f64`s.
+    fn inspect_list(vm: &gantz_core::steel::steel_vm::engine::Engine, node_ix: usize) -> Vec<f64> {
+        use gantz_core::steel::SteelVal;
+        match gantz_core::node::state::extract_value(vm, &[node_ix]) {
+            Ok(Some(SteelVal::ListV(list))) => list
+                .iter()
+                .filter_map(|v| match v {
+                    SteelVal::NumV(f) => Some(*f),
+                    SteelVal::IntV(i) => Some(*i as f64),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected a list at [{node_ix}], got {other:?}"),
+        }
+    }
+
     /// Gate test for the `.gantz` text format: confirm `Box<dyn Node>`
     /// round-trips through the self-describing `gantz_format::Datum` codec.
     /// The format bridges node specs to/from the node set's serde dispatch
@@ -468,25 +502,29 @@ mod tests {
     }
 
     /// `~scopeout`'s control side: firing its trigger input outputs the ring-buffer
-    /// state (which the audio driver fills) as a list, unchanged. Here the ring is
-    /// seeded directly (standing in for the driver's `push_ring`), a `number`
-    /// pushes the trigger, and the list lands downstream in an `inspect`. Guards the
-    /// dsp->control read-out path on the Steel side (the `expr` returns `state`).
+    /// state (which the audio driver fills) as a list on output 0, and the channel
+    /// count on output 1. Here the ring is seeded directly (standing in for the
+    /// driver's `push_ring`), a `number` pushes the trigger, and the outputs land
+    /// downstream in `inspect` nodes. Guards the dsp->control read-out path + the
+    /// two-output `branches` contract on the Steel side.
     #[test]
-    fn tap_trigger_outputs_ring() {
-        use gantz_core::compile::{EvalKind, entry_fn_name, push_pull_entrypoints};
+    fn scopeout_trigger_outputs_ring_and_channels() {
+        use gantz_core::compile::push_pull_entrypoints;
         use gantz_core::edge::Edge;
         use gantz_core::node::graph::Graph;
         use gantz_core::steel::SteelVal;
         type G = Graph<Box<dyn Node>>;
 
-        // number (a push source) -> ~scopeout.trigger (input 1); ~scopeout -> inspect.
+        // number -> ~scopeout.trigger (input 1, after the 1 dsp input); output 0 ->
+        // inspect_samples, output 1 -> inspect_channels.
         let mut g: G = Graph::default();
         let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
         let tap = g.add_node(Box::new(gantz_plyphon::ScopeOut::default()) as Box<dyn Node>);
-        let inspect = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
+        let samples = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
+        let chans = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
         g.add_edge(num, tap, Edge::new(0.into(), 1.into()));
-        g.add_edge(tap, inspect, Edge::new(0.into(), 0.into()));
+        g.add_edge(tap, samples, Edge::new(0.into(), 0.into()));
+        g.add_edge(tap, chans, Edge::new(1.into(), 0.into()));
 
         let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
         let config = gantz_core::compile::Config::default();
@@ -506,37 +544,68 @@ mod tests {
         );
         gantz_core::node::state::update_value(&mut vm, &[tap.index()], ring).expect("seed ring");
 
-        // Fire the number's push entrypoint: it triggers the tap, which outputs its
-        // ring list downstream into the inspect node's state.
-        let ep = eps
-            .iter()
-            .find(|ep| {
-                ep.0.iter()
-                    .any(|s| s.kind == EvalKind::Push && s.path == [num.index()])
-            })
-            .expect("number push entrypoint");
-        vm.call_function_by_name_with_args(&entry_fn_name(&ep.id()), vec![])
-            .expect("push number");
+        // Fire the number's push entrypoint: it triggers the tap, which fires both
+        // outputs (branch 0) into the inspect nodes.
+        fire_push(&mut vm, &eps, num.index());
 
-        // The inspect node received the tap's ring list, unchanged.
+        // Output 0: the ring list, unchanged.
+        let got = inspect_list(&vm, samples.index());
+        assert_eq!(got, vec![1.0, 2.0, 3.0], "output 0 must be the ring buffer");
+
+        // Output 1: the channel count (1 by default).
+        let ch = gantz_core::node::state::extract_value(&vm, &[chans.index()])
+            .expect("extract channel inspect")
+            .expect("channel inspect present");
+        let ch = match ch {
+            SteelVal::IntV(i) => i as f64,
+            SteelVal::NumV(f) => f,
+            other => panic!("output 1 must be a number, got {other:?}"),
+        };
+        assert_eq!(ch, 1.0, "output 1 must be the channel count");
+    }
+
+    /// A push arriving through `~scopeout`'s *dsp* input (not the control trigger)
+    /// must NOT surface the buffer - the node's `branches` gates the outlets on the
+    /// trigger, so a plot downstream does not update on an inert dsp-edge push.
+    #[test]
+    fn scopeout_suppresses_output_without_trigger() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_core::steel::SteelVal;
+        type G = Graph<Box<dyn Node>>;
+
+        // number -> ~scopeout.dsp (input 0); output 0 -> inspect. Firing the number
+        // pushes the dsp input, leaving the trigger (input 1) inactive.
+        let mut g: G = Graph::default();
+        let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
+        let tap = g.add_node(Box::new(gantz_plyphon::ScopeOut::default()) as Box<dyn Node>);
+        let inspect = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
+        g.add_edge(num, tap, Edge::new(0.into(), 0.into()));
+        g.add_edge(tap, inspect, Edge::new(0.into(), 0.into()));
+
+        let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+        let config = gantz_core::compile::Config::default();
+        let eps = gantz_core::compile::push_pull_entrypoints(&get_node, &g);
+        let (mut vm, _compiled) = gantz_core::vm::init(&get_node, &g, &eps, &config)
+            .expect("compile number -> ~scopeout dsp");
+
+        let ring: SteelVal = SteelVal::ListV(
+            vec![SteelVal::NumV(1.0), SteelVal::NumV(2.0)]
+                .into_iter()
+                .collect(),
+        );
+        gantz_core::node::state::update_value(&mut vm, &[tap.index()], ring).expect("seed ring");
+
+        fire_push(&mut vm, &eps, num.index());
+
+        // The inspect node was never fed (output suppressed): its state stays the
+        // initial `Void`, not the ring list.
         let got = gantz_core::node::state::extract_value(&vm, &[inspect.index()])
             .expect("extract inspect state")
             .expect("inspect state present");
-        let SteelVal::ListV(list) = got else {
-            panic!("~scopeout must output its ring as a list, got {got:?}");
-        };
-        let values: Vec<f64> = list
-            .iter()
-            .filter_map(|v| match v {
-                SteelVal::NumV(f) => Some(*f),
-                SteelVal::IntV(i) => Some(*i as f64),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            values,
-            vec![1.0, 2.0, 3.0],
-            "the trigger must output the ring buffer unchanged",
+        assert!(
+            matches!(got, SteelVal::Void),
+            "a dsp-only push must not surface the buffer, got {got:?}",
         );
     }
 

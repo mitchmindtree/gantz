@@ -215,7 +215,7 @@ fn graph_without_sink_is_rejected() {
 }
 
 #[test]
-fn tap_joins_output_in_one_def() {
+fn scopeout_joins_output_in_one_def() {
     // `~sinosc -> ~out` and `~sinosc -> ~scopeout`: the tap is a second sink that shares the
     // sine's chain, so one synthdef carries SinOsc, Out and a ScopeOut, with a single
     // monitor binding at the tap's node path - and the shared SinOsc is emitted once.
@@ -261,7 +261,35 @@ fn tap_joins_output_in_one_def() {
 }
 
 #[test]
-fn tap_without_output_still_derives() {
+fn scopeout_taps_multiple_channels() {
+    // A 2-channel `~scopeout` fed by two sines: its ScopeOut takes `bufnum` + one
+    // signal input per channel, and the binding records the channel count (which the
+    // driver passes to `cue_scope`).
+    let mut sc = ScopeOut::default();
+    sc.set_channels(2);
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let t = g.add_node(N::ScopeOut(sc));
+    g.add_edge(s0, t, Edge::new(0.into(), 0.into())); // sine 0 -> channel 0
+    g.add_edge(s1, t, Edge::new(0.into(), 1.into())); // sine 1 -> channel 1
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let scope = derived
+        .def
+        .units
+        .iter()
+        .find(|u| u.name == "ScopeOut")
+        .expect("ScopeOut unit");
+    assert_eq!(scope.inputs.len(), 3, "bufnum + one signal per channel (2)",);
+    assert!(matches!(scope.inputs[1], InputRef::Unit { .. }));
+    assert!(matches!(scope.inputs[2], InputRef::Unit { .. }));
+    assert_eq!(derived.monitors.len(), 1);
+    assert_eq!(derived.monitors[0].channels, 2, "binding records the width");
+}
+
+#[test]
+fn scopeout_without_output_still_derives() {
     // A monitor-only graph (`~sinosc -> ~scopeout`, no `~out`) derives a silent synthdef:
     // a `~scopeout` is a sink in its own right, so there is something to root at.
     let mut g = Graph::<N>::default();
@@ -283,7 +311,7 @@ fn tap_without_output_still_derives() {
 }
 
 #[test]
-fn tap_scope_streams_samples() {
+fn scopeout_streams_every_sample() {
     // `~sinosc -> ~scopeout` (no ~out): the tap's ScopeOut streams *every* sample of the
     // sine off the audio thread into a cued scope stream. Draining it recovers the
     // full-rate 220 Hz signal - the stream the driver appends into the tap's ring.

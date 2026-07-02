@@ -189,6 +189,38 @@ impl<G> Registry<G> {
         commit_merge_to_head(self, timestamp, graph_ca, graph, theirs, head)
     }
 
+    /// Commit the graph at the given address as a *canonical* merge of the
+    /// diverged tips `a` and `b`, and update `head` to the new merge commit.
+    ///
+    /// Unlike [`commit_merge_to_head`](Self::commit_merge_to_head), which
+    /// keeps the head's tip as the first parent, both the parent order and
+    /// the timestamp here are pure functions of the two tips (see
+    /// [`sync::canonical_tips`](crate::sync::canonical_tips) and
+    /// [`sync::merge_timestamp`](crate::sync::merge_timestamp)): peers that
+    /// merge the same pair independently mint the *identical* merge commit,
+    /// which is what lets their DAGs converge rather than re-diverge.
+    ///
+    /// The caller must have produced the graph by merging in the same
+    /// canonical orientation (see
+    /// [`sync::plan_sync_step`](crate::sync::plan_sync_step)), as the merged
+    /// graph's node order depends on which side plays "ours".
+    ///
+    /// Only calls `graph` if no graph exists within the registry for the given
+    /// address.
+    ///
+    /// NOTE: Assumes `graph_ca` is a correct address for the graph resulting
+    /// from `graph()`.
+    pub fn commit_merge_canonical(
+        &mut self,
+        a: CommitAddr,
+        b: CommitAddr,
+        graph_ca: GraphAddr,
+        graph: impl FnOnce() -> G,
+        head: &mut Head,
+    ) -> CommitAddr {
+        commit_merge_canonical(self, a, b, graph_ca, graph, head)
+    }
+
     /// Insert the given name mapping into the registry.
     ///
     /// Returns the previous mapping if one exists.
@@ -219,6 +251,19 @@ impl<G> Registry<G> {
         let ca = commit_addr(&commit);
         self.commits.insert(ca, commit);
         ca
+    }
+
+    /// Insert a commit under a claimed (already validated or grandfathered)
+    /// address, used only by [`sync::Staged::apply`](crate::sync::Staged),
+    /// which inserts oldest-first with absent parents detached.
+    pub(crate) fn insert_commit_at(&mut self, ca: CommitAddr, commit: Commit) {
+        self.commits.insert(ca, commit);
+    }
+
+    /// Insert a graph under a claimed (already validated) address, used only
+    /// by [`sync::Staged::apply`](crate::sync::Staged).
+    pub(crate) fn insert_graph_at(&mut self, ca: GraphAddr, graph: G) {
+        self.graphs.entry(ca).or_insert(graph);
     }
 
     /// Insert a graph, computing its address from the graph's contents.
@@ -434,6 +479,29 @@ fn commit_merge_to_head<G>(
     let ours = *head_commit_ca(&reg.names, head).unwrap();
     reg.graphs.entry(graph_ca).or_insert_with(graph);
     let commit = Commit::new_merge(timestamp, ours, theirs, graph_ca);
+    let commit_ca = commit_addr(&commit);
+    reg.commits.insert(commit_ca, commit);
+    point_head_at(reg, head, commit_ca);
+    commit_ca
+}
+
+/// Commit the given graph to the given head as a canonical merge of the
+/// diverged tips `a` and `b` (see [`Registry::commit_merge_canonical`]).
+///
+/// If the graph doesn't exist, calls `graph()` to retrieve the graph for the
+/// registry.
+fn commit_merge_canonical<G>(
+    reg: &mut Registry<G>,
+    a: CommitAddr,
+    b: CommitAddr,
+    graph_ca: GraphAddr,
+    graph: impl FnOnce() -> G,
+    head: &mut Head,
+) -> CommitAddr {
+    let (first, second) = crate::sync::canonical_tips(&reg.commits, a, b);
+    let timestamp = crate::sync::merge_timestamp(&reg.commits, first, second);
+    reg.graphs.entry(graph_ca).or_insert_with(graph);
+    let commit = Commit::new_merge(timestamp, first, second, graph_ca);
     let commit_ca = commit_addr(&commit);
     reg.commits.insert(commit_ca, commit);
     point_head_at(reg, head, commit_ca);

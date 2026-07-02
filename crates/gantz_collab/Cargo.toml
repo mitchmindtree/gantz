@@ -1,0 +1,28 @@
+[package]
+name = "gantz_collab"
+version = "0.1.0"
+description = "Peer-to-peer collaborative session networking for gantz."
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+
+[dependencies]
+async-channel.workspace = true
+gantz_ca.workspace = true
+getrandom = "0.3"
+iroh.workspace = true
+iroh-gossip.workspace = true
+iroh-tickets.workspace = true
+log.workspace = true
+n0-future.workspace = true
+postcard.workspace = true
+serde.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.44", default-features = false, features = ["rt"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+getrandom = { version = "0.3", features = ["wasm_js"] }

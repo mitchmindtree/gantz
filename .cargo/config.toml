@@ -1,0 +1,7 @@
+# getrandom 0.3 requires opting into its JS backend on browser wasm
+# (gantz_collab enables the crate's `wasm_js` feature; this cfg selects it).
+#
+# NOTE: a `RUSTFLAGS` environment variable overrides this file entirely - if
+# you set one for a wasm build, include this cfg.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", 'getrandom_backend="wasm_js"']

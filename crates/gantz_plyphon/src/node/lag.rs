@@ -147,8 +147,8 @@ impl NodeUi for Lag {
 
     fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {
         match kind {
-            SocketKind::Input => Some(SocketDoc::ty("audio").with_description("signal to smooth")),
-            SocketKind::Output => Some(SocketDoc::ty("audio").with_description("smoothed signal")),
+            SocketKind::Input => Some(SocketDoc::ty("signal").with_description("signal to smooth")),
+            SocketKind::Output => Some(SocketDoc::ty("signal").with_description("smoothed signal")),
         }
     }
 }

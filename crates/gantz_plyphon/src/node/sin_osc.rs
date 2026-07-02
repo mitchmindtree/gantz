@@ -188,7 +188,7 @@ impl NodeUi for SinOsc {
                 "frequency (Hz) control; overrides the inspector value while connected",
             )),
             (SocketKind::Output, _) => Some(
-                SocketDoc::ty("audio").with_description("sine signal at the configured frequency"),
+                SocketDoc::ty("signal").with_description("sine signal at the configured frequency"),
             ),
             _ => None,
         }

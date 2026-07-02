@@ -246,7 +246,7 @@ impl NodeUi for ScopeOut {
                 } else {
                     format!("channel {i} signal to sample into the ring buffer")
                 };
-                Some(SocketDoc::ty("audio").with_description(desc))
+                Some(SocketDoc::ty("signal").with_description(desc))
             }
             (SocketKind::Input, i) if i == self.channels => {
                 Some(SocketDoc::ty("bang").with_description("trigger: output the buffered samples"))

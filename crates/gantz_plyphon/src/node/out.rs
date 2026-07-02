@@ -205,7 +205,7 @@ impl NodeUi for Out {
     fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, ix: usize) -> Option<SocketDoc> {
         match (kind, ix) {
             (SocketKind::Input, 0) => {
-                Some(SocketDoc::ty("audio").with_description("signal to send to the audio output"))
+                Some(SocketDoc::ty("signal").with_description("signal to send to the audio output"))
             }
             (SocketKind::Input, 1) => Some(SocketDoc::ty("number").with_description(
                 "master gain control; overrides the inspector value while connected",

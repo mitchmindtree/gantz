@@ -21,6 +21,7 @@
 //! value unchanged (like [`super::Inspect`]), so a value can be observed without
 //! breaking the chain it flows through.
 
+use super::size_sync::{SizeSync, fitted_size, size_sync_frame};
 use crate::widget::node_inspector;
 use crate::widget::node_inspector::radio_option;
 use crate::{
@@ -504,6 +505,7 @@ impl NodeUi for Plot {
         // Read the series once, up-front (only borrows `ctx`).
         let ys = series(&ctx);
 
+        let size_sync_id = node_egui_id.with("size_sync");
         let framed = uictx.framed_with(frame, |ui, _sockets| {
             // `Resize` registers its corner under this salt; reading last frame's
             // response tells us whether it is being actively dragged.
@@ -516,30 +518,59 @@ impl NodeUi for Plot {
                 ui.ctx().request_repaint();
             }
 
-            // Both axes are user-resizable while the node is selected.
-            let resizable = egui::Vec2b::new(interaction.selected, interaction.selected);
-            egui::containers::Resize::default()
+            let sync: Option<SizeSync> = ui.memory_mut(|m| m.data.get_temp(size_sync_id));
+            let (push_external, drag_released) =
+                size_sync_frame(sync, [self.width, self.height], resizing);
+
+            let resize = egui::containers::Resize::default()
                 .id(resize_id)
-                .resizable(resizable)
-                .default_size(default_size)
-                .min_size(min_size)
-                .with_stroke(false)
-                .show(ui, |ui| {
-                    let avail = ui.available_size();
+                .with_stroke(false);
+            let resize = if push_external {
+                // One-frame push of the committed size into the displayed
+                // resize state (see `node::size_sync`): overrides persisted
+                // state and cancels any in-flight drag - external wins.
+                ui.ctx().request_repaint();
+                let w = (self.width as f32).max(min_size.x);
+                let h = (self.height as f32).max(min_size.y);
+                resize.fixed_size(egui::vec2(w, h))
+            } else {
+                // Both axes are user-resizable while the node is selected.
+                let resizable = egui::Vec2b::new(interaction.selected, interaction.selected);
+                resize
+                    .resizable(resizable)
+                    .default_size(default_size)
+                    .min_size(min_size)
+            };
+            let inner = resize.show(ui, |ui| {
+                let avail = ui.available_size();
 
-                    // `size` is part of the content address, so only commit it
-                    // once *settled* - never mid-drag, which would churn a commit
-                    // every frame.
-                    let new_w = avail.x.max(min_size.x).round() as u16;
-                    let new_h = avail.y.max(min_size.y).round() as u16;
-                    if !resizing && (self.width != new_w || self.height != new_h) {
-                        self.width = new_w;
-                        self.height = new_h;
-                        changed = true;
-                    }
+                // `size` is part of the content address, so it is written
+                // only on a settled corner-drag release - never mid-drag
+                // (a commit per drag frame), and never merely because the
+                // rendered size differs (which would clobber external
+                // changes from undo/collab sync and mint spurious commits).
+                let fitted = fitted_size(avail.x.max(min_size.x), avail.y.max(min_size.y));
+                if drag_released && [self.width, self.height] != fitted {
+                    [self.width, self.height] = fitted;
+                    changed = true;
+                }
 
-                    self.plot_body(&ys, plot_id, avail, ui)
-                })
+                self.plot_body(&ys, plot_id, avail, ui)
+            });
+
+            // Persist the sync state *after* any local write, so a local
+            // commit never masquerades as an external change next frame.
+            ui.memory_mut(|m| {
+                m.data.insert_temp(
+                    size_sync_id,
+                    SizeSync {
+                        last_seen: [self.width, self.height],
+                        was_resizing: if push_external { false } else { resizing },
+                    },
+                )
+            });
+
+            inner
         });
 
         let mut resp = NodeUiResponse::new(framed);

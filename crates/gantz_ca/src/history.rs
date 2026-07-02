@@ -59,14 +59,14 @@ pub fn first_parent_chain(
     })
 }
 
-/// The best common ancestor of `a` and `b`, or `None` when their histories
-/// are unrelated.
+/// All best common ancestors of `a` and `b`, canonically sorted ascending by
+/// `(timestamp, addr)`; empty when their histories are unrelated.
 ///
 /// A common ancestor is "best" when it is not itself an ancestor of another
-/// common ancestor. When several such candidates exist (criss-cross
-/// histories), one is chosen deterministically by max `(timestamp, addr)`;
-/// recursively merging the candidates is out of scope.
-pub fn merge_base(commits: &Commits, a: CommitAddr, b: CommitAddr) -> Option<CommitAddr> {
+/// common ancestor. More than one candidate indicates criss-cross histories
+/// (each side merged the other); see [`crate::merge::merge_commits`] for how
+/// candidates are recursively merged into a virtual base.
+pub fn merge_bases(commits: &Commits, a: CommitAddr, b: CommitAddr) -> Vec<CommitAddr> {
     let a_ancestors: HashSet<CommitAddr> = ancestors(commits, a).collect();
     let mut common: HashSet<CommitAddr> = ancestors(commits, b)
         .filter(|ca| a_ancestors.contains(ca))
@@ -80,9 +80,19 @@ pub fn merge_base(commits: &Commits, a: CommitAddr, b: CommitAddr) -> Option<Com
             common.remove(&ancestor);
         }
     }
-    common
-        .into_iter()
-        .max_by_key(|&ca| (commits.get(&ca).map(|c| c.timestamp), ca))
+    let mut bases: Vec<CommitAddr> = common.into_iter().collect();
+    bases.sort_by_key(|&ca| (commits.get(&ca).map(|c| c.timestamp), ca));
+    bases
+}
+
+/// The best common ancestor of `a` and `b`, or `None` when their histories
+/// are unrelated.
+///
+/// When several best candidates exist (criss-cross histories, see
+/// [`merge_bases`]), one is chosen deterministically by max
+/// `(timestamp, addr)`.
+pub fn merge_base(commits: &Commits, a: CommitAddr, b: CommitAddr) -> Option<CommitAddr> {
+    merge_bases(commits, a, b).last().copied()
 }
 
 /// Analyze the relationship between two tips, from the perspective of merging
@@ -241,7 +251,10 @@ mod tests {
         // Criss-cross: each side merges the other's tip.
         let ma = add_merge(&mut commits, 4, a, b, 4);
         let mb = add_merge(&mut commits, 5, b, a, 5);
-        // Both a and b are best common ancestors; the later timestamp wins.
+        // Both a and b are best common ancestors, canonically ordered; the
+        // later timestamp wins the tie-break.
+        assert_eq!(merge_bases(&commits, ma, mb), vec![a, b]);
+        assert_eq!(merge_bases(&commits, mb, ma), vec![a, b]);
         assert_eq!(merge_base(&commits, ma, mb), Some(b));
     }
 

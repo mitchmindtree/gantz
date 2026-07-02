@@ -11,8 +11,7 @@
 //! surface the conflicts, or accept the defaults.
 
 use crate::{
-    CaHash, CommitAddr, Diff, GraphAddr, Matching, MergeAnalysis, Registry, Timestamp,
-    content_addr, diff, history,
+    CaHash, CommitAddr, Diff, GraphAddr, Matching, Registry, Timestamp, content_addr, diff, history,
 };
 use petgraph::{
     Directed,
@@ -176,6 +175,10 @@ pub enum MergeResolution<N, E, Ix: IndexType> {
     /// The tips have diverged and a three-way merge was performed.
     Diverged {
         /// The merge base the diffs are relative to.
+        ///
+        /// For criss-cross histories this is the nominal (tie-break)
+        /// candidate; the diffs and outcome are computed against a *virtual*
+        /// base merged from all candidates (see [`merge_commits`]).
         base: CommitAddr,
         /// Ours' changes relative to the base.
         ours_diff: Diff<E>,
@@ -220,11 +223,22 @@ enum Fate {
     KeepTheirs,
 }
 
+/// Maximum recursion depth when constructing virtual merge bases for
+/// criss-cross histories; beyond it the deterministic tie-break candidate is
+/// used directly as the base.
+const MAX_BASE_RECURSION: usize = 5;
+
 /// Merge two tips of a registry's commit DAG.
 ///
 /// Pure: the registry is not mutated, so this doubles as a dry run for
 /// previews. On [`MergeResolution::Diverged`], committing the result is the
 /// caller's job (see [`Registry::commit_merge_to_head`]).
+///
+/// Criss-cross histories (multiple best common ancestors, e.g. session peers
+/// repeatedly merging one another) are handled git-style: the candidates are
+/// recursively merged into a *virtual* base, so changes both tips already
+/// contain via different merge paths are part of the base rather than
+/// duplicated as parallel additions.
 pub fn merge_commits<N, E, Ix>(
     reg: &Registry<Graph<N, E, Ix>>,
     ours: CommitAddr,
@@ -236,53 +250,199 @@ where
     E: Clone + Ord,
     Ix: IndexType,
 {
+    merge_commits_recursive(reg, ours, theirs, resolutions, 0)
+}
+
+/// The implementation of [`merge_commits`]; `depth` guards the virtual-base
+/// recursion for criss-cross histories.
+fn merge_commits_recursive<N, E, Ix>(
+    reg: &Registry<Graph<N, E, Ix>>,
+    ours: CommitAddr,
+    theirs: CommitAddr,
+    resolutions: Resolutions,
+    depth: usize,
+) -> Result<MergeResolution<N, E, Ix>, MergeError>
+where
+    N: Clone + CaHash,
+    E: Clone + Ord,
+    Ix: IndexType,
+{
     let commits = reg.commits();
-    let base = match history::analyze(commits, ours, theirs) {
-        MergeAnalysis::Unrelated => return Err(MergeError::Unrelated),
-        MergeAnalysis::AlreadyUpToDate => return Ok(MergeResolution::AlreadyUpToDate),
-        MergeAnalysis::FastForward => return Ok(MergeResolution::FastForward),
-        MergeAnalysis::Diverged(base) => base,
-    };
-    let graph_of = |ca: CommitAddr| {
-        let commit = commits.get(&ca).ok_or(MergeError::MissingCommit(ca))?;
-        reg.graphs()
-            .get(&commit.graph)
-            .ok_or(MergeError::MissingGraph(commit.graph))
-    };
-    let base_g = graph_of(base)?;
-    let ours_g = graph_of(ours)?;
-    let theirs_g = graph_of(theirs)?;
-    // Endpoints are verified above, so `matching_with_times` cannot fail;
-    // degrade to direct matching rather than panicking should that ever
-    // change.
-    let (mo, ours_times) = diff::matching_with_times(reg, base, ours)
-        .unwrap_or_else(|| (diff::match_nodes(base_g, ours_g), Default::default()));
-    let (mt, theirs_times) = diff::matching_with_times(reg, base, theirs)
-        .unwrap_or_else(|| (diff::match_nodes(base_g, theirs_g), Default::default()));
-    let ours_diff = diff::diff(base_g, ours_g, &mo);
-    let theirs_diff = diff::diff(base_g, theirs_g, &mt);
+    // A tip that is itself a common ancestor is always the sole candidate,
+    // so the singleton checks cover the analysis (see `history::analyze`).
+    let bases = history::merge_bases(commits, ours, theirs);
+    match bases.as_slice() {
+        [] => return Err(MergeError::Unrelated),
+        [base] if *base == theirs => return Ok(MergeResolution::AlreadyUpToDate),
+        [base] if *base == ours => return Ok(MergeResolution::FastForward),
+        _ => (),
+    }
+    let ours_g = commit_graph_of(reg, ours)?;
+    let theirs_g = commit_graph_of(reg, theirs)?;
     let tip_time = |ca: CommitAddr| commits.get(&ca).map(|c| c.timestamp).unwrap_or_default();
-    let edit_times = EditTimes {
-        ours: ours_times,
-        theirs: theirs_times,
-        ours_tip: tip_time(ours),
-        theirs_tip: tip_time(theirs),
+    // The nominal base reported in the resolution: the tie-break candidate.
+    let base = *bases.last().expect("diverged tips have a merge base");
+    let (ours_diff, theirs_diff, outcome) = if bases.len() > 1 && depth < MAX_BASE_RECURSION {
+        // Criss-cross: merge the candidates into a virtual base. It has no
+        // commit chain, so node identity and edit times degrade to direct
+        // content matching and tip timestamps - deterministic (hence still
+        // convergent), just coarser.
+        let virt = virtual_base(reg, &bases, resolutions, depth + 1)?;
+        let edit_times = EditTimes {
+            ours: BTreeMap::new(),
+            theirs: BTreeMap::new(),
+            ours_tip: tip_time(ours),
+            theirs_tip: tip_time(theirs),
+        };
+        merge_graphs_direct(&virt, ours_g, theirs_g, resolutions, &edit_times)
+    } else {
+        let base_g = commit_graph_of(reg, base)?;
+        // Endpoints are verified above, so `matching_with_times` cannot
+        // fail; degrade to direct matching rather than panicking should that
+        // ever change.
+        let (mo, ours_times) = diff::matching_with_times(reg, base, ours)
+            .unwrap_or_else(|| (diff::match_nodes(base_g, ours_g), Default::default()));
+        let (mt, theirs_times) = diff::matching_with_times(reg, base, theirs)
+            .unwrap_or_else(|| (diff::match_nodes(base_g, theirs_g), Default::default()));
+        let ours_diff = diff::diff(base_g, ours_g, &mo);
+        let theirs_diff = diff::diff(base_g, theirs_g, &mt);
+        let edit_times = EditTimes {
+            ours: ours_times,
+            theirs: theirs_times,
+            ours_tip: tip_time(ours),
+            theirs_tip: tip_time(theirs),
+        };
+        let outcome = merge_graphs(
+            base_g,
+            ours_g,
+            theirs_g,
+            &ours_diff,
+            &theirs_diff,
+            resolutions,
+            &edit_times,
+        );
+        (ours_diff, theirs_diff, outcome)
     };
-    let outcome = merge_graphs(
-        base_g,
-        ours_g,
-        theirs_g,
-        &ours_diff,
-        &theirs_diff,
-        resolutions,
-        &edit_times,
-    );
     Ok(MergeResolution::Diverged {
         base,
         ours_diff,
         theirs_diff,
         outcome,
     })
+}
+
+/// The graph pointed to by `ca`'s commit.
+fn commit_graph_of<N, E, Ix>(
+    reg: &Registry<Graph<N, E, Ix>>,
+    ca: CommitAddr,
+) -> Result<&Graph<N, E, Ix>, MergeError>
+where
+    Ix: IndexType,
+{
+    let commit = reg
+        .commits()
+        .get(&ca)
+        .ok_or(MergeError::MissingCommit(ca))?;
+    reg.graphs()
+        .get(&commit.graph)
+        .ok_or(MergeError::MissingGraph(commit.graph))
+}
+
+/// [`merge_graphs`] under diffs computed by direct content matching against
+/// `base`: the path for virtual bases, which have no commit chain to track
+/// node identity along.
+fn merge_graphs_direct<N, E, Ix>(
+    base: &Graph<N, E, Ix>,
+    ours: &Graph<N, E, Ix>,
+    theirs: &Graph<N, E, Ix>,
+    resolutions: Resolutions,
+    edit_times: &EditTimes,
+) -> (Diff<E>, Diff<E>, MergeOutcome<N, E, Ix>)
+where
+    N: Clone + CaHash,
+    E: Clone + Ord,
+    Ix: IndexType,
+{
+    let mo = diff::match_nodes(base, ours);
+    let mt = diff::match_nodes(base, theirs);
+    let ours_diff = diff::diff(base, ours, &mo);
+    let theirs_diff = diff::diff(base, theirs, &mt);
+    let outcome = merge_graphs(
+        base,
+        ours,
+        theirs,
+        &ours_diff,
+        &theirs_diff,
+        resolutions,
+        edit_times,
+    );
+    (ours_diff, theirs_diff, outcome)
+}
+
+/// The merged graph of two commit tips, minting nothing: the building block
+/// for virtual bases.
+fn merged_tip_graph<N, E, Ix>(
+    reg: &Registry<Graph<N, E, Ix>>,
+    a: CommitAddr,
+    b: CommitAddr,
+    resolutions: Resolutions,
+    depth: usize,
+) -> Result<Graph<N, E, Ix>, MergeError>
+where
+    N: Clone + CaHash,
+    E: Clone + Ord,
+    Ix: IndexType,
+{
+    match merge_commits_recursive(reg, a, b, resolutions, depth) {
+        Ok(MergeResolution::AlreadyUpToDate) => Ok(commit_graph_of(reg, a)?.clone()),
+        Ok(MergeResolution::FastForward) => Ok(commit_graph_of(reg, b)?.clone()),
+        Ok(MergeResolution::Diverged { outcome, .. }) => Ok(outcome.graph),
+        // Unrelated candidates (e.g. merged-in foreign roots): merge against
+        // an empty base - everything unions, deterministically.
+        Err(MergeError::Unrelated) => {
+            let a_g = commit_graph_of(reg, a)?;
+            let b_g = commit_graph_of(reg, b)?;
+            let empty = Graph::default();
+            let (_, _, outcome) =
+                merge_graphs_direct(&empty, a_g, b_g, resolutions, &EditTimes::default());
+            Ok(outcome.graph)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// A virtual base graph for criss-cross merge-base `candidates` (canonically
+/// sorted, at least two): the candidates merged left to right.
+fn virtual_base<N, E, Ix>(
+    reg: &Registry<Graph<N, E, Ix>>,
+    candidates: &[CommitAddr],
+    resolutions: Resolutions,
+    depth: usize,
+) -> Result<Graph<N, E, Ix>, MergeError>
+where
+    N: Clone + CaHash,
+    E: Clone + Ord,
+    Ix: IndexType,
+{
+    let mut virt = merged_tip_graph(reg, candidates[0], candidates[1], resolutions, depth)?;
+    for &c in &candidates[2..] {
+        let c_g = commit_graph_of(reg, c)?;
+        // The fold step's base: the (possibly itself criss-cross) base of
+        // the first candidate and `c`; an empty graph when unrelated.
+        let pair_bases = history::merge_bases(reg.commits(), candidates[0], c);
+        let step_base = match pair_bases.as_slice() {
+            [] => Graph::default(),
+            [only] => commit_graph_of(reg, *only)?.clone(),
+            _ if depth < MAX_BASE_RECURSION => {
+                virtual_base(reg, &pair_bases, resolutions, depth + 1)?
+            }
+            _ => commit_graph_of(reg, *pair_bases.last().expect("non-empty"))?.clone(),
+        };
+        let (_, _, outcome) =
+            merge_graphs_direct(&step_base, &virt, c_g, resolutions, &EditTimes::default());
+        virt = outcome.graph;
+    }
+    Ok(virt)
 }
 
 /// Three-way merge of `ours` and `theirs` against their common `base`, under
@@ -554,7 +714,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Head, graph_addr};
+    use crate::{Commit, Head, graph_addr};
     use std::time::Duration;
 
     type G = petgraph::graph::Graph<String, u32, Directed, usize>;
@@ -629,6 +789,42 @@ mod tests {
             MergeResolution::Diverged { outcome, .. } => outcome,
             other => panic!("expected Diverged, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn criss_cross_merges_via_virtual_base_without_duplication() {
+        // Each side merged the other's tip (with differing merge commits, as
+        // pre-canonical or manual merges produce), so both best common
+        // ancestors {a, b} predate the shared additions x and y. A single
+        // tie-break base would see x (or y) as an addition on *both* sides
+        // and union it twice; the virtual base already contains both.
+        let mut reg = Registry::<G>::default();
+        let root = commit(&mut reg, 1, None, &graph(&["n"], &[]));
+        let ga = graph(&["n", "x"], &[]);
+        let gb = graph(&["n", "y"], &[]);
+        let a = commit(&mut reg, 2, Some(root), &ga);
+        let b = commit(&mut reg, 3, Some(root), &gb);
+        let gab = graph(&["n", "x", "y"], &[]);
+        let gba = graph(&["n", "y", "x"], &[]);
+        reg.add_graph(gab.clone());
+        reg.add_graph(gba.clone());
+        let mab = reg.add_commit(Commit::new_merge(
+            Duration::from_secs(4),
+            a,
+            b,
+            graph_addr(&gab),
+        ));
+        let mba = reg.add_commit(Commit::new_merge(
+            Duration::from_secs(5),
+            b,
+            a,
+            graph_addr(&gba),
+        ));
+        let res = merge_commits(&reg, mab, mba, Resolutions::default()).unwrap();
+        let out = diverged(res);
+        assert!(out.conflicts.is_empty());
+        // Ours' order, exactly one of each: no duplicated x or y.
+        assert_eq!(nodes(&out.graph), vec!["n", "x", "y"]);
     }
 
     #[test]

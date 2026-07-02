@@ -203,6 +203,34 @@ fn control_edge_on_root_does_not_panic() {
 }
 
 #[test]
+fn dsp_chain_into_control_input_emits_no_units() {
+    // `~lag -> ~sinosc`'s freq (a *control* input - sinosc has no dsp inputs) with
+    // `~sinosc -> ~out`: the lag feeds no sink through dsp inputs, so it must not
+    // land in the def. Interior nodes are pull-traversed over ALL incoming edges,
+    // so without the dsp-reachable intersection the lag would emit a dead `Lag`
+    // unit (wasted audio CPU) with a live `dur` param (driven by the driver, and
+    // hashed into `structural_sig` - a spurious respawn on control-wiring edits).
+    let mut g = Graph::<N>::default();
+    let l = g.add_node(N::Lag(Lag::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(l, s, Edge::new(0.into(), 0.into())); // ~lag -> sinosc freq (control)
+    g.add_edge(s, o, Edge::new(0.into(), 0.into())); // sinosc -> ~out (dsp)
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    assert_eq!(
+        derived.def.units.len(),
+        3,
+        "SinOsc + gain-mul + Out, no Lag"
+    );
+    assert!(derived.def.units.iter().all(|u| u.name != "Lag"));
+    assert!(
+        derived.def.params.iter().all(|p| !p.name.ends_with("/dur")),
+        "the unreachable lag's dur param must not be driven",
+    );
+}
+
+#[test]
 fn graph_without_sink_is_rejected() {
     // A graph with no dsp sink (no `~out`, no `~scopeout`) has nothing to root a
     // synthdef at.

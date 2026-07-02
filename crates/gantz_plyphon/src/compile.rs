@@ -55,7 +55,11 @@ pub struct Derived {
 /// Seeding each sink's pull with its `n_dsp_inputs` (not `n_inputs`) means a
 /// control edge at a higher input index (e.g. `~out`'s gain, `~scopeout`'s trigger)
 /// falls outside the traversal - it is a Steel/state concern, not part of the dsp
-/// signal graph.
+/// signal graph. The same rule applies at *interior* nodes: only nodes that feed a
+/// sink transitively through dsp inputs contribute units, so a dsp chain wired into
+/// a control input (e.g. a `~lag` into `~sinosc`'s freq) emits nothing rather than
+/// dead units whose params the driver would drive and whose presence would force
+/// spurious respawns (they'd land in [`structural_sig`]).
 ///
 /// Phase-1 limitations: a single edge per DSP input (no summing), acyclic graphs
 /// only (no feedback), and flat concrete nodes (no nested graphs / refs).
@@ -80,15 +84,34 @@ where
         return Err(DeriveError::NoSink);
     }
 
+    // The dsp-reachable set: dsp nodes that feed a sink transitively through *dsp*
+    // inputs only. `pull_eval_order` masks only the seed's inputs - interior nodes
+    // are traversed over ALL incoming edges - so the merged order below must be
+    // intersected with this set to keep control-input feeds out of the def.
+    let mut dsp_reachable: HashSet<NodeIx> = sinks.iter().copied().collect();
+    let mut stack: Vec<NodeIx> = sinks.clone();
+    while let Some(n) = stack.pop() {
+        let n_dsp_in = graph[n].to_node_dsp().map_or(0, |d| d.n_dsp_inputs());
+        for e in graph.edges_directed(n, Direction::Incoming) {
+            if (e.weight().input.0 as usize) < n_dsp_in
+                && graph[e.source()].to_node_dsp().is_some()
+                && dsp_reachable.insert(e.source())
+            {
+                stack.push(e.source());
+            }
+        }
+    }
+
     // Merge each sink's dsp-only pull-eval order into one topological order,
-    // keeping only DSP nodes and the first occurrence of each (see the fn docs).
+    // keeping only dsp-reachable nodes and the first occurrence of each (see the
+    // fn docs).
     let mut order: Vec<NodeIx> = Vec::new();
     let mut seen: HashSet<NodeIx> = HashSet::new();
     for &sink in &sinks {
         let n_dsp_in = graph[sink].to_node_dsp().map_or(0, |d| d.n_dsp_inputs());
         let conns = Conns::connected(n_dsp_in).expect("n_dsp_inputs within Conns::MAX");
         for n in pull_eval_order(graph, sink, conns) {
-            if graph[n].to_node_dsp().is_some() && seen.insert(n) {
+            if dsp_reachable.contains(&n) && seen.insert(n) {
                 order.push(n);
             }
         }

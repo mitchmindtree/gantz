@@ -32,6 +32,9 @@ impl Node for bevy_gantz_egui::node::TickBang {}
 impl Node for gantz_egui::node::Inspect {}
 impl Node for gantz_egui::node::Plot {}
 
+impl Node for gantz_plyphon::Sine {}
+impl Node for gantz_plyphon::Out {}
+
 // `Box<dyn Node>`'s `Serialize`/`Deserialize`: compiled dispatch over the
 // full node set, keyed by each type's `gantz_nodetag::NodeTag`. Adding a
 // node type to the app is an `impl Node` above plus one line here (the
@@ -55,6 +58,8 @@ gantz_format::impl_node_set_serde! {
         bevy_gantz_egui::node::TickBang,
         gantz_egui::node::Inspect,
         gantz_egui::node::Plot,
+        gantz_plyphon::Sine,
+        gantz_plyphon::Out,
     }
 }
 
@@ -89,6 +94,21 @@ impl bevy_gantz_egui::node::ToTickBang for Box<dyn Node> {
     fn to_tick_bang(&self) -> Option<&bevy_gantz_egui::node::TickBang> {
         let any: &dyn std::any::Any = &**self;
         any.downcast_ref()
+    }
+}
+
+// Lets the synthdef compiler and audio driver find DSP nodes within an erased
+// node by downcasting to each known `NodeDsp` type (mirrors `ToTickBang`).
+impl gantz_plyphon::ToNodeDsp for Box<dyn Node> {
+    fn to_node_dsp(&self) -> Option<&dyn gantz_plyphon::NodeDsp> {
+        let any: &dyn Any = &**self;
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Sine>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Out>() {
+            return Some(n);
+        }
+        None
     }
 }
 

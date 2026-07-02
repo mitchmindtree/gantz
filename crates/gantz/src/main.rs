@@ -26,6 +26,8 @@ fn main() {
         .add_plugins(GantzPlugin::<Box<dyn node::Node>>::default())
         // Egui plugin (provides GuiState, TraceCapture, PerfVm, PerfGui, GUI systems)
         .add_plugins(GantzEguiPlugin::<Box<dyn node::Node>>::default())
+        // Audio plugin: cpal output stream + plyphon synth driver for DSP graphs.
+        .add_plugins(bevy_gantz_plyphon::PlyphonPlugin::<Box<dyn node::Node>>::default())
         // App-specific builtins
         .insert_resource(BuiltinNodes::<Box<dyn node::Node>>(Box::new(
             Builtins::new(),

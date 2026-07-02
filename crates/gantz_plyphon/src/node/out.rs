@@ -7,6 +7,7 @@ use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
 use gantz_egui::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind};
 use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
+use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
@@ -14,7 +15,7 @@ use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
 /// The audio output sink. Applies a master `gain` to its input and writes it to
 /// output bus 0, fanned across every output channel. The compiler roots a
 /// synthdef at this node.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, NodeTag)]
 pub struct Out {
     #[serde(default = "default_gain")]
     gain: f32,

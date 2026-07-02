@@ -14,6 +14,7 @@ egui_graph.workspace = true
 gantz_ca.workspace = true
 gantz_core.workspace = true
 gantz_egui.workspace = true
+gantz_nodetag.workspace = true
 log.workspace = true
 petgraph.workspace = true
 plyphon.workspace = true

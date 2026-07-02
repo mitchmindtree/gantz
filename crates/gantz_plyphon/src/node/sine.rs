@@ -7,6 +7,7 @@ use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
 use gantz_egui::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind};
 use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
+use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
@@ -15,7 +16,7 @@ use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
 ///
 /// `freq` (Hz) lives in the node weight, so editing it changes the node's
 /// content address (and thus the derived synthdef).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, NodeTag)]
 pub struct Sine {
     #[serde(default = "default_freq")]
     freq: f32,

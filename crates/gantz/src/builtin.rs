@@ -135,6 +135,12 @@ fn primitives() -> Primitives {
     register_primitive(&mut p, "plot", || {
         Box::new(gantz_egui::node::Plot::default()) as Box<_>
     });
+    register_primitive(&mut p, "~sine", || {
+        Box::new(gantz_plyphon::Sine::default()) as Box<_>
+    });
+    register_primitive(&mut p, "~out", || {
+        Box::new(gantz_plyphon::Out::default()) as Box<_>
+    });
     p
 }
 

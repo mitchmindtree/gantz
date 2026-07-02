@@ -6,33 +6,49 @@ use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
 use gantz_nodetag::NodeTag;
-use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, NodeRate, Signal, ToNodeDsp, cahash_rate};
 use crate::param::{
-    param_name, param_state, param_state_row, param_value, plyphon_param, value_row, with_value,
+    param_name, param_state, param_state_row, param_value, plyphon_param, rate_row, value_row,
+    with_value,
 };
 
-/// A one-pole lag (smoother). Emits a `Lag.ar(in, lagTime)` UGen per input
-/// channel, smoothing the whole signal group over the shared `lag` duration.
+/// A one-pole lag (smoother). Emits a `Lag` UGen per input channel at the
+/// configured `rate`, smoothing the whole signal group over the shared `lag`
+/// duration. (A `kr` lag fed by an audio-rate wire smooths the block's first
+/// sample - the usual audio-to-control collapse.)
 ///
 /// The `lag` duration (seconds) lives in the node's VM state (like `~sinosc`'s
 /// freq), edited via the inspector and applied to the running synth via
 /// `set_control` (the `Lag` UGen recomputes its coefficient on change, so it is
-/// click-free). The node weight is empty - its identity is just its type.
+/// click-free). Only the (structural) `rate` lives in the node weight.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
-pub struct Lag {}
+pub struct Lag {
+    #[serde(default)]
+    rate: NodeRate,
+}
 
 impl Lag {
     /// The default lag time (seconds) a fresh `~lag` starts at.
     pub const DEFAULT_DUR: f32 = 0.1;
+
+    /// The ugen rate (`ar`/`kr`) the smoother runs at.
+    pub fn rate(&self) -> NodeRate {
+        self.rate
+    }
+
+    /// Set the ugen rate (content-address affecting; structural).
+    pub fn set_rate(&mut self, rate: NodeRate) {
+        self.rate = rate;
+    }
 }
 
 impl CaHash for Lag {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
         hasher.update(b"gantz.plyphon.lag");
+        cahash_rate(hasher, self.rate);
     }
 }
 
@@ -90,7 +106,7 @@ impl NodeDsp for Lag {
             .map(|ch| {
                 let unit = b.push_unit(UnitSpec::new(
                     "Lag",
-                    Rate::Audio,
+                    self.rate.to_plyphon(),
                     vec![ch, InputRef::Param(dur)],
                     1,
                 ));
@@ -150,7 +166,11 @@ impl NodeUi for Lag {
             let prev = state.unwrap_or_else(|| param_state(Self::DEFAULT_DUR as f64));
             let _ = ctx.update_value(with_value(prev, value as f64));
         }
-        InspectorRowsResponse::default()
+        let mut resp = InspectorRowsResponse::default();
+        if rate_row(body, &mut self.rate) {
+            resp.mark_changed();
+        }
+        resp
     }
 
     fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {

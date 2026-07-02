@@ -8,26 +8,28 @@ use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
 use gantz_nodetag::NodeTag;
-use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, NodeRate, Signal, ToNodeDsp, cahash_rate};
 use crate::param::{
     cahash_lag, control_input_expr, param_name, param_row, param_state, param_state_row,
-    param_value, plyphon_param, with_value,
+    param_value, plyphon_param, rate_row, with_value,
 };
 
-/// A sine oscillator. Emits a single `SinOsc.ar(freq)` UGen.
+/// A sine oscillator. Emits a single `SinOsc` UGen at the configured `rate`
+/// (audio by default; control rate for modulator duty).
 ///
 /// The `freq` (Hz) *value* lives in the node's VM state (path-keyed, like
 /// `number`), so editing it does not churn the graph's content address; the audio
 /// driver applies value changes via `set_control`. Only the smoothing `freq_lag`
-/// (structural) lives in the node weight.
+/// and the `rate` (both structural) live in the node weight.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, NodeTag)]
 pub struct SinOsc {
     #[serde(default)]
     freq_lag: f32,
+    #[serde(default)]
+    rate: NodeRate,
 }
 
 impl SinOsc {
@@ -46,11 +48,21 @@ impl SinOsc {
     pub fn set_freq_lag(&mut self, lag: f32) {
         self.freq_lag = lag;
     }
+
+    /// The ugen rate (`ar`/`kr`) the oscillator runs at.
+    pub fn rate(&self) -> NodeRate {
+        self.rate
+    }
+
+    /// Set the ugen rate (content-address affecting; structural).
+    pub fn set_rate(&mut self, rate: NodeRate) {
+        self.rate = rate;
+    }
 }
 
 impl PartialEq for SinOsc {
     fn eq(&self, other: &Self) -> bool {
-        self.freq_lag.to_bits() == other.freq_lag.to_bits()
+        self.freq_lag.to_bits() == other.freq_lag.to_bits() && self.rate == other.rate
     }
 }
 
@@ -59,6 +71,7 @@ impl Eq for SinOsc {}
 impl Hash for SinOsc {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Hash::hash(&self.freq_lag.to_bits(), state);
+        Hash::hash(&self.rate, state);
     }
 }
 
@@ -66,6 +79,7 @@ impl CaHash for SinOsc {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
         hasher.update(b"gantz.plyphon.sinosc");
         cahash_lag(hasher, self.freq_lag);
+        cahash_rate(hasher, self.rate);
     }
 }
 
@@ -114,7 +128,7 @@ impl NodeDsp for SinOsc {
         );
         let unit = b.push_unit(UnitSpec::new(
             "SinOsc",
-            Rate::Audio,
+            self.rate.to_plyphon(),
             vec![InputRef::Param(freq), InputRef::Constant(0.0)],
             1,
         ));
@@ -134,7 +148,7 @@ impl NodeUi for SinOsc {
     }
 
     fn description(&self) -> Option<&'static str> {
-        Some("Sine oscillator (audio rate)")
+        Some("Sine oscillator (audio or control rate)")
     }
 
     fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
@@ -179,6 +193,9 @@ impl NodeUi for SinOsc {
             self.freq_lag = lag;
             resp.mark_changed();
         }
+        if rate_row(body, &mut self.rate) {
+            resp.mark_changed();
+        }
         resp
     }
 
@@ -187,9 +204,9 @@ impl NodeUi for SinOsc {
             (SocketKind::Input, 0) => Some(SocketDoc::ty("number").with_description(
                 "frequency (Hz) control; overrides the inspector value while connected",
             )),
-            (SocketKind::Output, _) => Some(
-                SocketDoc::ty("signal").with_description("sine signal at the configured frequency"),
-            ),
+            (SocketKind::Output, _) => Some(SocketDoc::ty("signal").with_description(
+                "sine signal at the configured frequency (and the configured ar/kr rate)",
+            )),
             _ => None,
         }
     }

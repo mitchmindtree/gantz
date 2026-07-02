@@ -85,6 +85,23 @@ impl<'a> SugarArgs<'a> {
         }
     }
 
+    /// Find a `#:<key>` keyword and return the following symbol (e.g. a mode
+    /// like `#:rate kr`).
+    pub fn keyword_symbol(&self, key: &str) -> Result<Option<String>, FormatError> {
+        match self.keyword_at(key) {
+            Some((i, kw)) => Ok(Some(self.args.get(i + 1).and_then(as_symbol).ok_or_else(
+                || {
+                    err_at(
+                        kw,
+                        self.src,
+                        ErrorKind::Malformed(format!("#:{key} requires a symbol")),
+                    )
+                },
+            )?)),
+            None => Ok(None),
+        }
+    }
+
     /// Whether a bare `#:<key>` flag keyword is present.
     pub fn has_flag(&self, key: &str) -> bool {
         self.args
@@ -435,6 +452,29 @@ mod tests {
         sugar
             .read_spec(&head, SugarArgs::new(&args[1..], text))
             .expect("read_spec")
+    }
+
+    /// `keyword_symbol` reads a `#:<key> <symbol>` pair: present -> the symbol,
+    /// absent -> `None`, a non-symbol value -> a malformed error.
+    #[test]
+    fn keyword_symbol_reads_a_mode() {
+        fn with_args<T>(text: &str, f: impl FnOnce(SugarArgs<'_>) -> T) -> T {
+            let exprs = sexpr::read(text).expect("read");
+            let args = sexpr::list_args(&exprs[0]).expect("list");
+            f(SugarArgs::new(&args[1..], text))
+        }
+        with_args("(osc #:rate kr)", |args| {
+            assert_eq!(
+                args.keyword_symbol("rate").expect("ok").as_deref(),
+                Some("kr"),
+            );
+        });
+        with_args("(osc)", |args| {
+            assert_eq!(args.keyword_symbol("rate").expect("ok"), None);
+        });
+        with_args("(osc #:rate 5)", |args| {
+            assert!(args.keyword_symbol("rate").is_err(), "5 is not a symbol");
+        });
     }
 
     #[test]

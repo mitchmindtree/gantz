@@ -276,8 +276,10 @@ mod tests {
                 ],
             ),
             node_datum("SinOsc", vec![]),
+            node_datum("SinOsc", vec![("rate", Datum::Str("kr".into()))]),
             node_datum("Out", vec![]),
             node_datum("Lag", vec![]),
+            node_datum("Lag", vec![("rate", Datum::Str("kr".into()))]),
             node_datum("ScopeOut", vec![]),
             node_datum("ScopeOut", vec![("size", Datum::U64(64))]),
             // Legacy: pre-channel-group `~scopeout` data carries a `channels`

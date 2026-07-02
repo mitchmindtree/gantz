@@ -5,8 +5,8 @@
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, Out, Pack, ScopeOut, Signal, SinOsc,
-    ToNodeDsp, Unpack, derive_synthdef, structural_sig,
+    Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, NodeRate, Out, Pack, ScopeOut,
+    Signal, SinOsc, ToNodeDsp, Unpack, derive_synthdef, structural_sig,
 };
 use plyphon::synthdef::InputRef;
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, Rate, World, engine};
@@ -1039,4 +1039,107 @@ fn redefining_a_def_name_keeps_old_synth_playing() {
 /// Root-mean-square level of `samples`.
 fn rms(samples: &[f32]) -> f32 {
     (samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32).sqrt()
+}
+
+#[test]
+fn kr_sinosc_lifts_via_k2a_at_out() {
+    // A control-rate sine into `~out`: `Out.ar` reads its inputs strictly as
+    // audio (a kr wire would be silence), so the out lifts the channel with a
+    // `K2A` before its level multiply - and the rate flip changes the sig.
+    let ar = derive_synthdef(&sine_to_out(), 1, "t").expect("derive").def;
+
+    let mut g = Graph::<N>::default();
+    let mut sine = SinOsc::default();
+    sine.set_rate(NodeRate::Control);
+    let s = g.add_node(N::SinOsc(sine));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+    let kr = derive_synthdef(&g, 1, "t").expect("derive").def;
+
+    assert!(matches!(kr.units[0].rate, Rate::Control), "kr SinOsc");
+    let k2a = kr
+        .units
+        .iter()
+        .position(|u| u.name == "K2A")
+        .expect("K2A lift");
+    assert!(matches!(kr.units[k2a].rate, Rate::Audio));
+    assert!(
+        matches!(kr.units[k2a].inputs[0], InputRef::Unit { unit: 0, .. }),
+        "the K2A lifts the kr sine",
+    );
+    assert!(
+        !ar.units.iter().any(|u| u.name == "K2A"),
+        "no lift for an audio-rate sine",
+    );
+    assert_ne!(
+        structural_sig(&ar),
+        structural_sig(&kr),
+        "a rate flip must change the structural signature",
+    );
+}
+
+#[test]
+fn kr_into_scopeout_needs_no_lift() {
+    // `~scopeout` broadcasts control-rate inputs natively - no `K2A`.
+    let mut g = Graph::<N>::default();
+    let mut sine = SinOsc::default();
+    sine.set_rate(NodeRate::Control);
+    let s = g.add_node(N::SinOsc(sine));
+    let t = g.add_node(N::ScopeOut(ScopeOut::default()));
+    g.add_edge(s, t, Edge::new(0.into(), 0.into()));
+    let def = derive_synthdef(&g, 1, "t").expect("derive").def;
+    assert!(!def.units.iter().any(|u| u.name == "K2A"));
+    assert_eq!(def.units.len(), 2, "SinOsc + ScopeOut only");
+}
+
+#[test]
+fn rate_is_part_of_node_identity() {
+    use gantz_ca::content_addr;
+    // The default (audio) rate leaves existing addresses unchanged; kr changes
+    // them. Same for ~lag.
+    assert_eq!(
+        content_addr(&SinOsc::default()),
+        content_addr(&{
+            let mut s = SinOsc::default();
+            s.set_rate(NodeRate::Audio);
+            s
+        }),
+    );
+    let mut kr_sine = SinOsc::default();
+    kr_sine.set_rate(NodeRate::Control);
+    assert_ne!(content_addr(&SinOsc::default()), content_addr(&kr_sine));
+    let mut kr_lag = Lag::default();
+    kr_lag.set_rate(NodeRate::Control);
+    assert_ne!(content_addr(&Lag::default()), content_addr(&kr_lag));
+}
+
+#[test]
+fn kr_source_reaches_output() {
+    // End to end through the real engine: a kr sine lifted via K2A still lands
+    // on the output bus with its (block-held, ramped) 220 Hz content dominant.
+    let mut g = Graph::<N>::default();
+    let mut sine = SinOsc::default();
+    sine.set_rate(NodeRate::Control);
+    let s = g.add_node(N::SinOsc(sine));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+    let def = derive_synthdef(&g, 1, "t").expect("derive").def;
+
+    let (mut controller, _nrt, mut world) = engine(Options {
+        sample_rate: SR as f64,
+        output_channels: 1,
+        ..Options::default()
+    });
+    controller.add_synthdef(def);
+    controller
+        .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
+        .expect("synth_new");
+
+    let out = render(&mut world, SR as usize / 2);
+    assert!(rms(&out) > 0.02, "kr source must be audible");
+    let (m220, m440) = (goertzel(&out, 220.0), goertzel(&out, 440.0));
+    assert!(
+        m220 > 3.0 * m440,
+        "expected 220 Hz dominant: m220={m220}, m440={m440}",
+    );
 }

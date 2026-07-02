@@ -2,7 +2,54 @@
 //! [`DspBuilder`] that accumulates a synthdef, and the [`ToNodeDsp`] downcast
 //! hook used to discover DSP nodes in an erased graph.
 
+use plyphon::Rate;
 use plyphon::synthdef::{InputRef, Param, SynthDef, UnitSpec};
+use serde::{Deserialize, Serialize};
+
+/// A dsp node's ugen rate: audio (`ar`, one value per sample) or control (`kr`,
+/// one value per block - cheaper, for modulators). Structural: it sets the
+/// emitted [`UnitSpec`]'s rate, so a change respawns the synth.
+///
+/// A consumer reading a control-rate wire at audio rate holds the value for the
+/// whole block; audio *sinks* (whose units read inputs strictly as audio, like
+/// `Out`) lift control wires explicitly via [`DspBuilder::ensure_audio`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NodeRate {
+    /// Audio rate (`ar`): one value per sample.
+    #[default]
+    #[serde(rename = "ar")]
+    Audio,
+    /// Control rate (`kr`): one value per block.
+    #[serde(rename = "kr")]
+    Control,
+}
+
+impl NodeRate {
+    /// The plyphon [`Rate`] this maps to.
+    pub fn to_plyphon(self) -> Rate {
+        match self {
+            NodeRate::Audio => Rate::Audio,
+            NodeRate::Control => Rate::Control,
+        }
+    }
+
+    /// The display / sugar token: `"ar"` or `"kr"`.
+    pub fn token(self) -> &'static str {
+        match self {
+            NodeRate::Audio => "ar",
+            NodeRate::Control => "kr",
+        }
+    }
+}
+
+/// Fold a node's ugen `rate` into a content-address hasher, but only when
+/// non-default (audio) - so existing audio-rate nodes keep their addresses.
+pub fn cahash_rate(hasher: &mut gantz_ca::Hasher, rate: NodeRate) {
+    if rate != NodeRate::Audio {
+        hasher.update(b"rate");
+        hasher.update(rate.token().as_bytes());
+    }
+}
 
 /// A channel group: the mono wires a single dsp port carries.
 ///
@@ -267,6 +314,34 @@ impl DspBuilder {
     /// The number of output-bus channels a sink should fan its signal across.
     pub fn out_channels(&self) -> usize {
         self.out_channels
+    }
+
+    /// The rate of the wire behind `input`: a unit output takes its unit's rate,
+    /// a param its param rate, and a constant literal is scalar.
+    pub fn input_rate(&self, input: &InputRef) -> Rate {
+        match input {
+            InputRef::Constant(_) => Rate::Scalar,
+            InputRef::Param(i) => self.params[*i as usize].rate,
+            InputRef::Unit { unit, .. } => self.units[*unit as usize].rate,
+        }
+    }
+
+    /// Lift `ch` to an audio-rate wire: the identity for an audio wire or a
+    /// constant literal (consumers fold constants natively), else a `K2A`
+    /// (control-to-audio conversion, ramping from the previous block's value).
+    ///
+    /// Audio *sinks* need it: a unit that reads its inputs strictly as audio
+    /// (`Out`'s channels, for example) sees a control- or scalar-rate wire as
+    /// SILENCE, not a held value.
+    pub fn ensure_audio(&mut self, ch: InputRef) -> InputRef {
+        match ch {
+            InputRef::Constant(_) => ch,
+            _ if matches!(self.input_rate(&ch), Rate::Audio) => ch,
+            _ => {
+                let unit = self.push_unit(UnitSpec::new("K2A", Rate::Audio, vec![ch], 1));
+                InputRef::Unit { unit, output: 0 }
+            }
+        }
     }
 
     /// Consume the builder into a finished [`SynthDef`], its param bindings, its

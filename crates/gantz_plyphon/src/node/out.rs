@@ -143,7 +143,11 @@ impl NodeDsp for Out {
             output: 0,
         };
         // Each written channel: ch * level (BinaryOpUGen multiply, special_index 2).
+        // A control-rate channel is lifted to audio first (`Out.ar` reads its
+        // inputs strictly as audio - a kr wire would be silence, and multiplying
+        // without the K2A ramp would zipper).
         let gained = |b: &mut DspBuilder, ch: InputRef| {
+            let ch = b.ensure_audio(ch);
             let unit = b.push_unit(UnitSpec {
                 name: "BinaryOpUGen".to_string(),
                 rate: Rate::Audio,

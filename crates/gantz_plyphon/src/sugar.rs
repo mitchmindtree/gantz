@@ -2,12 +2,13 @@
 //!
 //! [`PlyphonSugar`] provides the human-friendly keywords for this crate's nodes:
 //! bare `~sinosc`/`~out`/`~lag`/`~scopeout`/`~pack`/`~unpack`, with optional
-//! `(~sinosc #:freq-lag s)`, `(~out #:gain-lag s)`, `(~scopeout #:size n)` and
-//! `(~pack #:count n)`/`(~unpack #:count n)` forms carrying the structural
-//! smoothing lag / ring length / socket count. The `freq`/`gain`/`dur` param
-//! *values* live in VM state (not the node weight), so they are not serialized
-//! and never appear here. Compose it with [`gantz_format::CoreSugar`] (and the
-//! other crates' sugars) via [`gantz_format::Sugars`].
+//! `(~sinosc #:freq-lag s [#:rate ar|kr])`, `(~lag #:rate ar|kr)`,
+//! `(~out #:gain-lag s)`, `(~scopeout #:size n)` and `(~pack #:count n)`/
+//! `(~unpack #:count n)` forms carrying the structural smoothing lag / ugen
+//! rate / ring length / socket count. The `freq`/`gain`/`dur` param *values*
+//! live in VM state (not the node weight), so they are not serialized and never
+//! appear here. Compose it with [`gantz_format::CoreSugar`] (and the other
+//! crates' sugars) via [`gantz_format::Sugars`].
 
 use gantz_format::{Datum, FormatError, Sugar, SugarArgs, node_datum};
 
@@ -48,7 +49,7 @@ impl Sugar for PlyphonSugar {
         let datum = match head {
             "~sinosc" => lag_spec("SinOsc", "freq_lag", "freq-lag", args)?,
             "~out" => lag_spec("Out", "gain_lag", "gain-lag", args)?,
-            "~lag" => node_datum("Lag", vec![]),
+            "~lag" => rate_spec("Lag", args)?,
             "~scopeout" => size_spec(args)?,
             "~pack" => count_spec("Pack", args)?,
             "~unpack" => count_spec("Unpack", args)?,
@@ -77,6 +78,7 @@ impl Sugar for PlyphonSugar {
                 crate::Out::DEFAULT_GAIN_LAG,
                 node,
             )),
+            "Lag" => Some(write_form("~lag", rate_part(node).into_iter().collect())),
             "ScopeOut" => Some(write_size(node)),
             "Pack" => Some(write_count("~pack", crate::Pack::DEFAULT_COUNT, node)),
             "Unpack" => Some(write_count("~unpack", crate::Unpack::DEFAULT_COUNT, node)),
@@ -89,8 +91,9 @@ impl Sugar for PlyphonSugar {
     }
 }
 
-/// Read a `(<head> [#:<keyword> s])` form into a node datum tagged `tag`, carrying
-/// the `field` lag only when the keyword is present (so a bare form stays bare).
+/// Read a `(<head> [#:<keyword> s] [#:rate ar|kr])` form into a node datum tagged
+/// `tag`, carrying the `field` lag / the ugen rate only when the keyword is
+/// present (so a bare form stays bare).
 fn lag_spec(
     tag: &str,
     field: &str,
@@ -101,17 +104,64 @@ fn lag_spec(
     if let Some(lag) = args.keyword_f64(keyword)? {
         fields.push((field, Datum::F64(lag)));
     }
+    push_rate(&mut fields, &args)?;
     Ok(node_datum(tag, fields))
 }
 
-/// Write a node carrying a smoothing `field` lag: the bare keyword `kw` when the lag
-/// is at `default`, else `(<kw> #:<keyword> <lag>)`. The stored value is an `f32`
-/// widened to `f64`; comparing and formatting it back as `f32` keeps the form exact
-/// and tidy (e.g. `0.01`, not `0.00999999977648258`).
+/// Read a `(<head> [#:rate ar|kr])` form into a node datum tagged `tag`.
+fn rate_spec(tag: &str, args: SugarArgs<'_>) -> Result<Datum, FormatError> {
+    let mut fields = Vec::new();
+    push_rate(&mut fields, &args)?;
+    Ok(node_datum(tag, fields))
+}
+
+/// Read an optional `#:rate ar|kr` keyword into a node datum `rate` field.
+fn push_rate<'a>(
+    fields: &mut Vec<(&'a str, Datum)>,
+    args: &SugarArgs<'_>,
+) -> Result<(), FormatError> {
+    if let Some(rate) = args.keyword_symbol("rate")? {
+        match rate.as_str() {
+            "ar" | "kr" => fields.push(("rate", Datum::Str(rate))),
+            other => {
+                return Err(FormatError::malformed(format!(
+                    "#:rate must be `ar` or `kr`, got `{other}`"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write a node carrying a smoothing `field` lag (and possibly a ugen rate): the
+/// bare keyword `kw` when everything is at its default, else
+/// `(<kw> [#:<keyword> <lag>] [#:rate kr])`. The stored lag is an `f32` widened
+/// to `f64`; comparing and formatting it back as `f32` keeps the form exact and
+/// tidy (e.g. `0.01`, not `0.00999999977648258`).
 fn write_lag(kw: &str, field: &str, keyword: &str, default: f32, node: &Datum) -> String {
-    match node.get(field).and_then(Datum::as_f64) {
-        Some(lag) if lag as f32 != default => format!("({kw} #:{keyword} {})", lag as f32),
-        _ => kw.to_string(),
+    let mut parts = Vec::new();
+    if let Some(lag) = node.get(field).and_then(Datum::as_f64) {
+        if lag as f32 != default {
+            parts.push(format!("#:{keyword} {}", lag as f32));
+        }
+    }
+    parts.extend(rate_part(node));
+    write_form(kw, parts)
+}
+
+/// A `#:rate kr` part for a node datum carrying a non-default ugen rate.
+fn rate_part(node: &Datum) -> Option<String> {
+    match node.get("rate").and_then(Datum::as_str) {
+        Some(rate) if rate != "ar" => Some(format!("#:rate {rate}")),
+        _ => None,
+    }
+}
+
+/// The bare keyword `kw` when there are no keyword `parts`, else `(<kw> <parts>)`.
+fn write_form(kw: &str, parts: Vec<String>) -> String {
+    match parts.is_empty() {
+        true => kw.to_string(),
+        false => format!("({kw} {})", parts.join(" ")),
     }
 }
 
@@ -252,6 +302,45 @@ mod tests {
         assert_eq!(
             s.write_spec("ScopeOut", &sized).as_deref(),
             Some("(~scopeout #:size 512)"),
+        );
+    }
+
+    #[test]
+    fn rate_round_trips() {
+        let s = PlyphonSugar;
+        // `~sinosc`: bare stays bare (ar is the default, and an explicit `ar`
+        // writes bare); `kr` round-trips, alone or combined with a lag.
+        let bare = read_spec("(~sinosc #:rate ar)").expect("ar");
+        assert_eq!(s.write_spec("SinOsc", &bare).as_deref(), Some("~sinosc"));
+        let kr = read_spec("(~sinosc #:rate kr)").expect("kr");
+        assert_eq!(kr.get("rate").and_then(Datum::as_str), Some("kr"));
+        assert_eq!(
+            s.write_spec("SinOsc", &kr).as_deref(),
+            Some("(~sinosc #:rate kr)"),
+        );
+        let both = read_spec("(~sinosc #:freq-lag 0.5 #:rate kr)").expect("both");
+        assert_eq!(
+            s.write_spec("SinOsc", &both).as_deref(),
+            Some("(~sinosc #:freq-lag 0.5 #:rate kr)"),
+        );
+        // `~lag` gains the same form.
+        let lag_kr = read_spec("(~lag #:rate kr)").expect("lag kr");
+        assert_eq!(
+            s.write_spec("Lag", &lag_kr).as_deref(),
+            Some("(~lag #:rate kr)"),
+        );
+        assert_eq!(
+            s.write_spec("Lag", &s.read_bare("~lag").expect("bare"))
+                .as_deref(),
+            Some("~lag"),
+        );
+        // Anything but ar/kr is malformed.
+        let exprs = sexpr::read("(~sinosc #:rate dr)").expect("read");
+        let args = sexpr::list_args(&exprs[0]).expect("list");
+        assert!(
+            PlyphonSugar
+                .read_spec("~sinosc", SugarArgs::new(&args[1..], "(~sinosc #:rate dr)"))
+                .is_err(),
         );
     }
 

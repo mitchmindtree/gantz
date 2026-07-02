@@ -19,7 +19,8 @@
 pub use backend::{Backend, BackendError, Embedded};
 pub use compile::{DeriveError, Derived, derive_synthdef, structural_sig};
 pub use dsp::{
-    DspBuilder, FADE_LAG, GainRef, NodeDsp, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp,
+    DspBuilder, FADE_LAG, GainRef, NodeDsp, NodeRate, ParamBinding, ScopeOutBinding, Signal,
+    ToNodeDsp,
 };
 pub use node::{Lag, Out, Pack, ScopeOut, SinOsc, Unpack};
 pub use sugar::PlyphonSugar;

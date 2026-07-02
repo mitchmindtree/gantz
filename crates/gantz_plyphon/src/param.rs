@@ -86,6 +86,40 @@ pub fn cahash_lag(hasher: &mut gantz_ca::Hasher, lag: f32) {
     }
 }
 
+/// One inspector row toggling a node's ugen rate (`ar`/`kr`). Returns `true` on
+/// change - structural (the emitted unit's rate changes → respawn), so the
+/// caller must `mark_changed`.
+pub fn rate_row(body: &mut egui_extras::TableBody, rate: &mut crate::dsp::NodeRate) -> bool {
+    use crate::dsp::NodeRate;
+    let row_h = gantz_egui::widget::node_inspector::table_row_h(body.ui_mut());
+    let mut changed = false;
+    body.row(row_h, |mut row| {
+        row.col(|ui| {
+            ui.label("rate");
+        });
+        row.col(|ui| {
+            ui.horizontal(|ui| {
+                changed |= gantz_egui::widget::node_inspector::radio_option(
+                    ui,
+                    rate,
+                    NodeRate::Audio,
+                    "ar",
+                    "audio rate: one value per sample",
+                );
+                changed |= gantz_egui::widget::node_inspector::radio_option(
+                    ui,
+                    rate,
+                    NodeRate::Control,
+                    "kr",
+                    "control rate: one value per block (cheaper, for modulators; \
+                     audio sinks lift it back to audio)",
+                );
+            });
+        });
+    });
+    changed
+}
+
 /// The fixed width (px) for a controllable param's value dialer, so the smoothing
 /// `lag` dialer to its right stays put (and readable) as the value's text width
 /// changes while dragging - mirrors `node_inspector::DIAL_W`, but wider to fit a

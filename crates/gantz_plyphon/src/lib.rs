@@ -17,7 +17,7 @@
 
 pub use backend::{Backend, BackendError, Embedded};
 pub use compile::{DeriveError, Derived, derive_synthdef, structural_sig};
-pub use dsp::{DspBuilder, NodeDsp, ParamBinding, ScopeOutBinding, ToNodeDsp};
+pub use dsp::{DspBuilder, NodeDsp, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp};
 pub use node::{Lag, Out, ScopeOut, SinOsc};
 pub use sugar::PlyphonSugar;
 

@@ -216,14 +216,14 @@ struct ParamSlot {
 }
 
 /// A `~scopeout`'s live scope stream: every sample of its dsp input arrives here (via
-/// plyphon `ScopeOut` → `cue_scope`) for the driver to append into the node's ring.
+/// plyphon `ScopeOut` → `cue_scope`) for the driver to append into the node's rings.
 struct ScopeSlot {
     /// The `~scopeout` node's path in the graph (where its ring state lives).
     node_path: Vec<usize>,
-    /// The ring buffer length in *frames*; the flat ring is capped at `size * channels`
-    /// interleaved samples.
+    /// Each per-channel ring's length in *frames*.
     size: usize,
-    /// The number of interleaved channels the stream carries (`cue_scope`'s width).
+    /// The number of interleaved channels the stream carries (`cue_scope`'s width) -
+    /// the tapped signal's width, inferred at derive time.
     channels: usize,
     /// The cued scope-stream index (a global recording-slot id, baked into the def's
     /// `ScopeOut` and freed on teardown).
@@ -343,8 +343,9 @@ fn drive_synths<N>(
             }
 
             // Scope sync: drain each `~scopeout`'s scope stream and append every streamed
-            // sample into its ring state (the list its control `expr` surfaces on a
-            // trigger push; `push_ring` keeps the last `size`).
+            // sample into its per-channel ring state (the list-of-rings its control
+            // `expr` surfaces on a trigger push; `push_ring` deinterleaves and keeps
+            // the last `size` frames per channel).
             for scope in &mut synth.scopes {
                 let mut samples = Vec::new();
                 while let Some(chunk) = scope.consumer.pop_filled() {
@@ -352,9 +353,13 @@ fn drive_synths<N>(
                     scope.consumer.recycle(chunk);
                 }
                 if !samples.is_empty() {
-                    // Cap the flat ring at `size` frames = `size * channels` samples.
-                    let cap = scope.size.saturating_mul(scope.channels.max(1));
-                    gantz_plyphon::monitor::push_ring(vm, &scope.node_path, &samples, cap);
+                    gantz_plyphon::monitor::push_ring(
+                        vm,
+                        &scope.node_path,
+                        &samples,
+                        scope.size,
+                        scope.channels,
+                    );
                 }
             }
         }
@@ -416,6 +421,12 @@ fn structural_sync<N>(
             for m in &derived.monitors {
                 if let Some(slot) = prev.scopes.iter_mut().find(|s| s.node_path == m.node_path) {
                     slot.size = m.size;
+                    // A width change always changes the `ScopeOut` unit's input
+                    // count and thus the sig, so it can't reach this branch.
+                    debug_assert_eq!(
+                        slot.channels, m.channels,
+                        "sig-unchanged sync must not change a scope's width",
+                    );
                 }
             }
         }

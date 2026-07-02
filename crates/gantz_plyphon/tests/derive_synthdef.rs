@@ -5,8 +5,8 @@
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    Backend, DeriveError, Embedded, Lag, NodeDsp, Out, ScopeOut, SinOsc, ToNodeDsp,
-    derive_synthdef, structural_sig,
+    Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, Out, ScopeOut, Signal, SinOsc,
+    ToNodeDsp, derive_synthdef, structural_sig,
 };
 use plyphon::synthdef::InputRef;
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, World, engine};
@@ -288,32 +288,122 @@ fn scopeout_joins_output_in_one_def() {
     );
 }
 
-#[test]
-fn scopeout_taps_multiple_channels() {
-    // A 2-channel `~scopeout` fed by two sines: its ScopeOut takes `bufnum` + one
-    // signal input per channel, and the binding records the channel count (which the
-    // driver passes to `cue_scope`).
-    let mut sc = ScopeOut::default();
-    sc.set_channels(2);
-    let mut g = Graph::<N>::default();
-    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
-    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
-    let t = g.add_node(N::ScopeOut(sc));
-    g.add_edge(s0, t, Edge::new(0.into(), 0.into())); // sine 0 -> channel 0
-    g.add_edge(s1, t, Edge::new(0.into(), 1.into())); // sine 1 -> channel 1
+/// A hand-built 2-channel signal from two mono wires.
+fn stereo(ch0: InputRef, ch1: InputRef) -> Signal {
+    Signal::concat([Signal::mono(ch0), Signal::mono(ch1)])
+}
 
-    let derived = derive_synthdef(&g, 1, "t").expect("derive");
-    let scope = derived
-        .def
+#[test]
+fn scopeout_taps_a_multichannel_signal() {
+    // A `~scopeout` fed a 2-channel signal: its one dsp input carries the whole
+    // group; the ScopeOut takes `bufnum` + one signal input per channel, and the
+    // binding records the *inferred* width (which the driver passes to `cue_scope`).
+    let mut b = DspBuilder::new(1);
+    let sig = stereo(
+        InputRef::Unit { unit: 7, output: 0 },
+        InputRef::Unit { unit: 8, output: 0 },
+    );
+    let outs = ScopeOut::default().ugens(&[2], &[sig], &mut b);
+    assert!(outs.is_empty(), "a tap sink has no dsp outputs");
+
+    let (def, _params, monitors) = b.finish("t");
+    let scope = def
         .units
         .iter()
         .find(|u| u.name == "ScopeOut")
         .expect("ScopeOut unit");
-    assert_eq!(scope.inputs.len(), 3, "bufnum + one signal per channel (2)",);
-    assert!(matches!(scope.inputs[1], InputRef::Unit { .. }));
-    assert!(matches!(scope.inputs[2], InputRef::Unit { .. }));
-    assert_eq!(derived.monitors.len(), 1);
-    assert_eq!(derived.monitors[0].channels, 2, "binding records the width");
+    assert_eq!(scope.inputs.len(), 3, "bufnum + one signal per channel (2)");
+    assert!(matches!(scope.inputs[1], InputRef::Unit { unit: 7, .. }));
+    assert!(matches!(scope.inputs[2], InputRef::Unit { unit: 8, .. }));
+    assert_eq!(monitors.len(), 1);
+    assert_eq!(
+        monitors[0].channels, 2,
+        "binding records the inferred width"
+    );
+    assert_eq!(monitors[0].node_path, vec![2]);
+}
+
+#[test]
+fn lag_smooths_each_channel() {
+    // `~lag` on a 2-channel signal: one `Lag` unit per channel, all sharing the
+    // single `dur` param (params broadcast across the group); width in = width out.
+    let mut b = DspBuilder::new(1);
+    let sig = stereo(InputRef::Constant(0.25), InputRef::Constant(0.5));
+    let outs = Lag::default().ugens(&[0], &[sig], &mut b);
+    assert_eq!(outs.len(), 1, "one dsp output port");
+    assert_eq!(outs[0].width(), 2, "width flows through");
+
+    let (def, params, _monitors) = b.finish("t");
+    let lags: Vec<_> = def.units.iter().filter(|u| u.name == "Lag").collect();
+    assert_eq!(lags.len(), 2, "one Lag per channel");
+    assert_eq!(def.params.len(), 1, "one shared dur param");
+    assert!(def.params[0].name.ends_with("/dur"));
+    assert!(
+        lags.iter()
+            .all(|u| matches!(u.inputs[1], InputRef::Param(0))),
+        "every channel's Lag reads the shared dur param",
+    );
+    assert_eq!(params.len(), 1);
+}
+
+#[test]
+fn out_writes_multichannel_channel_per_bus() {
+    // A 2-channel signal into `~out` on a 2-channel device: channel i -> bus i,
+    // each through its own gain multiply sharing the single gain param (no mono
+    // fan-out - the two written wires stay distinct).
+    let mut b = DspBuilder::new(2);
+    let sig = stereo(InputRef::Constant(0.25), InputRef::Constant(0.5));
+    let outs = Out::default().ugens(&[0], &[sig], &mut b);
+    assert!(outs.is_empty());
+
+    let (def, ..) = b.finish("t");
+    let muls: Vec<_> = def
+        .units
+        .iter()
+        .filter(|u| u.name == "BinaryOpUGen")
+        .collect();
+    assert_eq!(muls.len(), 2, "one gain multiply per written channel");
+    assert!(matches!(muls[0].inputs[0], InputRef::Constant(c) if c == 0.25));
+    assert!(matches!(muls[1].inputs[0], InputRef::Constant(c) if c == 0.5));
+    assert_eq!(def.params.len(), 1, "one shared gain param");
+    let out = def
+        .units
+        .iter()
+        .find(|u| u.name == "Out")
+        .expect("Out unit");
+    assert_eq!(out.inputs.len(), 1 + 2);
+    // The gain multiplies are units 0 and 1 in this builder: bus channel 0 reads
+    // the first, bus channel 1 the second.
+    assert!(matches!(out.inputs[1], InputRef::Unit { unit: 0, .. }));
+    assert!(matches!(out.inputs[2], InputRef::Unit { unit: 1, .. }));
+}
+
+#[test]
+fn out_drops_excess_channels() {
+    // A 3-channel signal on a 2-channel device: only 2 channels are written, and
+    // only 2 gain multiplies are emitted (dead units would pollute the
+    // structural sig and burn audio CPU).
+    let mut b = DspBuilder::new(2);
+    let sig = Signal::concat([
+        Signal::mono(InputRef::Constant(0.1)),
+        Signal::mono(InputRef::Constant(0.2)),
+        Signal::mono(InputRef::Constant(0.3)),
+    ]);
+    Out::default().ugens(&[0], &[sig], &mut b);
+
+    let (def, ..) = b.finish("t");
+    let n_muls = def
+        .units
+        .iter()
+        .filter(|u| u.name == "BinaryOpUGen")
+        .count();
+    assert_eq!(n_muls, 2, "no gain multiply for the dropped channel");
+    let out = def
+        .units
+        .iter()
+        .find(|u| u.name == "Out")
+        .expect("Out unit");
+    assert_eq!(out.inputs.len(), 1 + 2);
 }
 
 #[test]

@@ -6,11 +6,13 @@
 //! Two modes are supported:
 //! - [`PlotMode::Scope`]: accumulate a bounded, scrolling history and plot it
 //!   like an oscilloscope. Each pushed number is appended; a pushed list or vector
-//!   extends the history with its numeric elements.
+//!   extends the history with its numeric elements; a pushed list of channels (see
+//!   below) accumulates one history per channel.
 //! - [`PlotMode::Signal`]: plot the incoming value directly (a list or vector as a
-//!   series, a single number as one bar), replacing it on each evaluation. A list or
-//!   vector *of lists/vectors* (a list of channels, e.g. from `~scopeout` +
-//!   `deinterleave`) is drawn as one stacked sub-plot per channel.
+//!   series, a single number as one bar), replacing it on each evaluation.
+//!
+//! In both modes a list or vector *of lists/vectors* (a list of channels, e.g.
+//! `~scopeout`'s per-channel rings) is drawn as one stacked sub-plot per channel.
 //!
 //! Steel lists ([`SteelVal::ListV`]) and vectors ([`SteelVal::VectorV`]) are accepted
 //! interchangeably throughout; the scope history is stored as a vector.
@@ -29,9 +31,9 @@ use gantz_ca::CaHash;
 use gantz_core::node::{self, ExprCtx, ExprResult, MetaCtx, RegCtx};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
-use steel::SteelVal;
 use steel::gc::Gc;
 use steel::steel_vm::register_fn::RegisterFn;
+use steel::{SteelVal, Vector};
 
 /// An `f32` that participates in content addressing and `Hash` via its bit
 /// pattern, letting float-valued config keep [`Plot`]'s derives (the `CaHash`
@@ -144,53 +146,99 @@ impl Default for Plot {
 /// generated [`PlotMode::Scope`] expression.
 ///
 /// A numeric `val` is appended; a list *or vector* `val` extends the history with its
-/// numeric elements; anything else is ignored. `cap` is passed as an argument (not
-/// captured) so a single shared `plot-push` serves every plot node with its own,
-/// always-current capacity.
+/// numeric elements; a container *of containers* (e.g. `~scopeout`'s per-channel
+/// rings) extends one history per inner container - the state becomes a vector of
+/// per-channel vectors (the shape [`split_channels`] renders as stacked sub-plots),
+/// each capped at `cap` independently. Anything else is ignored. The history follows
+/// the incoming shape: a prior state of the other shape (flat vs per-channel) is
+/// discarded. `cap` is passed as an argument (not captured) so a single shared
+/// `plot-push` serves every plot node with its own, always-current capacity.
 ///
-/// The history is kept as a persistent vector ([`SteelVal::VectorV`], an `im_rc::Vector`)
-/// rather than a list: `push_back`/`pop_front` are O(1) amortised (vs a steel list's O(n)
+/// Histories are kept as persistent vectors ([`SteelVal::VectorV`], an `im_rc::Vector`)
+/// rather than lists: `push_back`/`pop_front` are O(1) amortised (vs a steel list's O(n)
 /// `push_back`), so a whole incoming `~scopeout` window can be appended sample-by-sample
 /// cheaply - no full rebuild, and the single-sample scope push is O(log n) instead of O(n).
 fn plot_push(state: SteelVal, val: SteelVal, cap: SteelVal) -> SteelVal {
-    fn is_num(v: &SteelVal) -> bool {
-        matches!(v, SteelVal::NumV(_) | SteelVal::IntV(_))
-    }
     let cap = match cap {
         SteelVal::IntV(n) if n > 0 => n as usize,
         _ => 0,
     };
 
-    // The scope history is a persistent vector (`im_rc::Vector`): `push_back` and
-    // `pop_front` are O(1) amortised, so appending is efficient element-by-element
-    // (no full rebuild). Start from the existing vector - a structural, O(1) clone -
-    // tolerating a prior list state (e.g. after a signal->scope switch), else empty.
-    let mut vec = match state {
-        SteelVal::VectorV(v) => (*v).clone(),
-        SteelVal::ListV(list) => list.iter().filter(|v| is_num(v)).cloned().collect(),
-        _ => Default::default(),
-    };
+    // Per-channel data: each inner container extends its own channel's history,
+    // reusing the prior history where the state is already per-channel.
+    if let Some(chans) = per_channel_elems(&val) {
+        let old: Vec<SteelVal> = match &state {
+            SteelVal::VectorV(v) if v.iter().any(is_container) => v.iter().cloned().collect(),
+            SteelVal::ListV(l) if l.iter().any(is_container) => l.iter().cloned().collect(),
+            _ => Vec::new(),
+        };
+        let channels: Vector<SteelVal> = chans
+            .iter()
+            .enumerate()
+            .map(|(c, ch)| {
+                let history = push_capped(history_of(old.get(c)), ch, cap);
+                SteelVal::VectorV(Gc::new(history).into())
+            })
+            .collect();
+        return SteelVal::VectorV(Gc::new(channels).into());
+    }
 
-    // Append the incoming value's numeric samples: a list or vector contributes its
-    // numeric elements; a lone number contributes itself; anything else nothing.
+    // Flat numeric scope: append to the one shared history.
+    let history = push_capped(history_of(Some(&state)), &val, cap);
+    SteelVal::VectorV(Gc::new(history).into())
+}
+
+/// Whether `v` is a numeric [`SteelVal`].
+fn is_num(v: &SteelVal) -> bool {
+    matches!(v, SteelVal::NumV(_) | SteelVal::IntV(_))
+}
+
+/// The top-level elements of a container-of-containers `val` (per-channel data,
+/// e.g. `~scopeout`'s rings); `None` for a flat container, a number, or anything
+/// else.
+fn per_channel_elems(val: &SteelVal) -> Option<Vec<SteelVal>> {
+    let elems: Vec<SteelVal> = match val {
+        SteelVal::ListV(list) => list.iter().cloned().collect(),
+        SteelVal::VectorV(vec) => vec.iter().cloned().collect(),
+        _ => return None,
+    };
+    elems.iter().any(is_container).then_some(elems)
+}
+
+/// One channel's existing scope history: the prior vector (a structural, O(1)
+/// clone) or a prior *flat numeric* list's numbers (e.g. after a signal->scope
+/// switch); a per-channel vector (containers inside) or absent value is empty -
+/// the history follows the incoming shape.
+fn history_of(state: Option<&SteelVal>) -> Vector<SteelVal> {
+    match state {
+        Some(SteelVal::VectorV(v)) if !v.iter().any(is_container) => (**v).clone(),
+        Some(SteelVal::ListV(list)) => list.iter().filter(|v| is_num(v)).cloned().collect(),
+        _ => Vector::new(),
+    }
+}
+
+/// Append the incoming value's numeric samples to `history` and cap it: a list or
+/// vector contributes its numeric elements; a lone number contributes itself;
+/// anything else nothing.
+fn push_capped(mut history: Vector<SteelVal>, val: &SteelVal, cap: usize) -> Vector<SteelVal> {
     match val {
         SteelVal::ListV(items) => {
             for v in items.iter().filter(|v| is_num(v)) {
-                vec.push_back(v.clone());
+                history.push_back(v.clone());
             }
         }
         SteelVal::VectorV(items) => {
             for v in items.iter().filter(|v| is_num(v)) {
-                vec.push_back(v.clone());
+                history.push_back(v.clone());
             }
         }
-        num @ (SteelVal::NumV(_) | SteelVal::IntV(_)) => vec.push_back(num),
+        num @ (SteelVal::NumV(_) | SteelVal::IntV(_)) => history.push_back(num.clone()),
         _ => {}
     }
-    while vec.len() > cap {
-        vec.pop_front();
+    while history.len() > cap {
+        history.pop_front();
     }
-    SteelVal::VectorV(Gc::new(vec).into())
+    history
 }
 
 /// Read the node's stored series as per-channel `f64`s (see [`split_channels`]): a
@@ -204,9 +252,9 @@ fn series(ctx: &NodeCtx) -> Vec<Vec<f64>> {
 }
 
 /// Split a stored plot value into per-channel series. A list or vector *of lists/vectors*
-/// is one series per inner container (`~scopeout` + `deinterleave` produces this); a flat
-/// numeric list or vector - or a lone number - is a single channel. Lists and vectors are
-/// treated identically ([`SteelVal::ListV`] and [`SteelVal::VectorV`]).
+/// is one series per inner container (`~scopeout`'s per-channel rings produce this); a
+/// flat numeric list or vector - or a lone number - is a single channel. Lists and
+/// vectors are treated identically ([`SteelVal::ListV`] and [`SteelVal::VectorV`]).
 fn split_channels(val: &SteelVal) -> Vec<Vec<f64>> {
     // The top-level elements of a list or vector; `None` if `val` is not a container.
     let elems: Option<Vec<&SteelVal>> = match val {
@@ -900,6 +948,47 @@ mod tests {
         // A second identical window still yields just its last 3 (history dropped).
         fire(&mut vm, &g, s, 1);
         assert_eq!(samples_of(&vm, p), vec![3.0, 4.0, 5.0]);
+    }
+
+    // A pushed list *of channels* (e.g. `~scopeout`'s per-channel rings) accumulates
+    // one capped history per channel - the stacked-sub-plot state shape.
+    #[test]
+    fn scope_accumulates_per_channel_histories() {
+        let src = gantz_core::node::expr("(list (list 1 2) (list -1 -2))")
+            .unwrap()
+            .with_push_eval();
+        let plot = Plot {
+            mode: PlotMode::Scope,
+            capacity: 3,
+            ..Default::default()
+        };
+        let (g, s, p) = graph_with(Box::new(src) as Box<dyn Node>, plot);
+        let mut vm = vm_for(&g);
+        // Two windows of 2 samples with capacity 3: each channel keeps its last 3.
+        fire(&mut vm, &g, s, 2);
+        let state = node::state::extract_value(&vm, &[p]).unwrap().unwrap();
+        assert_eq!(
+            split_channels(&state),
+            vec![vec![2.0, 1.0, 2.0], vec![-2.0, -1.0, -2.0]],
+        );
+    }
+
+    // The history follows the incoming shape: a flat history is discarded when
+    // per-channel data arrives (and vice versa), rather than mixing shapes.
+    #[test]
+    fn scope_shape_switch_discards_prior_history() {
+        let num = |n: f64| SteelVal::NumV(n);
+        let list = |vals: Vec<SteelVal>| SteelVal::ListV(vals.into_iter().collect());
+        let cap = SteelVal::IntV(8);
+
+        // Flat history + per-channel value: the flat samples are discarded.
+        let flat = plot_push(SteelVal::Void, num(1.0), cap.clone());
+        let chans = plot_push(flat, list(vec![list(vec![num(2.0)])]), cap.clone());
+        assert_eq!(split_channels(&chans), vec![vec![2.0]]);
+
+        // Per-channel history + flat value: the channel histories are discarded.
+        let flat_again = plot_push(chans, num(3.0), cap);
+        assert_eq!(split_channels(&flat_again), vec![vec![3.0]]);
     }
 
     // When a pushed list overflows the *remaining* capacity, the oldest history is

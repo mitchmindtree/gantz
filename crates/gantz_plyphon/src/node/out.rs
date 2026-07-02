@@ -12,14 +12,16 @@ use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
 use crate::param::{
     cahash_lag, control_input_expr, param_name, param_row, param_state, param_state_row,
     param_value, plyphon_param, with_value,
 };
 
-/// The audio output sink. Applies a master `gain` to its input and writes it to
-/// output bus 0, fanned across every output channel. The compiler roots a
+/// The audio output sink. Applies a master `gain` to its input signal and writes
+/// it to the output buses. A mono input is fanned across every device channel; a
+/// wider input writes channel `i` to bus `i` (excess channels are dropped, a
+/// deficit leaves the upper device channels silent). The compiler roots a
 /// synthdef at this node.
 ///
 /// The `gain` *value* lives in the node's VM state (like `number`); only the
@@ -116,30 +118,42 @@ impl NodeDsp for Out {
         true
     }
 
-    fn ugens(&self, path: &[usize], inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
-        let sig = inputs.first().copied().unwrap_or(InputRef::Constant(0.0));
-        // Apply master gain: sig * gain (BinaryOpUGen multiply, special_index 2).
-        // `gain` is a settable (smoothed) control param; the driver applies its
-        // live state value via `set_control`.
+    fn ugens(&self, path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
+        let sig = inputs.first().cloned().unwrap_or_else(|| Signal::silent(1));
+        let out_channels = b.out_channels();
+        // Apply master gain: ch * gain (BinaryOpUGen multiply, special_index 2).
+        // `gain` is a single settable (smoothed) control param shared by every
+        // written channel's multiply; the driver applies its live state value
+        // via `set_control`.
         let gain = b.push_param(
             path,
             plyphon_param(param_name(path, "gain"), Self::DEFAULT_GAIN, self.gain_lag),
         );
-        let gained = b.push_unit(UnitSpec {
-            name: "BinaryOpUGen".to_string(),
-            rate: Rate::Audio,
-            inputs: vec![sig, InputRef::Param(gain)],
-            num_outputs: 1,
-            special_index: 2,
-        });
-        let gained = InputRef::Unit {
-            unit: gained,
-            output: 0,
+        let gained = |b: &mut DspBuilder, ch: InputRef| {
+            let unit = b.push_unit(UnitSpec {
+                name: "BinaryOpUGen".to_string(),
+                rate: Rate::Audio,
+                inputs: vec![ch, InputRef::Param(gain)],
+                num_outputs: 1,
+                special_index: 2,
+            });
+            InputRef::Unit { unit, output: 0 }
         };
-        // `Out.ar(0, [sig; channels])`: bus index followed by one signal input
-        // per output channel, fanning the mono signal across them.
+        // `Out.ar(0, sigs)`: bus index followed by one signal input per device
+        // channel written. A mono input fans across every device channel; a wider
+        // input writes channel `i` to bus `i` for the first `min(width,
+        // out_channels)` channels - excess input channels are *dropped* (not
+        // summed or wrapped), a deficit leaves the upper device channels silent,
+        // and only written channels get a gain multiply (dead units would pollute
+        // the structural sig). Richer wrap/sum/pan mixing is a later refinement.
         let mut out_inputs = vec![InputRef::Constant(0.0)];
-        out_inputs.extend(std::iter::repeat_n(gained, b.out_channels()));
+        if sig.width() == 1 {
+            let ch = gained(b, sig.channel(0).expect("a signal is never empty"));
+            out_inputs.extend(std::iter::repeat_n(ch, out_channels));
+        } else {
+            let channels: Vec<InputRef> = sig.channels().take(out_channels).collect();
+            out_inputs.extend(channels.into_iter().map(|ch| gained(b, ch)));
+        }
         b.push_unit(UnitSpec::new("Out", Rate::Audio, out_inputs, 0));
         vec![]
     }
@@ -204,9 +218,10 @@ impl NodeUi for Out {
 
     fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, ix: usize) -> Option<SocketDoc> {
         match (kind, ix) {
-            (SocketKind::Input, 0) => {
-                Some(SocketDoc::ty("signal").with_description("signal to send to the audio output"))
-            }
+            (SocketKind::Input, 0) => Some(SocketDoc::ty("signal").with_description(
+                "signal to send to the audio output; mono fans across every \
+                device channel, wider signals write channel i to bus i",
+            )),
             (SocketKind::Input, 1) => Some(SocketDoc::ty("number").with_description(
                 "master gain control; overrides the inspector value while connected",
             )),

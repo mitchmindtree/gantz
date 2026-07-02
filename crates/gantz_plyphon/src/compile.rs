@@ -13,7 +13,7 @@ use gantz_core::compile::pull_eval_order;
 use gantz_core::node::Conns;
 use gantz_core::node::graph::{Graph, NodeIx};
 
-use crate::dsp::{DspBuilder, ParamBinding, ScopeOutBinding, ToNodeDsp};
+use crate::dsp::{DspBuilder, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp};
 
 /// An error deriving a synthdef from a graph.
 #[derive(Debug)]
@@ -38,6 +38,11 @@ pub struct Derived {
 
 /// Derive a [`SynthDef`] named `name` from a graph's DSP subgraph, fanning the
 /// output across `out_channels` channels.
+///
+/// A dsp port carries a whole channel group ([`Signal`]): an edge delivers its
+/// source port's full group to the destination input, so channel width flows
+/// *forward* through the derivation - nodes see their input widths and size
+/// their output groups accordingly (no `gantz_core` graph or edge involvement).
 ///
 /// A graph's dsp *sinks* are its `~out` outputs ([`is_output`](crate::NodeDsp::is_output))
 /// and its `~scopeout` monitors ([`is_monitor`](crate::NodeDsp::is_monitor)); a graph
@@ -118,16 +123,16 @@ where
     }
 
     let mut builder = DspBuilder::new(out_channels);
-    // Each processed node's output sources, for its consumers to reference.
-    let mut outputs: HashMap<NodeIx, Vec<InputRef>> = HashMap::new();
+    // Each processed node's per-port output signals, for its consumers to
+    // reference. A whole channel group flows across an edge.
+    let mut outputs: HashMap<NodeIx, Vec<Signal>> = HashMap::new();
 
     for n in order {
         let Some(dsp) = graph[n].to_node_dsp() else {
             continue;
         };
         let n_in = dsp.n_dsp_inputs();
-        // Unconnected inputs default to silence.
-        let mut inputs = vec![InputRef::Constant(0.0); n_in];
+        let mut inputs: Vec<Option<Signal>> = vec![None; n_in];
         for e in graph.edges_directed(n, Direction::Incoming) {
             let input_ix = e.weight().input.0 as usize;
             let output_ix = e.weight().output.0 as usize;
@@ -135,12 +140,26 @@ where
                 continue;
             }
             // Phase 1: only DSP sources contribute, and the first edge to an
-            // input wins (no summing of multiple sources yet).
-            if let Some(src) = outputs.get(&e.source()).and_then(|o| o.get(output_ix)) {
-                inputs[input_ix] = *src;
+            // input wins (no summing of multiple sources yet). Only a `None`
+            // slot is filled - `edges_directed` iterates newest-edge-first, so
+            // overwriting would quietly hand the port to the *latest* edge.
+            if inputs[input_ix].is_none() {
+                if let Some(src) = outputs.get(&e.source()).and_then(|o| o.get(output_ix)) {
+                    inputs[input_ix] = Some(src.clone());
+                }
             }
         }
+        // Unconnected inputs default to mono silence.
+        let inputs: Vec<Signal> = inputs
+            .into_iter()
+            .map(|i| i.unwrap_or_else(|| Signal::silent(1)))
+            .collect();
         let outs = dsp.ugens(&[n.index()], &inputs, &mut builder);
+        debug_assert_eq!(
+            outs.len(),
+            dsp.n_dsp_outputs(),
+            "a node must return one Signal per dsp output port",
+        );
         outputs.insert(n, outs);
     }
 

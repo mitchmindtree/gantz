@@ -12,7 +12,7 @@ use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
 use crate::param::{
     cahash_lag, control_input_expr, param_name, param_row, param_state, param_state_row,
     param_value, plyphon_param, with_value,
@@ -105,7 +105,7 @@ impl NodeDsp for SinOsc {
         1
     }
 
-    fn ugens(&self, path: &[usize], _inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
+    fn ugens(&self, path: &[usize], _inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
         // `freq` is a settable control param (a nominal default here; the driver
         // applies the live state value via `set_control`).
         let freq = b.push_param(
@@ -118,7 +118,7 @@ impl NodeDsp for SinOsc {
             vec![InputRef::Param(freq), InputRef::Constant(0.0)],
             1,
         ));
-        vec![InputRef::Unit { unit, output: 0 }]
+        vec![Signal::mono(InputRef::Unit { unit, output: 0 })]
     }
 }
 

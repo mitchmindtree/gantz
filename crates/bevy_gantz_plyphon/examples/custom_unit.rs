@@ -27,7 +27,7 @@ use gantz_core::Node as GantzNode;
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, RegCtx, parse_expr};
-use gantz_plyphon::{DspBuilder, NodeDsp, ToNodeDsp};
+use gantz_plyphon::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
 use plyphon::synthdef::{InputRef, UnitSpec};
 use plyphon::{
     BuildContext, BuildError, BuiltUnit, DoneAction, ProcessCtx, Rate, Unit, UnitDef, unit_spec,
@@ -108,7 +108,7 @@ impl NodeDsp for SawNode {
         1
     }
 
-    fn ugens(&self, _path: &[usize], _inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
+    fn ugens(&self, _path: &[usize], _inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
         // Name our custom unit; freq is a baked constant (see ~sinosc for a param).
         let unit = b.push_unit(UnitSpec::new(
             "Saw",
@@ -116,7 +116,7 @@ impl NodeDsp for SawNode {
             vec![InputRef::Constant(self.freq)],
             1,
         ));
-        vec![InputRef::Unit { unit, output: 0 }]
+        vec![Signal::mono(InputRef::Unit { unit, output: 0 })]
     }
 }
 

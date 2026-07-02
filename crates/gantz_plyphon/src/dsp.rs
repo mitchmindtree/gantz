@@ -1,7 +1,64 @@
-//! The [`NodeDsp`] trait, the [`DspBuilder`] that accumulates a synthdef, and
-//! the [`ToNodeDsp`] downcast hook used to discover DSP nodes in an erased graph.
+//! The [`NodeDsp`] trait, the [`Signal`] channel group a dsp port carries, the
+//! [`DspBuilder`] that accumulates a synthdef, and the [`ToNodeDsp`] downcast
+//! hook used to discover DSP nodes in an erased graph.
 
 use plyphon::synthdef::{InputRef, Param, SynthDef, UnitSpec};
+
+/// A channel group: the mono wires a single dsp port carries.
+///
+/// A gantz signal edge is a channel-*group* wire (like SC's array signals, Max's
+/// MC cords or VCV's poly cables): one edge carries [`width`](Self::width)
+/// channels, lowered by the synthdef compiler to plyphon's strictly mono-wire
+/// unit inputs (one [`InputRef`] per channel). A `Signal` is never empty -
+/// silence is one channel of constant `0.0`, not a zero-channel group (plyphon
+/// units reject empty input lists at synth-build time).
+#[derive(Clone, Debug)]
+pub struct Signal(Vec<InputRef>);
+
+impl Signal {
+    /// A single-channel signal from one wire.
+    pub fn mono(input: InputRef) -> Self {
+        Signal(vec![input])
+    }
+
+    /// `n` channels of silence (constant `0.0`); `n` is clamped to at least 1.
+    pub fn silent(n: usize) -> Self {
+        Signal(vec![InputRef::Constant(0.0); n.max(1)])
+    }
+
+    /// The number of channels this signal carries (always at least 1).
+    pub fn width(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Channel `i`'s wire, or `None` past [`width`](Self::width).
+    pub fn channel(&self, i: usize) -> Option<InputRef> {
+        self.0.get(i).copied()
+    }
+
+    /// Iterate over the per-channel wires.
+    pub fn channels(&self) -> impl Iterator<Item = InputRef> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// Concatenate channel groups into one wide group (width = the sum of the
+    /// input widths); an empty iterator concatenates to mono silence.
+    pub fn concat(signals: impl IntoIterator<Item = Signal>) -> Self {
+        signals.into_iter().flat_map(|s| s.0).collect()
+    }
+}
+
+impl FromIterator<InputRef> for Signal {
+    /// Collect per-channel wires into a group; an empty iterator collects to
+    /// mono silence (a `Signal` is never empty).
+    fn from_iter<I: IntoIterator<Item = InputRef>>(iter: I) -> Self {
+        let channels: Vec<InputRef> = iter.into_iter().collect();
+        match channels.is_empty() {
+            true => Signal::silent(1),
+            false => Signal(channels),
+        }
+    }
+}
 
 /// A gantz node that contributes one or more plyphon UGens to a synthdef.
 ///
@@ -11,17 +68,20 @@ use plyphon::synthdef::{InputRef, Param, SynthDef, UnitSpec};
 /// trait (and being discoverable via [`ToNodeDsp`]); the same gantz graph is
 /// compiled by both backends independently.
 pub trait NodeDsp {
-    /// The number of DSP (signal) inputs - the leading inputs that carry audio,
-    /// wired into the synthdef. A node's [`gantz_core::Node::n_inputs`] may exceed
-    /// this: any inputs at indices `>= n_dsp_inputs` are *control* inputs, a purely
-    /// Steel/state concern (a connected control value is written into the node's
-    /// param state by its `expr`), and are ignored by the synthdef compiler.
+    /// The number of DSP (signal) input *ports* - the leading inputs that carry
+    /// signals, wired into the synthdef. A node's [`gantz_core::Node::n_inputs`]
+    /// may exceed this: any inputs at indices `>= n_dsp_inputs` are *control*
+    /// inputs, a purely Steel/state concern (a connected control value is written
+    /// into the node's param state by its `expr`), and are ignored by the
+    /// synthdef compiler.
     fn n_dsp_inputs(&self) -> usize {
         0
     }
 
-    /// The number of DSP (signal) outputs. Matches
-    /// [`gantz_core::Node::n_outputs`].
+    /// The number of DSP (signal) output *ports*. Each port carries a whole
+    /// channel group ([`Signal`]) - this counts ports, not channels. May differ
+    /// from [`gantz_core::Node::n_outputs`] (e.g. `~scopeout` has two Steel
+    /// outputs but no dsp outputs).
     fn n_dsp_outputs(&self) -> usize {
         1
     }
@@ -41,16 +101,18 @@ pub trait NodeDsp {
         false
     }
 
-    /// Emit this node's UGens into `b`, given the resolved source for each DSP
-    /// input, returning one [`InputRef`] per DSP output (so downstream nodes can
-    /// reference them).
+    /// Emit this node's UGens into `b`, given the resolved [`Signal`] for each
+    /// DSP input port, returning one [`Signal`] per DSP output port (so
+    /// downstream nodes can reference them).
     ///
     /// `path` is the node's path within the graph (e.g. `[2]` for the node at
-    /// index 2 of a flat graph); use it to name any control [`Param`](plyphon::Param)s
+    /// index 2 of a flat graph); use it to name any control [`Param`]s
     /// uniquely within the synthdef (see [`param_name`](crate::param::param_name)).
     /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs); an unconnected
-    /// input is [`InputRef::Constant`]`(0.0)` (silence).
-    fn ugens(&self, path: &[usize], inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef>;
+    /// input is [`Signal::silent`]`(1)` (mono silence). Params should broadcast
+    /// across an input's channels (e.g. `~lag` emits one `Lag` unit per channel,
+    /// all sharing the one `dur` param).
+    fn ugens(&self, path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal>;
 }
 
 /// A downcast hook so the synthdef compiler and the audio driver can find
@@ -85,10 +147,10 @@ pub struct ParamBinding {
 pub struct ScopeOutBinding {
     /// The monitor node's path within the graph (where its ring state lives).
     pub node_path: Vec<usize>,
-    /// The ring buffer length (frames) the driver caps the node's state at (the flat
-    /// ring holds `size * channels` interleaved samples).
+    /// The ring buffer length (frames) the driver caps each per-channel ring at.
     pub size: usize,
-    /// The number of interleaved channels the `ScopeOut` streams (`cue_scope`'s width).
+    /// The number of channels the `ScopeOut` streams (`cue_scope`'s width) -
+    /// the width of the monitored input [`Signal`], inferred at derive time.
     pub channels: usize,
     /// The index within the def's `units` of this monitor's `ScopeOut`, so the driver
     /// can patch its `bufnum` (input 0) to the cued scope-stream index.

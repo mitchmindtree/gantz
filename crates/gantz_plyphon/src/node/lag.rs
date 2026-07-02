@@ -10,13 +10,13 @@ use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
 use crate::param::{
     param_name, param_state, param_state_row, param_value, plyphon_param, value_row, with_value,
 };
 
-/// A one-pole lag (smoother). Emits a `Lag.ar(in, lagTime)` UGen that smooths its
-/// input signal over the `lag` duration.
+/// A one-pole lag (smoother). Emits a `Lag.ar(in, lagTime)` UGen per input
+/// channel, smoothing the whole signal group over the shared `lag` duration.
 ///
 /// The `lag` duration (seconds) lives in the node's VM state (like `~sinosc`'s
 /// freq), edited via the inspector and applied to the running synth via
@@ -75,21 +75,29 @@ impl NodeDsp for Lag {
         1
     }
 
-    fn ugens(&self, path: &[usize], inputs: &[InputRef], b: &mut DspBuilder) -> Vec<InputRef> {
-        let signal = inputs.first().copied().unwrap_or(InputRef::Constant(0.0));
+    fn ugens(&self, path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
+        let signal = inputs.first().cloned().unwrap_or_else(|| Signal::silent(1));
         // The lag time is a settable control param (nominal default here; the
-        // driver applies the live state value via `set_control`).
+        // driver applies the live state value via `set_control`), shared by every
+        // channel's `Lag` unit (params broadcast across the group).
         let dur = b.push_param(
             path,
             plyphon_param(param_name(path, "dur"), Self::DEFAULT_DUR, 0.0),
         );
-        let unit = b.push_unit(UnitSpec::new(
-            "Lag",
-            Rate::Audio,
-            vec![signal, InputRef::Param(dur)],
-            1,
-        ));
-        vec![InputRef::Unit { unit, output: 0 }]
+        // One `Lag` per channel: width N in -> width N out.
+        let smoothed = signal
+            .channels()
+            .map(|ch| {
+                let unit = b.push_unit(UnitSpec::new(
+                    "Lag",
+                    Rate::Audio,
+                    vec![ch, InputRef::Param(dur)],
+                    1,
+                ));
+                InputRef::Unit { unit, output: 0 }
+            })
+            .collect();
+        vec![smoothed]
     }
 }
 

@@ -161,21 +161,6 @@ mod tests {
     }
 
     /// Read an `inspect` node's stored value as a list of `f64`s.
-    fn inspect_list(vm: &gantz_core::steel::steel_vm::engine::Engine, node_ix: usize) -> Vec<f64> {
-        use gantz_core::steel::SteelVal;
-        match gantz_core::node::state::extract_value(vm, &[node_ix]) {
-            Ok(Some(SteelVal::ListV(list))) => list
-                .iter()
-                .filter_map(|v| match v {
-                    SteelVal::NumV(f) => Some(*f),
-                    SteelVal::IntV(i) => Some(*i as f64),
-                    _ => None,
-                })
-                .collect(),
-            other => panic!("expected a list at [{node_ix}], got {other:?}"),
-        }
-    }
-
     /// Gate test for the `.gantz` text format: confirm `Box<dyn Node>`
     /// round-trips through the self-describing `gantz_format::Datum` codec.
     /// The format bridges node specs to/from the node set's serde dispatch
@@ -285,6 +270,13 @@ mod tests {
             node_datum("Lag", vec![]),
             node_datum("ScopeOut", vec![]),
             node_datum("ScopeOut", vec![("size", Datum::U64(64))]),
+            // Legacy: pre-channel-group `~scopeout` data carries a `channels`
+            // field; serde ignores the unknown field so old registries still load
+            // (the count is inferred from the input signal's width now).
+            node_datum(
+                "ScopeOut",
+                vec![("channels", Datum::U64(3)), ("size", Datum::U64(64))],
+            ),
         ];
         for value in cases {
             let node: Box<dyn Node> = from_datum(value.clone())
@@ -501,21 +493,22 @@ mod tests {
         );
     }
 
-    /// `~scopeout`'s control side: firing its trigger input outputs the ring-buffer
-    /// state (which the audio driver fills) as a list on output 0, and the channel
-    /// count on output 1. Here the ring is seeded directly (standing in for the
-    /// driver's `push_ring`), a `number` pushes the trigger, and the outputs land
-    /// downstream in `inspect` nodes. Guards the dsp->control read-out path + the
-    /// two-output `branches` contract on the Steel side.
+    /// `~scopeout`'s control side: firing its trigger input outputs the per-channel
+    /// ring-buffer state (which the audio driver fills) as a list of rings on
+    /// output 0, and the channel count - the number of rings - on output 1. Here
+    /// the rings are seeded directly (standing in for the driver's `push_ring`), a
+    /// `number` pushes the trigger, and the outputs land downstream in `inspect`
+    /// nodes. Guards the dsp->control read-out path + the two-output `branches`
+    /// contract on the Steel side.
     #[test]
-    fn scopeout_trigger_outputs_ring_and_channels() {
+    fn scopeout_trigger_outputs_rings_and_channels() {
         use gantz_core::compile::push_pull_entrypoints;
         use gantz_core::edge::Edge;
         use gantz_core::node::graph::Graph;
         use gantz_core::steel::SteelVal;
         type G = Graph<Box<dyn Node>>;
 
-        // number -> ~scopeout.trigger (input 1, after the 1 dsp input); output 0 ->
+        // number -> ~scopeout.trigger (input 1, after the dsp input); output 0 ->
         // inspect_samples, output 1 -> inspect_channels.
         let mut g: G = Graph::default();
         let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
@@ -532,36 +525,47 @@ mod tests {
         let (mut vm, _compiled) = gantz_core::vm::init(&get_node, &g, &eps, &config)
             .expect("compile number -> ~scopeout");
 
-        // Seed the tap's ring with known samples (as the audio driver would).
-        let ring: SteelVal = SteelVal::ListV(
-            vec![
-                SteelVal::NumV(1.0),
-                SteelVal::NumV(2.0),
-                SteelVal::NumV(3.0),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        gantz_core::node::state::update_value(&mut vm, &[tap.index()], ring).expect("seed ring");
+        let ring = |vals: &[f64]| -> SteelVal {
+            SteelVal::ListV(vals.iter().map(|&v| SteelVal::NumV(v)).collect())
+        };
+        let channel_count = |vm: &gantz_core::steel::steel_vm::engine::Engine| -> f64 {
+            let ch = gantz_core::node::state::extract_value(vm, &[chans.index()])
+                .expect("extract channel inspect")
+                .expect("channel inspect present");
+            match ch {
+                SteelVal::IntV(i) => i as f64,
+                SteelVal::NumV(f) => f,
+                other => panic!("output 1 must be a number, got {other:?}"),
+            }
+        };
 
-        // Fire the number's push entrypoint: it triggers the tap, which fires both
-        // outputs (branch 0) into the inspect nodes.
+        // Seed the tap with one ring of known samples (as the audio driver would),
+        // then fire the number's push entrypoint: it triggers the tap, which fires
+        // both outputs (branch 0) into the inspect nodes.
+        let rings = SteelVal::ListV(vec![ring(&[1.0, 2.0, 3.0])].into_iter().collect());
+        gantz_core::node::state::update_value(&mut vm, &[tap.index()], rings.clone())
+            .expect("seed rings");
         fire_push(&mut vm, &eps, num.index());
 
-        // Output 0: the ring list, unchanged.
-        let got = inspect_list(&vm, samples.index());
-        assert_eq!(got, vec![1.0, 2.0, 3.0], "output 0 must be the ring buffer");
+        // Output 0: the list of rings, unchanged.
+        let got = gantz_core::node::state::extract_value(&vm, &[samples.index()])
+            .expect("extract samples inspect")
+            .expect("samples inspect present");
+        assert_eq!(got, rings, "output 0 must be the per-channel rings");
 
-        // Output 1: the channel count (1 by default).
-        let ch = gantz_core::node::state::extract_value(&vm, &[chans.index()])
-            .expect("extract channel inspect")
-            .expect("channel inspect present");
-        let ch = match ch {
-            SteelVal::IntV(i) => i as f64,
-            SteelVal::NumV(f) => f,
-            other => panic!("output 1 must be a number, got {other:?}"),
-        };
-        assert_eq!(ch, 1.0, "output 1 must be the channel count");
+        // Output 1: the channel count is the number of rings.
+        assert_eq!(channel_count(&vm), 1.0, "one ring -> channel count 1");
+
+        // A second, wider write (a stereo tap after a rewire): the count follows.
+        let rings = SteelVal::ListV(
+            vec![ring(&[1.0, 2.0]), ring(&[-1.0, -2.0])]
+                .into_iter()
+                .collect(),
+        );
+        gantz_core::node::state::update_value(&mut vm, &[tap.index()], rings)
+            .expect("seed stereo rings");
+        fire_push(&mut vm, &eps, num.index());
+        assert_eq!(channel_count(&vm), 2.0, "two rings -> channel count 2");
     }
 
     /// A push arriving through `~scopeout`'s *dsp* input (not the control trigger)
@@ -594,7 +598,8 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        gantz_core::node::state::update_value(&mut vm, &[tap.index()], ring).expect("seed ring");
+        let rings: SteelVal = SteelVal::ListV(vec![ring].into_iter().collect());
+        gantz_core::node::state::update_value(&mut vm, &[tap.index()], rings).expect("seed rings");
 
         fire_push(&mut vm, &eps, num.index());
 

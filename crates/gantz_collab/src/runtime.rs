@@ -12,6 +12,16 @@
 //! [`SessionStore`](crate::SessionStore) to peers. All convergence decisions
 //! (what to announce, what to fetch, how to merge) live with the
 //! application.
+//!
+//! # Infrastructure
+//!
+//! The endpoint binds with iroh's `N0` preset: n0's public relay and
+//! discovery infrastructure assists connections. Native peers usually
+//! upgrade to direct (hole-punched) paths; browser peers are relay-only by
+//! design. n0's public relays are free but rate-limited with no SLA -
+//! suitable for development and jamming, while heavy production use should
+//! move to dedicated relays (self-hosted `iroh-relay` is open source, or
+//! n0's managed offering); a relay-configuration knob is a follow-up.
 
 use crate::{
     identity::Identity,

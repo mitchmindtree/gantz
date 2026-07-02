@@ -36,6 +36,16 @@ pub fn plugin() -> WindowPlugin {
             // notice tearing or simialr issues, open an issue so we can try and
             // select the right `PresentMode` for each system!
             present_mode: bevy::window::PresentMode::AutoNoVsync,
+            // On web, let the browser's default keydown handling proceed:
+            // winit otherwise calls `preventDefault()` on *every* keydown,
+            // which cancels the browser's paste event - the only source of
+            // paste input on wasm (bevy_egui's Ctrl+V clipboard fallback is
+            // compiled out there). eframe ships the same policy. The
+            // side-effects we care about (the native context menu, file
+            // shortcuts) are guarded by small JS listeners in
+            // `web/index.html`.
+            #[cfg(target_arch = "wasm32")]
+            prevent_default_event_handling: false,
             ..default()
         }),
         ..default()

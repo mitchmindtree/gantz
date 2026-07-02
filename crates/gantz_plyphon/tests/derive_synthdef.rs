@@ -9,7 +9,7 @@ use gantz_plyphon::{
     ToNodeDsp, Unpack, derive_synthdef, structural_sig,
 };
 use plyphon::synthdef::InputRef;
-use plyphon::{AddAction, Options, ROOT_GROUP_ID, World, engine};
+use plyphon::{AddAction, Options, ROOT_GROUP_ID, Rate, World, engine};
 
 const SR: f32 = 48_000.0;
 
@@ -54,12 +54,12 @@ fn derives_expected_units() {
     let derived = derive_synthdef(&g, 1, "test").expect("derive");
     let def = &derived.def;
 
-    assert_eq!(def.units.len(), 3, "SinOsc + gain-mul + Out");
+    assert_eq!(def.units.len(), 4, "SinOsc + level-mul + channel-mul + Out");
 
-    // Two settable control params - the sine's freq (param 0) and the out's gain
-    // (param 1) - each carrying the node's *nominal* default; the live value lives
-    // in node state and is applied via set_control.
-    assert_eq!(def.params.len(), 2);
+    // Three control params - the sine's freq (0) and the out's gain (1), each
+    // carrying the node's *nominal* default (the live value lives in node state
+    // and is applied via set_control), plus the out's driver-owned fade (2).
+    assert_eq!(def.params.len(), 3);
     assert!(def.params[0].name.ends_with("/freq"));
     assert_eq!(def.params[0].default, SinOsc::DEFAULT_FREQ);
     assert_eq!(def.params[0].lag, None, "freq is unsmoothed by default");
@@ -70,8 +70,11 @@ fn derives_expected_units() {
         Some(0.01),
         "gain has a default de-click lag"
     );
+    assert!(def.params[2].name.ends_with("/fade"));
+    assert_eq!(def.params[2].default, 1.0, "fade defaults to unity");
 
-    // Bindings map each param back to its dsp node (sine at [0], out at [1]).
+    // Bindings map each param back to its dsp node (sine at [0], out at [1]);
+    // the fade has NO binding - the driver alone drives it.
     assert_eq!(derived.params.len(), 2);
     assert_eq!(derived.params[0].node_path, vec![0]);
     assert_eq!(derived.params[0].index, 0);
@@ -82,22 +85,33 @@ fn derives_expected_units() {
     assert_eq!(def.units[0].name, "SinOsc");
     assert!(matches!(def.units[0].inputs[0], InputRef::Param(0)));
 
-    // unit 1: BinaryOpUGen multiply (SinOsc * gain-param)
+    // unit 1: BinaryOpUGen.kr multiply - the level = gain * fade, once.
     assert_eq!(def.units[1].name, "BinaryOpUGen");
     assert_eq!(def.units[1].special_index, 2, "multiply selector");
+    assert!(matches!(def.units[1].rate, Rate::Control));
+    assert!(matches!(def.units[1].inputs[0], InputRef::Param(1)));
+    assert!(matches!(def.units[1].inputs[1], InputRef::Param(2)));
+
+    // unit 2: BinaryOpUGen.ar multiply (SinOsc * level)
+    assert_eq!(def.units[2].name, "BinaryOpUGen");
+    assert_eq!(def.units[2].special_index, 2, "multiply selector");
+    assert!(matches!(def.units[2].rate, Rate::Audio));
     assert!(matches!(
-        def.units[1].inputs[0],
+        def.units[2].inputs[0],
         InputRef::Unit { unit: 0, output: 0 }
     ));
-    assert!(matches!(def.units[1].inputs[1], InputRef::Param(1)));
-
-    // unit 2: Out.ar(0, gained)
-    assert_eq!(def.units[2].name, "Out");
-    assert_eq!(def.units[2].num_outputs, 0);
-    assert!(matches!(def.units[2].inputs[0], InputRef::Constant(b) if b == 0.0));
     assert!(matches!(
         def.units[2].inputs[1],
         InputRef::Unit { unit: 1, output: 0 }
+    ));
+
+    // unit 3: Out.ar(0, levelled)
+    assert_eq!(def.units[3].name, "Out");
+    assert_eq!(def.units[3].num_outputs, 0);
+    assert!(matches!(def.units[3].inputs[0], InputRef::Constant(b) if b == 0.0));
+    assert!(matches!(
+        def.units[3].inputs[1],
+        InputRef::Unit { unit: 2, output: 0 }
     ));
 }
 
@@ -145,8 +159,8 @@ fn fans_output_across_channels() {
     let g = sine_to_out();
     let def = derive_synthdef(&g, 2, "test").expect("derive").def;
     // `Out` gets the bus index followed by one signal input per channel.
-    assert_eq!(def.units[2].name, "Out");
-    assert_eq!(def.units[2].inputs.len(), 1 + 2);
+    assert_eq!(def.units[3].name, "Out");
+    assert_eq!(def.units[3].inputs.len(), 1 + 2);
 }
 
 #[test]
@@ -161,8 +175,8 @@ fn lag_node_wired_into_chain() {
     g.add_edge(l, o, Edge::new(0.into(), 0.into()));
     let def = derive_synthdef(&g, 1, "t").expect("derive").def;
 
-    // Units: SinOsc(0), Lag(1), BinaryOpUGen(2), Out(3).
-    assert_eq!(def.units.len(), 4);
+    // Units: SinOsc(0), Lag(1), level-mul(2), channel-mul(3), Out(4).
+    assert_eq!(def.units.len(), 5);
     assert_eq!(def.units[1].name, "Lag");
     // Lag input 0 = the SinOsc output; input 1 = the dur param.
     assert!(matches!(
@@ -170,10 +184,11 @@ fn lag_node_wired_into_chain() {
         InputRef::Unit { unit: 0, output: 0 }
     ));
     assert!(matches!(def.units[1].inputs[1], InputRef::Param(_)));
-    // The gain mul reads the Lag output.
-    assert_eq!(def.units[2].name, "BinaryOpUGen");
+    // The channel mul reads the Lag output.
+    assert_eq!(def.units[3].name, "BinaryOpUGen");
+    assert!(matches!(def.units[3].rate, Rate::Audio));
     assert!(matches!(
-        def.units[2].inputs[0],
+        def.units[3].inputs[0],
         InputRef::Unit { unit: 1, output: 0 }
     ));
 
@@ -200,10 +215,14 @@ fn control_edge_on_root_does_not_panic() {
     g.add_edge(ctrl, o, Edge::new(0.into(), 1.into())); // control -> ~out gain (input 1)
 
     let derived = derive_synthdef(&g, 1, "t").expect("derive must not panic");
-    // The control source is filtered out; the dsp graph is still SinOsc + mul + Out.
-    assert_eq!(derived.def.units.len(), 3, "SinOsc + gain-mul + Out");
+    // The control source is filtered out; the dsp graph is still SinOsc + muls + Out.
+    assert_eq!(
+        derived.def.units.len(),
+        4,
+        "SinOsc + level/channel muls + Out"
+    );
     assert_eq!(derived.def.units[0].name, "SinOsc");
-    assert_eq!(derived.def.units[2].name, "Out");
+    assert_eq!(derived.def.units[3].name, "Out");
 }
 
 #[test]
@@ -224,8 +243,8 @@ fn dsp_chain_into_control_input_emits_no_units() {
     let derived = derive_synthdef(&g, 1, "t").expect("derive");
     assert_eq!(
         derived.def.units.len(),
-        3,
-        "SinOsc + gain-mul + Out, no Lag"
+        4,
+        "SinOsc + level/channel muls + Out, no Lag"
     );
     assert!(derived.def.units.iter().all(|u| u.name != "Lag"));
     assert!(
@@ -310,7 +329,7 @@ fn scopeout_taps_a_multichannel_signal() {
     let outs = ScopeOut::default().ugens(&[2], &[sig], &mut b);
     assert!(outs.is_empty(), "a tap sink has no dsp outputs");
 
-    let (def, _params, monitors) = b.finish("t");
+    let (def, _params, monitors, _gains) = b.finish("t");
     let scope = def
         .units
         .iter()
@@ -337,7 +356,7 @@ fn lag_smooths_each_channel() {
     assert_eq!(outs.len(), 1, "one dsp output port");
     assert_eq!(outs[0].width(), 2, "width flows through");
 
-    let (def, params, _monitors) = b.finish("t");
+    let (def, params, _monitors, _gains) = b.finish("t");
     let lags: Vec<_> = def.units.iter().filter(|u| u.name == "Lag").collect();
     assert_eq!(lags.len(), 2, "one Lag per channel");
     assert_eq!(def.params.len(), 1, "one shared dur param");
@@ -361,25 +380,32 @@ fn out_writes_multichannel_channel_per_bus() {
     assert!(outs.is_empty());
 
     let (def, ..) = b.finish("t");
+    // One control-rate level mul (gain * fade) shared by two per-channel muls.
+    let kr_muls: Vec<_> = def
+        .units
+        .iter()
+        .filter(|u| u.name == "BinaryOpUGen" && matches!(u.rate, Rate::Control))
+        .collect();
+    assert_eq!(kr_muls.len(), 1, "one shared level (gain * fade) multiply");
     let muls: Vec<_> = def
         .units
         .iter()
-        .filter(|u| u.name == "BinaryOpUGen")
+        .filter(|u| u.name == "BinaryOpUGen" && matches!(u.rate, Rate::Audio))
         .collect();
-    assert_eq!(muls.len(), 2, "one gain multiply per written channel");
+    assert_eq!(muls.len(), 2, "one level multiply per written channel");
     assert!(matches!(muls[0].inputs[0], InputRef::Constant(c) if c == 0.25));
     assert!(matches!(muls[1].inputs[0], InputRef::Constant(c) if c == 0.5));
-    assert_eq!(def.params.len(), 1, "one shared gain param");
+    assert_eq!(def.params.len(), 2, "one shared gain param + its fade");
     let out = def
         .units
         .iter()
         .find(|u| u.name == "Out")
         .expect("Out unit");
     assert_eq!(out.inputs.len(), 1 + 2);
-    // The gain multiplies are units 0 and 1 in this builder: bus channel 0 reads
-    // the first, bus channel 1 the second.
-    assert!(matches!(out.inputs[1], InputRef::Unit { unit: 0, .. }));
-    assert!(matches!(out.inputs[2], InputRef::Unit { unit: 1, .. }));
+    // The channel multiplies are units 1 and 2 in this builder (the level mul is
+    // 0): bus channel 0 reads the first, bus channel 1 the second.
+    assert!(matches!(out.inputs[1], InputRef::Unit { unit: 1, .. }));
+    assert!(matches!(out.inputs[2], InputRef::Unit { unit: 2, .. }));
 }
 
 #[test]
@@ -399,9 +425,9 @@ fn out_drops_excess_channels() {
     let n_muls = def
         .units
         .iter()
-        .filter(|u| u.name == "BinaryOpUGen")
+        .filter(|u| u.name == "BinaryOpUGen" && matches!(u.rate, Rate::Audio))
         .count();
-    assert_eq!(n_muls, 2, "no gain multiply for the dropped channel");
+    assert_eq!(n_muls, 2, "no channel multiply for the dropped channel");
     let out = def
         .units
         .iter()
@@ -454,13 +480,17 @@ fn pack_to_out_writes_two_device_channels() {
     g.add_edge(pk, o, Edge::new(0.into(), 0.into()));
 
     let def = derive_synthdef(&g, 2, "t").expect("derive").def;
-    assert_eq!(def.units.len(), 5, "2 SinOsc + 2 gain muls + Out");
+    assert_eq!(
+        def.units.len(),
+        6,
+        "2 SinOsc + level mul + 2 channel muls + Out",
+    );
     let muls: Vec<_> = def
         .units
         .iter()
-        .filter(|u| u.name == "BinaryOpUGen")
+        .filter(|u| u.name == "BinaryOpUGen" && matches!(u.rate, Rate::Audio))
         .collect();
-    assert_eq!(muls.len(), 2, "one gain multiply per written channel");
+    assert_eq!(muls.len(), 2, "one level multiply per written channel");
     assert_eq!(
         def.params
             .iter()
@@ -503,16 +533,16 @@ fn pack_unpack_routes_a_channel() {
     let def = &derived.def;
     assert_eq!(
         def.units.len(),
-        4,
-        "2 SinOsc + gain mul + Out; no routing units"
+        5,
+        "2 SinOsc + level/channel muls + Out; no routing units"
     );
 
-    // The gain mul's signal input is a SinOsc unit output...
+    // The channel mul's signal input is a SinOsc unit output...
     let mul = def
         .units
         .iter()
-        .find(|u| u.name == "BinaryOpUGen")
-        .expect("gain mul");
+        .find(|u| u.name == "BinaryOpUGen" && matches!(u.rate, Rate::Audio))
+        .expect("channel mul");
     let sine_unit = match mul.inputs[0] {
         InputRef::Unit { unit, .. } => unit as usize,
         other => panic!("expected a unit ref, got {other:?}"),
@@ -574,8 +604,8 @@ fn unpack_stale_output_edge_derives_silently() {
         .def
         .units
         .iter()
-        .find(|u| u.name == "BinaryOpUGen")
-        .expect("gain mul");
+        .find(|u| u.name == "BinaryOpUGen" && matches!(u.rate, Rate::Audio))
+        .expect("channel mul");
     assert!(
         matches!(mul.inputs[0], InputRef::Constant(c) if c == 0.0),
         "the missing port must resolve to silence",
@@ -858,4 +888,155 @@ fn scheduled_control_change_takes_effect_at_its_time() {
         a440 > 4.0 * a220,
         "expected 440 Hz after the scheduled switch: m220={a220}, m440={a440}",
     );
+}
+
+#[test]
+fn out_registers_a_fade_gain() {
+    // `~out` carries a driver-owned fade gain - the crossfade lever - recorded
+    // in `Derived.gains` with the fade ramp time, and deliberately WITHOUT a
+    // param binding (no node state feeds it; the driver alone drives it). The
+    // user's gain param keeps its ordinary binding for live value sync.
+    let g = sine_to_out();
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    assert_eq!(derived.gains.len(), 1);
+    let fade = derived.gains[0];
+    assert!(derived.def.params[fade.index].name.ends_with("/fade"));
+    assert_eq!(fade.lag, gantz_plyphon::FADE_LAG);
+    assert!(
+        !derived.params.iter().any(|b| b.index == fade.index),
+        "the fade must have no node binding",
+    );
+    let gain = derived
+        .def
+        .params
+        .iter()
+        .position(|p| p.name.ends_with("/gain"))
+        .expect("gain param");
+    assert!(
+        derived.params.iter().any(|b| b.index == gain),
+        "the user gain keeps its node binding for live value sync",
+    );
+}
+
+#[test]
+fn zeroed_gain_default_keeps_sig() {
+    // The driver patches gain defaults to 0.0 AFTER computing the sig (the
+    // spawn-silent half of the crossfade); the sig must not see the patch, or
+    // every re-derive would spuriously respawn.
+    let g = sine_to_out();
+    let mut derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let sig = structural_sig(&derived.def);
+    for g in &derived.gains {
+        derived.def.params[g.index].default = 0.0;
+    }
+    assert_eq!(sig, structural_sig(&derived.def));
+}
+
+#[test]
+fn patched_fade_default_fades_in() {
+    // The crossfade's fade-in half: with the fade default patched to 0.0 the
+    // synth spawns SILENT (defaults seed the lag state too - no ramp-from-zero
+    // surprise in reverse), and restoring the fade to unity ramps the output in
+    // over `FADE_LAG` rather than stepping.
+    let g = sine_to_out();
+    let mut derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let fade = derived.gains[0].index;
+    derived.def.params[fade].default = 0.0;
+
+    let (mut controller, _nrt, mut world) = engine(Options {
+        sample_rate: SR as f64,
+        output_channels: 1,
+        ..Options::default()
+    });
+    controller.add_synthdef(derived.def);
+    let node = controller
+        .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
+        .expect("synth_new");
+
+    // Silent while the fade sits at its patched 0.0 default.
+    let quiet = render(&mut world, SR as usize / 10);
+    assert!(quiet.iter().all(|s| s.abs() < 1e-4), "must spawn silent");
+
+    // Restoring the fade ramps the tone in: the first block is much quieter
+    // than the settled tone (the LagControl steps toward unity per control
+    // tick; at FADE_LAG the first step is a small fraction of the target).
+    Embedded::new(&mut controller)
+        .set_control(node, fade, 1.0)
+        .expect("set fade");
+    let ramp = render(&mut world, SR as usize / 2);
+    let start = rms(&ramp[..64]);
+    let settled = rms(&ramp[ramp.len() - SR as usize / 10..]);
+    assert!(settled > 0.05, "tone must settle in: settled={settled}");
+    assert!(
+        start < 0.4 * settled,
+        "fade must ramp, not step: start={start}, settled={settled}",
+    );
+}
+
+#[test]
+fn redefining_a_def_name_keeps_old_synth_playing() {
+    // The driver reuses ONE def name per head across replacements: plyphon
+    // retires the previous compiled def when a name is re-added and a running
+    // synth keeps its own reference - so the old synth must keep sounding while
+    // a replacement installed under the same name fades in, and the overlap
+    // must stay smooth (this is the crossfade the driver builds on).
+    let g = sine_to_out();
+    let derived_old = derive_synthdef(&g, 1, "t").expect("derive");
+    let fade = derived_old.gains[0].index;
+
+    let (mut controller, _nrt, mut world) = engine(Options {
+        sample_rate: SR as f64,
+        output_channels: 1,
+        ..Options::default()
+    });
+    controller.add_synthdef(derived_old.def);
+    let old = controller
+        .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
+        .expect("old synth");
+    let before = render(&mut world, SR as usize / 10);
+    assert!(rms(&before) > 0.05, "old synth must sound");
+
+    // Re-add the SAME name (a fresh derive, fade default patched to 0.0 as the
+    // driver would): the old synth keeps playing, unaffected.
+    let mut derived_new = derive_synthdef(&g, 1, "t").expect("derive");
+    derived_new.def.params[fade].default = 0.0;
+    controller.add_synthdef(derived_new.def);
+    let after_redef = render(&mut world, SR as usize / 10);
+    assert!(
+        rms(&after_redef) > 0.05,
+        "old synth must keep playing after the re-add",
+    );
+
+    // Crossfade: spawn the replacement silent, ramp it in and the old out - the
+    // whole overlap stays smooth (no hard-cut discontinuity; the largest jump is
+    // the fade's first per-block lag step, a small fraction of the amplitude).
+    let new = controller
+        .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
+        .expect("new synth");
+    let mut backend = Embedded::new(&mut controller);
+    backend
+        .set_control(new, fade, 1.0)
+        .expect("fade the new in");
+    backend
+        .set_control(old, fade, 0.0)
+        .expect("fade the old out");
+    let overlap = render(&mut world, SR as usize / 5);
+    let max_delta = overlap
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_delta < 0.06,
+        "crossfade must stay smooth: max_delta={max_delta}",
+    );
+
+    // The (faded-out) old synth frees without a pop; the replacement carries on.
+    controller.free(old).expect("free old");
+    let after = render(&mut world, SR as usize / 10);
+    assert!(rms(&after) > 0.05, "the replacement carries the tone");
+}
+
+/// Root-mean-square level of `samples`.
+fn rms(samples: &[f32]) -> f32 {
+    (samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32).sqrt()
 }

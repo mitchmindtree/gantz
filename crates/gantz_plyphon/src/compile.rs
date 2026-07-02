@@ -13,7 +13,7 @@ use gantz_core::compile::pull_eval_order;
 use gantz_core::node::Conns;
 use gantz_core::node::graph::{Graph, NodeIx};
 
-use crate::dsp::{DspBuilder, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp};
+use crate::dsp::{DspBuilder, GainRef, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp};
 
 /// An error deriving a synthdef from a graph.
 #[derive(Debug)]
@@ -34,6 +34,9 @@ pub struct Derived {
     pub params: Vec<ParamBinding>,
     /// One binding per monitor (`~scopeout`), in `SendTrig`-id order.
     pub monitors: Vec<ScopeOutBinding>,
+    /// The params that gate the def's whole output (e.g. `~out`'s gain), which
+    /// the driver fades through on a crossfaded replacement.
+    pub gains: Vec<GainRef>,
 }
 
 /// Derive a [`SynthDef`] named `name` from a graph's DSP subgraph, fanning the
@@ -163,11 +166,12 @@ where
         outputs.insert(n, outs);
     }
 
-    let (def, params, monitors) = builder.finish(name);
+    let (def, params, monitors, gains) = builder.finish(name);
     Ok(Derived {
         def,
         params,
         monitors,
+        gains,
     })
 }
 

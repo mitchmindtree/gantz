@@ -121,19 +121,33 @@ impl NodeDsp for Out {
     fn ugens(&self, path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
         let sig = inputs.first().cloned().unwrap_or_else(|| Signal::silent(1));
         let out_channels = b.out_channels();
-        // Apply master gain: ch * gain (BinaryOpUGen multiply, special_index 2).
-        // `gain` is a single settable (smoothed) control param shared by every
-        // written channel's multiply; the driver applies its live state value
-        // via `set_control`.
+        // The output level = gain x fade, multiplied once at control rate:
+        // `gain` is the settable (smoothed) control param (the driver applies
+        // its live state value via `set_control`); `fade` is the driver-owned
+        // crossfade lever ramping the whole synth in and out across a
+        // replacement (see `DspBuilder::push_fade_gain`).
         let gain = b.push_param(
             path,
             plyphon_param(param_name(path, "gain"), Self::DEFAULT_GAIN, self.gain_lag),
         );
+        let fade = b.push_fade_gain(path);
+        let level = b.push_unit(UnitSpec {
+            name: "BinaryOpUGen".to_string(),
+            rate: Rate::Control,
+            inputs: vec![InputRef::Param(gain), InputRef::Param(fade)],
+            num_outputs: 1,
+            special_index: 2,
+        });
+        let level = InputRef::Unit {
+            unit: level,
+            output: 0,
+        };
+        // Each written channel: ch * level (BinaryOpUGen multiply, special_index 2).
         let gained = |b: &mut DspBuilder, ch: InputRef| {
             let unit = b.push_unit(UnitSpec {
                 name: "BinaryOpUGen".to_string(),
                 rate: Rate::Audio,
-                inputs: vec![ch, InputRef::Param(gain)],
+                inputs: vec![ch, level],
                 num_outputs: 1,
                 special_index: 2,
             });

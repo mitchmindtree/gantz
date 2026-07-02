@@ -457,7 +457,11 @@ mod tests {
         // The `~out` sink is discoverable via `ToNodeDsp` and a synthdef derives;
         // the routing pair emits no units.
         let derived = derive_synthdef(&g, 2, "test").expect("derive");
-        assert_eq!(derived.def.units.len(), 4, "2 SinOsc + gain-mul + Out");
+        assert_eq!(
+            derived.def.units.len(),
+            5,
+            "2 SinOsc + level/channel muls + Out",
+        );
     }
 
     /// `~unpack`'s placeholder expr honours the multi-output contract for any

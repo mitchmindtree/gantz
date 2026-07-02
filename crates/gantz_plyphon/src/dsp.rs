@@ -138,6 +138,28 @@ pub struct ParamBinding {
     pub index: usize,
 }
 
+/// The smoothing lag (seconds) of a driver-controlled fade gain - the ramp time
+/// of each half of a crossfaded synth replacement. Long enough that the
+/// `LagControl`'s per-control-tick steps stay small (no zipper), short enough
+/// that edits feel immediate.
+pub const FADE_LAG: f32 = 0.05;
+
+/// Records a synthdef *fade gain* - a driver-owned param scaling a sink's whole
+/// output - so the audio driver can fade the synth in and out across a
+/// crossfaded replacement (the respawn de-click). The driver patches the
+/// param's `default` from `1.0` to `0.0` before install (the synth spawns
+/// silent; [`structural_sig`](crate::structural_sig) excludes defaults) and
+/// ramps it via the param's own `LagControl` - to `1.0` once the synth is up,
+/// to `0.0` ahead of a deferred free. Fade gains have NO [`ParamBinding`]: no
+/// node state feeds them, the driver alone drives them.
+#[derive(Clone, Copy, Debug)]
+pub struct GainRef {
+    /// The param's index within the synthdef's `params`.
+    pub index: usize,
+    /// The param's smoothing lag in seconds - the fade's ramp time.
+    pub lag: f32,
+}
+
 /// Records a monitor (`~scopeout`) node's `ScopeOut`, so the audio driver can cue a live
 /// scope stream and route its samples into the right node's ring-buffer state,
 /// capped at `size`. The `ScopeOut`'s `bufnum` input is a placeholder in the derived
@@ -167,6 +189,7 @@ pub struct DspBuilder {
     params: Vec<Param>,
     bindings: Vec<ParamBinding>,
     monitors: Vec<ScopeOutBinding>,
+    gains: Vec<GainRef>,
     out_channels: usize,
 }
 
@@ -178,6 +201,7 @@ impl DspBuilder {
             params: Vec::new(),
             bindings: Vec::new(),
             monitors: Vec::new(),
+            gains: Vec::new(),
             out_channels: out_channels.max(1),
         }
     }
@@ -197,6 +221,25 @@ impl DspBuilder {
         self.bindings.push(ParamBinding {
             node_path: path.to_vec(),
             index,
+        });
+        index as u32
+    }
+
+    /// Declare a driver-controlled *fade gain* for the sink at `path`: a lagged
+    /// param (default `1.0`, [`FADE_LAG`] ramp) that must scale the sink's whole
+    /// output, recorded as a [`GainRef`] but with NO [`ParamBinding`] - node
+    /// state never feeds it; the driver alone drives it across a crossfaded
+    /// replacement. Returns the param's index for [`InputRef::Param`].
+    pub fn push_fade_gain(&mut self, path: &[usize]) -> u32 {
+        let index = self.params.len();
+        self.params.push(Param::lag(
+            crate::param::param_name(path, "fade"),
+            1.0,
+            FADE_LAG,
+        ));
+        self.gains.push(GainRef {
+            index,
+            lag: FADE_LAG,
         });
         index as u32
     }
@@ -226,17 +269,22 @@ impl DspBuilder {
         self.out_channels
     }
 
-    /// Consume the builder into a finished [`SynthDef`], its param bindings, and
-    /// its monitor bindings.
+    /// Consume the builder into a finished [`SynthDef`], its param bindings, its
+    /// monitor bindings, and its gain refs.
     pub fn finish(
         self,
         name: impl Into<String>,
-    ) -> (SynthDef, Vec<ParamBinding>, Vec<ScopeOutBinding>) {
+    ) -> (
+        SynthDef,
+        Vec<ParamBinding>,
+        Vec<ScopeOutBinding>,
+        Vec<GainRef>,
+    ) {
         let def = SynthDef {
             name: name.into(),
             params: self.params,
             units: self.units,
         };
-        (def, self.bindings, self.monitors)
+        (def, self.bindings, self.monitors, self.gains)
     }
 }

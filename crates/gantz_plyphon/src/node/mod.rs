@@ -7,10 +7,14 @@
 
 pub use lag::Lag;
 pub use out::Out;
+pub use pack::Pack;
 pub use scope_out::ScopeOut;
 pub use sin_osc::SinOsc;
+pub use unpack::Unpack;
 
 pub mod lag;
 pub mod out;
+pub mod pack;
 pub mod scope_out;
 pub mod sin_osc;
+pub mod unpack;

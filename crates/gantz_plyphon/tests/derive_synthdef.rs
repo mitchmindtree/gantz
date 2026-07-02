@@ -5,8 +5,8 @@
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, Out, ScopeOut, Signal, SinOsc,
-    ToNodeDsp, derive_synthdef, structural_sig,
+    Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, Out, Pack, ScopeOut, Signal, SinOsc,
+    ToNodeDsp, Unpack, derive_synthdef, structural_sig,
 };
 use plyphon::synthdef::InputRef;
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, World, engine};
@@ -20,6 +20,8 @@ enum N {
     Lag(Lag),
     Out(Out),
     ScopeOut(ScopeOut),
+    Pack(Pack),
+    Unpack(Unpack),
     Other,
 }
 
@@ -30,6 +32,8 @@ impl ToNodeDsp for N {
             N::Lag(l) => Some(l),
             N::Out(o) => Some(o),
             N::ScopeOut(t) => Some(t),
+            N::Pack(p) => Some(p),
+            N::Unpack(u) => Some(u),
             N::Other => None,
         }
     }
@@ -407,6 +411,178 @@ fn out_drops_excess_channels() {
 }
 
 #[test]
+fn pack_widens_a_scopeout_tap() {
+    // Two sines -> `~pack`(2) -> `~scopeout`: the pack concatenates the two mono
+    // groups into one 2-wide edge, so the tap infers 2 channels - and neither
+    // routing node emits any units.
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let pk = g.add_node(N::Pack(Pack::default()));
+    let t = g.add_node(N::ScopeOut(ScopeOut::default()));
+    g.add_edge(s0, pk, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, pk, Edge::new(0.into(), 1.into()));
+    g.add_edge(pk, t, Edge::new(0.into(), 0.into()));
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    assert_eq!(
+        derived.def.units.len(),
+        3,
+        "2 SinOsc + ScopeOut; ~pack emits nothing",
+    );
+    let scope = derived
+        .def
+        .units
+        .iter()
+        .find(|u| u.name == "ScopeOut")
+        .expect("ScopeOut unit");
+    assert_eq!(scope.inputs.len(), 3, "bufnum + one signal per channel (2)");
+    assert_eq!(derived.monitors[0].channels, 2, "width inferred as 2");
+}
+
+#[test]
+fn pack_to_out_writes_two_device_channels() {
+    // Two sines -> `~pack`(2) -> `~out` on a 2-channel device: channel i -> bus i,
+    // each through its own gain multiply sharing the one gain param (no mono fan).
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let pk = g.add_node(N::Pack(Pack::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s0, pk, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, pk, Edge::new(0.into(), 1.into()));
+    g.add_edge(pk, o, Edge::new(0.into(), 0.into()));
+
+    let def = derive_synthdef(&g, 2, "t").expect("derive").def;
+    assert_eq!(def.units.len(), 5, "2 SinOsc + 2 gain muls + Out");
+    let muls: Vec<_> = def
+        .units
+        .iter()
+        .filter(|u| u.name == "BinaryOpUGen")
+        .collect();
+    assert_eq!(muls.len(), 2, "one gain multiply per written channel");
+    assert_eq!(
+        def.params
+            .iter()
+            .filter(|p| p.name.ends_with("/gain"))
+            .count(),
+        1,
+        "the channels share one gain param",
+    );
+    let out = def.units.iter().find(|u| u.name == "Out").expect("Out");
+    assert_eq!(out.inputs.len(), 1 + 2);
+    // The two written channels reach distinct sine chains (not a fanned mono).
+    let bus_units: Vec<u32> = out.inputs[1..]
+        .iter()
+        .map(|i| match i {
+            InputRef::Unit { unit, .. } => *unit,
+            other => panic!("expected a unit ref, got {other:?}"),
+        })
+        .collect();
+    assert_ne!(bus_units[0], bus_units[1], "channels must stay distinct");
+}
+
+#[test]
+fn pack_unpack_routes_a_channel() {
+    // sine0 + sine1 -> `~pack`(2) -> `~unpack`(2), output 1 -> `~out`: pure
+    // re-routing that must deliver *sine1*'s wire to the out (identified via its
+    // freq param's node-path binding). The unreached sine0 chain still derives
+    // (it was pulled), but the out's gain mul must read sine1.
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let pk = g.add_node(N::Pack(Pack::default()));
+    let up = g.add_node(N::Unpack(Unpack::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s0, pk, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, pk, Edge::new(0.into(), 1.into()));
+    g.add_edge(pk, up, Edge::new(0.into(), 0.into()));
+    g.add_edge(up, o, Edge::new(1.into(), 0.into())); // unpack output 1 -> ~out
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let def = &derived.def;
+    assert_eq!(
+        def.units.len(),
+        4,
+        "2 SinOsc + gain mul + Out; no routing units"
+    );
+
+    // The gain mul's signal input is a SinOsc unit output...
+    let mul = def
+        .units
+        .iter()
+        .find(|u| u.name == "BinaryOpUGen")
+        .expect("gain mul");
+    let sine_unit = match mul.inputs[0] {
+        InputRef::Unit { unit, .. } => unit as usize,
+        other => panic!("expected a unit ref, got {other:?}"),
+    };
+    assert_eq!(def.units[sine_unit].name, "SinOsc");
+    // ...and that SinOsc's freq param binds to *sine1*'s node path: channel 1 of
+    // the packed group is sine1.
+    let freq_param = match def.units[sine_unit].inputs[0] {
+        InputRef::Param(p) => p as usize,
+        other => panic!("expected a param ref, got {other:?}"),
+    };
+    let binding = derived
+        .params
+        .iter()
+        .find(|b| b.index == freq_param)
+        .expect("freq binding");
+    assert_eq!(binding.node_path, vec![s1.index()], "channel 1 is sine1");
+}
+
+#[test]
+fn pack_count_changes_structural_sig() {
+    // Widening a pack (2 -> 3 inputs) widens the tapped group, changing the
+    // ScopeOut's input count and thus the structural sig (the driver respawns).
+    let scope_def = |count: usize| {
+        let mut pack = Pack::default();
+        pack.set_count(count);
+        let mut g = Graph::<N>::default();
+        let s = g.add_node(N::SinOsc(SinOsc::default()));
+        let pk = g.add_node(N::Pack(pack));
+        let t = g.add_node(N::ScopeOut(ScopeOut::default()));
+        g.add_edge(s, pk, Edge::new(0.into(), 0.into()));
+        g.add_edge(pk, t, Edge::new(0.into(), 0.into()));
+        derive_synthdef(&g, 1, "t").expect("derive").def
+    };
+    assert_ne!(
+        structural_sig(&scope_def(2)),
+        structural_sig(&scope_def(3)),
+        "a width change must change the structural signature",
+    );
+}
+
+#[test]
+fn unpack_stale_output_edge_derives_silently() {
+    // An edge left hanging off a removed `~unpack` output (count shrunk to 1,
+    // edge still on output 1): the Steel compile surfaces a diagnostic, but
+    // synthdef derivation must not panic - the missing port resolves to mono
+    // silence.
+    let mut unpack = Unpack::default();
+    unpack.set_count(1);
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let up = g.add_node(N::Unpack(unpack));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, up, Edge::new(0.into(), 0.into()));
+    g.add_edge(up, o, Edge::new(1.into(), 0.into())); // stale: output 1 of 1
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive must not panic");
+    let mul = derived
+        .def
+        .units
+        .iter()
+        .find(|u| u.name == "BinaryOpUGen")
+        .expect("gain mul");
+    assert!(
+        matches!(mul.inputs[0], InputRef::Constant(c) if c == 0.0),
+        "the missing port must resolve to silence",
+    );
+}
+
+#[test]
 fn scopeout_without_output_still_derives() {
     // A monitor-only graph (`~sinosc -> ~scopeout`, no `~out`) derives a silent synthdef:
     // a `~scopeout` is a sink in its own right, so there is something to root at.
@@ -560,6 +736,64 @@ fn derived_synth_plays_expected_tone() {
     assert!(
         m220 > 5.0 * m440,
         "expected 220 Hz dominant: m220={m220}, m440={m440}"
+    );
+}
+
+#[test]
+fn stereo_pack_plays_per_channel_tones() {
+    // Two sines -> `~pack`(2) -> `~out` rendered offline on a 2-channel device:
+    // each device channel carries its own sine (220 Hz left, 330 Hz right - the
+    // second sine re-tuned via set_control), proving the channel-per-bus write
+    // end to end through the real engine.
+    const BLOCK: usize = 64;
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let pk = g.add_node(N::Pack(Pack::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s0, pk, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, pk, Edge::new(0.into(), 1.into()));
+    g.add_edge(pk, o, Edge::new(0.into(), 0.into()));
+
+    let derived = derive_synthdef(&g, 2, "t").expect("derive");
+    let s1_freq = derived
+        .params
+        .iter()
+        .find(|b| b.node_path == [s1.index()])
+        .expect("sine1 freq binding")
+        .index;
+
+    let (mut controller, _nrt, mut world) = engine(Options {
+        sample_rate: SR as f64,
+        output_channels: 2,
+        block_size: BLOCK,
+        ..Options::default()
+    });
+    controller.add_synthdef(derived.def);
+    let node = controller
+        .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
+        .expect("synth_new");
+    Embedded::new(&mut controller)
+        .set_control(node, s1_freq, 330.0)
+        .expect("re-tune sine1");
+
+    // Render half a second of interleaved stereo, then split the channels.
+    let mut out = vec![0.0f32; (SR as usize / 2 / BLOCK) * BLOCK * 2];
+    for block in out.chunks_mut(BLOCK * 2) {
+        world.fill(block, 2);
+    }
+    let left: Vec<f32> = out.iter().copied().step_by(2).collect();
+    let right: Vec<f32> = out.iter().skip(1).copied().step_by(2).collect();
+
+    let (l220, l330) = (goertzel(&left, 220.0), goertzel(&left, 330.0));
+    assert!(
+        l220 > 5.0 * l330,
+        "left must carry the 220 Hz sine: l220={l220}, l330={l330}",
+    );
+    let (r220, r330) = (goertzel(&right, 220.0), goertzel(&right, 330.0));
+    assert!(
+        r330 > 5.0 * r220,
+        "right must carry the 330 Hz sine: r220={r220}, r330={r330}",
     );
 }
 

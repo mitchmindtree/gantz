@@ -147,6 +147,12 @@ fn primitives() -> Primitives {
     register_primitive(&mut p, "~scopeout", || {
         Box::new(gantz_plyphon::ScopeOut::default()) as Box<_>
     });
+    register_primitive(&mut p, "~pack", || {
+        Box::new(gantz_plyphon::Pack::default()) as Box<_>
+    });
+    register_primitive(&mut p, "~unpack", || {
+        Box::new(gantz_plyphon::Unpack::default()) as Box<_>
+    });
     p
 }
 

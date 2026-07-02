@@ -13,12 +13,13 @@
 //! A DSP node's keyword and type mirror the underlying plyphon UGen it emits:
 //! `~sinosc`/[`SinOsc`] → `SinOsc`, `~scopeout`/[`ScopeOut`] → `ScopeOut`,
 //! `~out`/[`Out`] → `Out`, `~lag`/[`Lag`] → `Lag`. A node that composes *several*
-//! UGens into one gantz node gets its own descriptive name instead.
+//! UGens into one gantz node - or emits none, like the `~pack`/`~unpack`
+//! channel-routing pair - gets its own descriptive name instead.
 
 pub use backend::{Backend, BackendError, Embedded};
 pub use compile::{DeriveError, Derived, derive_synthdef, structural_sig};
 pub use dsp::{DspBuilder, NodeDsp, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp};
-pub use node::{Lag, Out, ScopeOut, SinOsc};
+pub use node::{Lag, Out, Pack, ScopeOut, SinOsc, Unpack};
 pub use sugar::PlyphonSugar;
 
 pub mod backend;

@@ -1,17 +1,19 @@
 //! `.gantz` keyword sugar for the DSP node set.
 //!
 //! [`PlyphonSugar`] provides the human-friendly keywords for this crate's nodes:
-//! bare `~sinosc`/`~out`/`~lag`/`~scopeout`, with optional `(~sinosc #:freq-lag s)`,
-//! `(~out #:gain-lag s)` and `(~scopeout #:size n)` forms carrying the (structural)
-//! smoothing lag / ring length. The `freq`/`gain`/`dur` param *values* live in VM
-//! state (not the node weight), so they are not serialized and never appear here.
-//! Compose it with [`gantz_format::CoreSugar`] (and the other crates' sugars) via
-//! [`gantz_format::Sugars`].
+//! bare `~sinosc`/`~out`/`~lag`/`~scopeout`/`~pack`/`~unpack`, with optional
+//! `(~sinosc #:freq-lag s)`, `(~out #:gain-lag s)`, `(~scopeout #:size n)` and
+//! `(~pack #:count n)`/`(~unpack #:count n)` forms carrying the structural
+//! smoothing lag / ring length / socket count. The `freq`/`gain`/`dur` param
+//! *values* live in VM state (not the node weight), so they are not serialized
+//! and never appear here. Compose it with [`gantz_format::CoreSugar`] (and the
+//! other crates' sugars) via [`gantz_format::Sugars`].
 
 use gantz_format::{Datum, FormatError, Sugar, SugarArgs, node_datum};
 
 /// Keyword sugar for the plyphon DSP nodes ([`SinOsc`](crate::SinOsc),
-/// [`Out`](crate::Out), [`Lag`](crate::Lag), [`ScopeOut`](crate::ScopeOut)).
+/// [`Out`](crate::Out), [`Lag`](crate::Lag), [`ScopeOut`](crate::ScopeOut),
+/// [`Pack`](crate::Pack), [`Unpack`](crate::Unpack)).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlyphonSugar;
 
@@ -21,6 +23,8 @@ const KEYWORD_TAG: &[(&str, &str)] = &[
     ("~out", "Out"),
     ("~lag", "Lag"),
     ("~scopeout", "ScopeOut"),
+    ("~pack", "Pack"),
+    ("~unpack", "Unpack"),
 ];
 
 /// The typetag tag for a sugar keyword.
@@ -46,6 +50,8 @@ impl Sugar for PlyphonSugar {
             "~out" => lag_spec("Out", "gain_lag", "gain-lag", args)?,
             "~lag" => node_datum("Lag", vec![]),
             "~scopeout" => size_spec(args)?,
+            "~pack" => count_spec("Pack", args)?,
+            "~unpack" => count_spec("Unpack", args)?,
             _ => return Ok(None),
         };
         Ok(Some(datum))
@@ -72,6 +78,8 @@ impl Sugar for PlyphonSugar {
                 node,
             )),
             "ScopeOut" => Some(write_size(node)),
+            "Pack" => Some(write_count("~pack", crate::Pack::DEFAULT_COUNT, node)),
+            "Unpack" => Some(write_count("~unpack", crate::Unpack::DEFAULT_COUNT, node)),
             other => keyword_for_tag(other).map(str::to_string),
         }
     }
@@ -125,6 +133,25 @@ fn write_size(node: &Datum) -> String {
             format!("(~scopeout #:size {size})")
         }
         _ => "~scopeout".to_string(),
+    }
+}
+
+/// Read a `(<head> [#:count n])` form into a node datum tagged `tag`, carrying the
+/// socket `count` only when the keyword is present (so a bare form stays bare).
+fn count_spec(tag: &str, args: SugarArgs<'_>) -> Result<Datum, FormatError> {
+    let mut fields = Vec::new();
+    if let Some(count) = args.keyword_int("count")? {
+        fields.push(("count", Datum::U64(count.max(1) as u64)));
+    }
+    Ok(node_datum(tag, fields))
+}
+
+/// Write a `Pack`/`Unpack`: the bare keyword `kw` when the socket `count` is at
+/// `default`, else `(<kw> #:count n)`.
+fn write_count(kw: &str, default: usize, node: &Datum) -> String {
+    match node.get("count").and_then(Datum::as_i64) {
+        Some(count) if count != default as i64 => format!("({kw} #:count {count})"),
+        _ => kw.to_string(),
     }
 }
 
@@ -226,6 +253,30 @@ mod tests {
             s.write_spec("ScopeOut", &sized).as_deref(),
             Some("(~scopeout #:size 512)"),
         );
+    }
+
+    #[test]
+    fn pack_and_unpack_round_trip() {
+        let s = PlyphonSugar;
+        for (kw, tag, default) in [
+            ("~pack", "Pack", crate::Pack::DEFAULT_COUNT),
+            ("~unpack", "Unpack", crate::Unpack::DEFAULT_COUNT),
+        ] {
+            // A default count stays bare (read as a bare keyword or an empty spec),
+            // including a Datum explicitly carrying the default.
+            let bare = s.read_bare(kw).expect("bare");
+            assert_eq!(bare.get("type").and_then(Datum::as_str), Some(tag));
+            assert_eq!(s.write_spec(tag, &bare).as_deref(), Some(kw));
+            let empty = read_spec(&format!("({kw})")).expect("empty");
+            assert_eq!(s.write_spec(tag, &empty).as_deref(), Some(kw));
+            let defaulted = node_datum(tag, vec![("count", Datum::U64(default as u64))]);
+            assert_eq!(s.write_spec(tag, &defaulted).as_deref(), Some(kw));
+            // A non-default count round-trips.
+            let form = format!("({kw} #:count 4)");
+            let counted = read_spec(&form).expect("counted");
+            assert_eq!(counted.get("count").and_then(Datum::as_i64), Some(4));
+            assert_eq!(s.write_spec(tag, &counted).as_deref(), Some(form.as_str()));
+        }
     }
 
     #[test]

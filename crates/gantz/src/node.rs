@@ -36,6 +36,8 @@ impl Node for gantz_plyphon::SinOsc {}
 impl Node for gantz_plyphon::Out {}
 impl Node for gantz_plyphon::Lag {}
 impl Node for gantz_plyphon::ScopeOut {}
+impl Node for gantz_plyphon::Pack {}
+impl Node for gantz_plyphon::Unpack {}
 
 // `Box<dyn Node>`'s `Serialize`/`Deserialize`: compiled dispatch over the
 // full node set, keyed by each type's `gantz_nodetag::NodeTag`. Adding a
@@ -64,6 +66,8 @@ gantz_format::impl_node_set_serde! {
         gantz_plyphon::Out,
         gantz_plyphon::Lag,
         gantz_plyphon::ScopeOut,
+        gantz_plyphon::Pack,
+        gantz_plyphon::Unpack,
     }
 }
 
@@ -116,6 +120,12 @@ impl gantz_plyphon::ToNodeDsp for Box<dyn Node> {
             return Some(n);
         }
         if let Some(n) = any.downcast_ref::<gantz_plyphon::ScopeOut>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Pack>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Unpack>() {
             return Some(n);
         }
         None
@@ -277,6 +287,10 @@ mod tests {
                 "ScopeOut",
                 vec![("channels", Datum::U64(3)), ("size", Datum::U64(64))],
             ),
+            node_datum("Pack", vec![]),
+            node_datum("Pack", vec![("count", Datum::U64(4))]),
+            node_datum("Unpack", vec![]),
+            node_datum("Unpack", vec![("count", Datum::U64(4))]),
         ];
         for value in cases {
             let node: Box<dyn Node> = from_datum(value.clone())
@@ -378,7 +392,7 @@ mod tests {
         use gantz_format::{NodeSugar, Sugar, to_datum};
 
         let sugar = <Box<dyn Node> as NodeSugar>::sugar();
-        let cases: [(Box<dyn Node>, &str, &str); 4] = [
+        let cases: [(Box<dyn Node>, &str, &str); 6] = [
             (
                 Box::new(gantz_plyphon::SinOsc::default()),
                 "SinOsc",
@@ -390,6 +404,12 @@ mod tests {
                 Box::new(gantz_plyphon::ScopeOut::default()),
                 "ScopeOut",
                 "~scopeout",
+            ),
+            (Box::new(gantz_plyphon::Pack::default()), "Pack", "~pack"),
+            (
+                Box::new(gantz_plyphon::Unpack::default()),
+                "Unpack",
+                "~unpack",
             ),
         ];
         for (node, tag, expected) in cases {
@@ -414,10 +434,18 @@ mod tests {
         use gantz_plyphon::derive_synthdef;
         type G = Graph<Box<dyn Node>>;
 
+        // Two sines packed into one 2-wide edge, unpacked, channel 1 to the out -
+        // covering the whole dsp node set including the routing pair.
         let mut g: G = Graph::default();
-        let s = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
+        let s0 = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
+        let s1 = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
+        let pk = g.add_node(Box::new(gantz_plyphon::Pack::default()) as Box<dyn Node>);
+        let up = g.add_node(Box::new(gantz_plyphon::Unpack::default()) as Box<dyn Node>);
         let o = g.add_node(Box::new(gantz_plyphon::Out::default()) as Box<dyn Node>);
-        g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+        g.add_edge(s0, pk, Edge::new(0.into(), 0.into()));
+        g.add_edge(s1, pk, Edge::new(0.into(), 1.into()));
+        g.add_edge(pk, up, Edge::new(0.into(), 0.into()));
+        g.add_edge(up, o, Edge::new(1.into(), 0.into()));
 
         // Steel-inert: compiles through the control-rate VM (no entrypoints, no
         // error) even though it is a pure-audio graph.
@@ -426,9 +454,39 @@ mod tests {
         gantz_core::vm::init(&get_node, &g, &[], &config)
             .expect("DSP graph must compile in the Steel VM");
 
-        // The `~out` sink is discoverable via `ToNodeDsp` and a synthdef derives.
+        // The `~out` sink is discoverable via `ToNodeDsp` and a synthdef derives;
+        // the routing pair emits no units.
         let derived = derive_synthdef(&g, 2, "test").expect("derive");
-        assert_eq!(derived.def.units.len(), 3, "SinOsc + gain-mul + Out");
+        assert_eq!(derived.def.units.len(), 4, "2 SinOsc + gain-mul + Out");
+    }
+
+    /// `~unpack`'s placeholder expr honours the multi-output contract for any
+    /// `count`: a single value for one output, a list of values otherwise. A
+    /// wrong shape (e.g. `(list 0)` for count 1) fails `vm::init`'s compile.
+    #[test]
+    fn unpack_expr_is_steel_inert_for_any_count() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        type G = Graph<Box<dyn Node>>;
+
+        for count in [1usize, 2, 3] {
+            let mut unpack = gantz_plyphon::Unpack::default();
+            unpack.set_count(count);
+            let mut g: G = Graph::default();
+            let s = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
+            let up = g.add_node(Box::new(unpack) as Box<dyn Node>);
+            let insp = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
+            g.add_edge(s, up, Edge::new(0.into(), 0.into()));
+            // An edge off the last output forces the expr's output shape through
+            // the lowerer.
+            g.add_edge(up, insp, Edge::new(((count - 1) as u16).into(), 0.into()));
+
+            let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+            let config = gantz_core::compile::Config::default();
+            let eps = gantz_core::compile::push_pull_entrypoints(&get_node, &g);
+            gantz_core::vm::init(&get_node, &g, &eps, &config)
+                .unwrap_or_else(|e| panic!("~unpack count {count} must compile: {e:?}"));
+        }
     }
 
     /// A control input on a DSP node: connecting a `number` to `~sinosc`'s freq

@@ -43,6 +43,7 @@ use iroh_gossip::{
 };
 use n0_future::StreamExt;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// The ALPN identifying gantz's session-sync request protocol. The version
 /// is part of the string: incompatible revisions are distinct protocols.
@@ -280,6 +281,8 @@ async fn drive(
     let mut senders: HashMap<SessionId, GossipSender> = HashMap::new();
     // Bootstrap addresses learnt from tickets, as a dial fallback.
     let mut bootstrap: HashMap<SessionId, Vec<EndpointAddr>> = HashMap::new();
+    // Cached request-plane connections, shared with the request tasks.
+    let conns: ConnCache = ConnCache::default();
 
     while let Ok(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -331,8 +334,9 @@ async fn drive(
                 // Snapshot from the first host that answers.
                 let endpoint = endpoint.clone();
                 let evt_tx = evt_tx.clone();
+                let conns = conns.clone();
                 n0_future::task::spawn(async move {
-                    let evt = join_snapshot(&endpoint, &ticket).await;
+                    let evt = join_snapshot(&endpoint, &conns, &ticket).await;
                     let _ = evt_tx.send(evt).await;
                 });
             }
@@ -357,9 +361,10 @@ async fn drive(
                 let addr = dial_addr(&bootstrap, session, from);
                 let endpoint = endpoint.clone();
                 let evt_tx = evt_tx.clone();
+                let conns = conns.clone();
                 n0_future::task::spawn(async move {
                     let req = SyncRequest::Want { session, want };
-                    let evt = match request(&endpoint, addr, &req).await {
+                    let evt = match request(&endpoint, &conns, addr, &req).await {
                         Ok(SyncResponse::Objects(objects)) => Event::Objects {
                             session,
                             from,
@@ -480,16 +485,26 @@ async fn subscribe(
     Ok(sender)
 }
 
-/// One request/response over a fresh bi-stream on a fresh connection.
-async fn request(
-    endpoint: &Endpoint,
-    addr: EndpointAddr,
-    req: &SyncRequest,
-) -> Result<SyncResponse, String> {
-    let conn = endpoint
-        .connect(addr, SYNC_ALPN)
-        .await
-        .map_err(|e| format!("connect failed: {e}"))?;
+/// Cached peer connections for the request plane, keyed by peer.
+///
+/// iroh does not pool connections, and a fresh QUIC handshake per request -
+/// typically relay-routed until holepunching completes - dominated sync
+/// latency. `Connection` is a cheap clonable handle, and holding one here
+/// also keeps the connection alive between requests (the server side already
+/// serves any number of streams per connection). Shared because request
+/// tasks are spawned off the driver.
+type ConnCache = Arc<Mutex<HashMap<EndpointId, Connection>>>;
+
+/// Lock the connection cache; a poisoned lock still yields the map (entries
+/// are validated before use anyway).
+fn lock_conns(conns: &ConnCache) -> std::sync::MutexGuard<'_, HashMap<EndpointId, Connection>> {
+    conns
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One request/response over a bi-stream on the given connection.
+async fn exchange(conn: &Connection, req: &SyncRequest) -> Result<SyncResponse, String> {
     let (mut send, mut recv) = conn
         .open_bi()
         .await
@@ -505,8 +520,46 @@ async fn request(
     proto::decode(&bytes).map_err(|e| format!("undecodable response ({} bytes): {e}", bytes.len()))
 }
 
+/// One request/response, reusing the cached connection to the peer when it
+/// is still live, else dialing (and caching) a fresh one.
+///
+/// A failure on a cached connection invalidates it and retries once fresh
+/// (the peer may have restarted); a failure on a fresh connection is final.
+async fn request(
+    endpoint: &Endpoint,
+    conns: &ConnCache,
+    addr: EndpointAddr,
+    req: &SyncRequest,
+) -> Result<SyncResponse, String> {
+    let id = addr.id;
+    let cached = lock_conns(conns)
+        .get(&id)
+        .filter(|c| c.close_reason().is_none())
+        .cloned();
+    if let Some(conn) = cached {
+        match exchange(&conn, req).await {
+            Ok(resp) => return Ok(resp),
+            Err(_) => {
+                lock_conns(conns).remove(&id);
+            }
+        }
+    }
+    let conn = endpoint
+        .connect(addr, SYNC_ALPN)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+    lock_conns(conns).insert(id, conn.clone());
+    match exchange(&conn, req).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            lock_conns(conns).remove(&id);
+            Err(e)
+        }
+    }
+}
+
 /// Hello + snapshot against each ticket host in turn.
-async fn join_snapshot(endpoint: &Endpoint, ticket: &SessionTicket) -> Event {
+async fn join_snapshot(endpoint: &Endpoint, conns: &ConnCache, ticket: &SessionTicket) -> Event {
     let session = ticket.session;
     let mut last_error = "ticket carries no host addresses".to_string();
     for host in &ticket.hosts {
@@ -514,7 +567,7 @@ async fn join_snapshot(endpoint: &Endpoint, ticket: &SessionTicket) -> Event {
             session,
             proto: PROTO_VERSION,
         };
-        match request(endpoint, host.clone(), &hello).await {
+        match request(endpoint, conns, host.clone(), &hello).await {
             Ok(SyncResponse::Hello { accepted: true, .. }) => {}
             Ok(SyncResponse::Hello { proto, .. }) => {
                 last_error =
@@ -534,7 +587,14 @@ async fn join_snapshot(endpoint: &Endpoint, ticket: &SessionTicket) -> Event {
                 continue;
             }
         }
-        match request(endpoint, host.clone(), &SyncRequest::Snapshot { session }).await {
+        match request(
+            endpoint,
+            conns,
+            host.clone(),
+            &SyncRequest::Snapshot { session },
+        )
+        .await
+        {
             Ok(SyncResponse::Snapshot { heads, objects }) => {
                 return Event::Joined {
                     session,

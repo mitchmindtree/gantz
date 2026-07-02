@@ -21,6 +21,44 @@ pub enum DeriveError {
     /// The graph has no dsp *sink* (no `~out` output and no `~scopeout` monitor), so
     /// there is nothing to root a synthdef at.
     NoSink,
+    /// The `~bus` boundaries form a cycle between regions, so there is no
+    /// writer-before-reader order to derive (or run) them in. Deliberate
+    /// cross-region feedback (an `InFeedback`-based bus) is a planned follow-up.
+    BusCycle,
+}
+
+/// One side of a `~bus` boundary within a region's def: the bus unit whose
+/// input 0 (the bus channel index) is a `0.0` placeholder the driver patches to
+/// a driver-allocated private bus before installing (the `ScopeOut`-bufnum
+/// idiom, so [`structural_sig`] stays stable across allocations).
+#[derive(Clone, Debug)]
+pub struct BusBinding {
+    /// The `~bus` node's path - the driver's bus-allocation key. Consecutive
+    /// buses alias (a `~bus` fed directly by another `~bus` shares the upstream
+    /// bus), so reads name the *effective* upstream node's path.
+    pub node_path: Vec<usize>,
+    /// The bus's channel count - the boundary signal's width.
+    pub channels: usize,
+    /// The index within the def's `units` of the bus `Out` (write side) or `In`
+    /// (read side) whose input 0 is the patchable placeholder.
+    pub unit: usize,
+}
+
+/// One region of a boundary-cut graph: its derived synthdef + bindings, plus
+/// the buses its def writes and reads. Produced by [`derive_synthdefs`] in
+/// region-DAG topological order (bus writers before their readers - the order
+/// their synths must also take in the node tree).
+pub struct RegionDerived {
+    /// A stable identity across re-derives: a hash of the region's sink and
+    /// boundary node paths. The driver matches old and new regions by key for
+    /// its per-region keep/replace decision.
+    pub key: u64,
+    /// The region's synthdef + param/monitor/gain bindings.
+    pub derived: Derived,
+    /// The buses this region's def writes (`Out` with a patchable bus input).
+    pub bus_writes: Vec<BusBinding>,
+    /// The buses this region's def reads (`In` with a patchable bus input).
+    pub bus_reads: Vec<BusBinding>,
 }
 
 /// The output of [`derive_synthdef`]: the synthdef plus the bindings the audio
@@ -79,51 +117,17 @@ pub fn derive_synthdef<N>(
 where
     N: ToNodeDsp,
 {
-    // Every dsp sink: an audio output (`~out`) or a monitor (`~scopeout`).
-    let sinks: Vec<NodeIx> = graph
-        .node_indices()
-        .filter(|&n| {
-            graph[n]
-                .to_node_dsp()
-                .is_some_and(|d| d.is_output() || d.is_monitor())
-        })
-        .collect();
+    let sinks = dsp_sinks(graph);
     if sinks.is_empty() {
         return Err(DeriveError::NoSink);
     }
-
-    // The dsp-reachable set: dsp nodes that feed a sink transitively through *dsp*
-    // inputs only. `pull_eval_order` masks only the seed's inputs - interior nodes
-    // are traversed over ALL incoming edges - so the merged order below must be
-    // intersected with this set to keep control-input feeds out of the def.
-    let mut dsp_reachable: HashSet<NodeIx> = sinks.iter().copied().collect();
-    let mut stack: Vec<NodeIx> = sinks.clone();
-    while let Some(n) = stack.pop() {
-        let n_dsp_in = graph[n].to_node_dsp().map_or(0, |d| d.n_dsp_inputs());
-        for e in graph.edges_directed(n, Direction::Incoming) {
-            if (e.weight().input.0 as usize) < n_dsp_in
-                && graph[e.source()].to_node_dsp().is_some()
-                && dsp_reachable.insert(e.source())
-            {
-                stack.push(e.source());
-            }
-        }
-    }
+    let reachable = dsp_reachable(graph, &sinks);
+    let sources = resolved_sources(graph, &reachable);
 
     // Merge each sink's dsp-only pull-eval order into one topological order,
     // keeping only dsp-reachable nodes and the first occurrence of each (see the
     // fn docs).
-    let mut order: Vec<NodeIx> = Vec::new();
-    let mut seen: HashSet<NodeIx> = HashSet::new();
-    for &sink in &sinks {
-        let n_dsp_in = graph[sink].to_node_dsp().map_or(0, |d| d.n_dsp_inputs());
-        let conns = Conns::connected(n_dsp_in).expect("n_dsp_inputs within Conns::MAX");
-        for n in pull_eval_order(graph, sink, conns) {
-            if dsp_reachable.contains(&n) && seen.insert(n) {
-                order.push(n);
-            }
-        }
-    }
+    let order = merged_pull_order(graph, &sinks, |n| reachable.contains(&n));
 
     let mut builder = DspBuilder::new(out_channels);
     // Each processed node's per-port output signals, for its consumers to
@@ -134,28 +138,13 @@ where
         let Some(dsp) = graph[n].to_node_dsp() else {
             continue;
         };
-        let n_in = dsp.n_dsp_inputs();
-        let mut inputs: Vec<Option<Signal>> = vec![None; n_in];
-        for e in graph.edges_directed(n, Direction::Incoming) {
-            let input_ix = e.weight().input.0 as usize;
-            let output_ix = e.weight().output.0 as usize;
-            if input_ix >= n_in {
-                continue;
-            }
-            // Phase 1: only DSP sources contribute, and the first edge to an
-            // input wins (no summing of multiple sources yet). Only a `None`
-            // slot is filled - `edges_directed` iterates newest-edge-first, so
-            // overwriting would quietly hand the port to the *latest* edge.
-            if inputs[input_ix].is_none() {
-                if let Some(src) = outputs.get(&e.source()).and_then(|o| o.get(output_ix)) {
-                    inputs[input_ix] = Some(src.clone());
-                }
-            }
-        }
-        // Unconnected inputs default to mono silence.
-        let inputs: Vec<Signal> = inputs
-            .into_iter()
-            .map(|i| i.unwrap_or_else(|| Signal::silent(1)))
+        let inputs: Vec<Signal> = sources[&n]
+            .iter()
+            .map(|src| {
+                src.and_then(|(s, port)| outputs.get(&s).and_then(|o| o.get(port)).cloned())
+                    // Unconnected inputs default to mono silence.
+                    .unwrap_or_else(|| Signal::silent(1))
+            })
             .collect();
         let outs = dsp.ugens(&[n.index()], &inputs, &mut builder);
         debug_assert_eq!(
@@ -173,6 +162,413 @@ where
         monitors,
         gains,
     })
+}
+
+/// Every dsp sink of `graph`: an audio output (`~out`) or a monitor (`~scopeout`).
+fn dsp_sinks<N: ToNodeDsp>(graph: &Graph<N>) -> Vec<NodeIx> {
+    graph
+        .node_indices()
+        .filter(|&n| {
+            graph[n]
+                .to_node_dsp()
+                .is_some_and(|d| d.is_output() || d.is_monitor())
+        })
+        .collect()
+}
+
+/// The dsp-reachable set: dsp nodes that feed a sink transitively through *dsp*
+/// inputs only. `pull_eval_order` masks only the seed's inputs - interior nodes
+/// are traversed over ALL incoming edges - so derivation intersects its merged
+/// orders with this set to keep control-input feeds out of the defs.
+fn dsp_reachable<N: ToNodeDsp>(graph: &Graph<N>, sinks: &[NodeIx]) -> HashSet<NodeIx> {
+    let mut reachable: HashSet<NodeIx> = sinks.iter().copied().collect();
+    let mut stack: Vec<NodeIx> = sinks.to_vec();
+    while let Some(n) = stack.pop() {
+        let n_dsp_in = graph[n].to_node_dsp().map_or(0, |d| d.n_dsp_inputs());
+        for e in graph.edges_directed(n, Direction::Incoming) {
+            if (e.weight().input.0 as usize) < n_dsp_in
+                && graph[e.source()].to_node_dsp().is_some()
+                && reachable.insert(e.source())
+            {
+                stack.push(e.source());
+            }
+        }
+    }
+    reachable
+}
+
+/// The winning `(source node, output port)` per dsp input of every reachable
+/// node: only reachable dsp sources contribute, and the *first-added* edge to
+/// an input wins (no summing of multiple sources yet) - `edges_directed`
+/// iterates newest-edge-first, so the reversed pass makes the oldest edge
+/// authoritative.
+#[allow(clippy::type_complexity)]
+fn resolved_sources<N: ToNodeDsp>(
+    graph: &Graph<N>,
+    reachable: &HashSet<NodeIx>,
+) -> HashMap<NodeIx, Vec<Option<(NodeIx, usize)>>> {
+    reachable
+        .iter()
+        .map(|&n| {
+            let n_dsp_in = graph[n].to_node_dsp().map_or(0, |d| d.n_dsp_inputs());
+            let mut inputs: Vec<Option<(NodeIx, usize)>> = vec![None; n_dsp_in];
+            let edges: Vec<_> = graph.edges_directed(n, Direction::Incoming).collect();
+            for e in edges.into_iter().rev() {
+                let input_ix = e.weight().input.0 as usize;
+                let s = e.source();
+                if input_ix < n_dsp_in
+                    && inputs[input_ix].is_none()
+                    && reachable.contains(&s)
+                    && graph[s].to_node_dsp().is_some()
+                {
+                    inputs[input_ix] = Some((s, e.weight().output.0 as usize));
+                }
+            }
+            (n, inputs)
+        })
+        .collect()
+}
+
+/// Merge each sink's dsp-only pull-eval order into one topological order over
+/// the nodes selected by `keep`, first occurrence wins (a filtered subsequence
+/// of a topological order remains topological for the kept subgraph).
+fn merged_pull_order<N: ToNodeDsp>(
+    graph: &Graph<N>,
+    seeds: &[NodeIx],
+    keep: impl Fn(NodeIx) -> bool,
+) -> Vec<NodeIx> {
+    let mut order: Vec<NodeIx> = Vec::new();
+    let mut seen: HashSet<NodeIx> = HashSet::new();
+    for &seed in seeds {
+        let n_dsp_in = graph[seed].to_node_dsp().map_or(0, |d| d.n_dsp_inputs());
+        let conns = Conns::connected(n_dsp_in).expect("n_dsp_inputs within Conns::MAX");
+        for n in pull_eval_order(graph, seed, conns) {
+            if keep(n) && seen.insert(n) {
+                order.push(n);
+            }
+        }
+    }
+    order
+}
+
+/// Derive one [`SynthDef`] per boundary-cut *region* of the graph's DSP
+/// subgraph, in region-DAG topological order (bus writers before readers).
+///
+/// Where [`derive_synthdef`] fuses the whole DSP subgraph into a single def
+/// (boundary nodes lower as plain wires), this splits it at every cutting
+/// `~bus` ([`is_boundary`](crate::NodeDsp::is_boundary)): regions are the
+/// connected components of the dsp-reachable subgraph over non-boundary edges,
+/// and a boundary between two regions lowers to an `Out` to a private bus in
+/// the writer's def and an `In` in each reader's - both with placeholder bus
+/// inputs the driver patches post-sig (see [`BusBinding`]). The point: each
+/// region carries its own [`structural_sig`], so an edit respawns only its own
+/// region's synth and every other region's unit state survives untouched.
+///
+/// Details: a boundary whose two sides share a region lowers to a plain wire; a
+/// boundary fed directly by another boundary *aliases* it (no relay def, no
+/// extra latency); an unconnected boundary reads as mono silence; a region is
+/// derived only if it feeds a sink transitively. Bus writes are lifted to audio
+/// rate ([`DspBuilder::ensure_audio`]) and fade-gained (the crossfade lever,
+/// [`DspBuilder::push_fade_gain`]). Widths flow forward across boundaries -
+/// hence the topological derivation order. Defs are named
+/// `<name_prefix>-<region key>`.
+pub fn derive_synthdefs<N>(
+    graph: &Graph<N>,
+    out_channels: usize,
+    name_prefix: &str,
+) -> Result<Vec<RegionDerived>, DeriveError>
+where
+    N: ToNodeDsp,
+{
+    let sinks = dsp_sinks(graph);
+    if sinks.is_empty() {
+        return Err(DeriveError::NoSink);
+    }
+    let reachable = dsp_reachable(graph, &sinks);
+    let sources = resolved_sources(graph, &reachable);
+    let is_boundary =
+        |n: NodeIx| -> bool { graph[n].to_node_dsp().is_some_and(|d| d.is_boundary()) };
+
+    // Regions: connected components of the reachable NON-boundary nodes over
+    // their winning dsp edges (edges into or out of a boundary never join).
+    let mut comp: HashMap<NodeIx, usize> = HashMap::new();
+    let mut n_comps = 0;
+    for start in graph.node_indices() {
+        if !reachable.contains(&start) || is_boundary(start) || comp.contains_key(&start) {
+            continue;
+        }
+        let id = n_comps;
+        n_comps += 1;
+        comp.insert(start, id);
+        let mut stack = vec![start];
+        while let Some(n) = stack.pop() {
+            // Upstream: this node's winning sources.
+            for &(s, _) in sources[&n].iter().flatten() {
+                if !is_boundary(s) && comp.insert(s, id).is_none() {
+                    stack.push(s);
+                }
+            }
+            // Downstream: reachable non-boundary consumers whose winning source
+            // for that input is this node.
+            for e in graph.edges_directed(n, Direction::Outgoing) {
+                let t = e.target();
+                if !reachable.contains(&t) || is_boundary(t) || comp.contains_key(&t) {
+                    continue;
+                }
+                let input_ix = e.weight().input.0 as usize;
+                if sources[&t].get(input_ix).copied().flatten().map(|(s, _)| s) == Some(n) {
+                    comp.insert(t, id);
+                    stack.push(t);
+                }
+            }
+        }
+    }
+
+    // Each boundary's *effective* bus (consecutive boundaries alias) and that
+    // bus's winning source. A pure boundary cycle degrades to an unsourced bus.
+    let boundaries: Vec<NodeIx> = graph
+        .node_indices()
+        .filter(|&n| reachable.contains(&n) && is_boundary(n))
+        .collect();
+    let effective = |b: NodeIx| -> NodeIx {
+        let mut cur = b;
+        let mut visited = HashSet::new();
+        while let Some(&(s, _)) = sources[&cur].first().and_then(|o| o.as_ref()) {
+            if !is_boundary(s) || !visited.insert(cur) {
+                break;
+            }
+            cur = s;
+        }
+        cur
+    };
+    // The effective bus's source, unless it is itself a boundary (a cycle).
+    let bus_source = |b: NodeIx| -> Option<(NodeIx, usize)> {
+        sources[&effective(b)]
+            .first()
+            .copied()
+            .flatten()
+            .filter(|&(s, _)| !is_boundary(s))
+    };
+
+    // Cross-region reads: (reader component, effective bus), from every winning
+    // boundary-sourced input whose bus originates in another component.
+    let mut cross_reads: HashSet<(usize, NodeIx)> = HashSet::new();
+    for (&n, srcs) in &sources {
+        if is_boundary(n) {
+            continue;
+        }
+        for &(s, _) in srcs.iter().flatten() {
+            if !is_boundary(s) {
+                continue;
+            }
+            if let Some((src, _)) = bus_source(s) {
+                if comp[&src] != comp[&n] {
+                    cross_reads.insert((comp[&n], effective(s)));
+                }
+            }
+        }
+    }
+
+    // Needed components: those holding sinks, plus (transitively) the writers
+    // of every bus a needed component reads.
+    let mut needed: HashSet<usize> = sinks.iter().map(|s| comp[s]).collect();
+    loop {
+        let mut grew = false;
+        for &(reader, bus) in &cross_reads {
+            if needed.contains(&reader) {
+                if let Some((src, _)) = bus_source(bus) {
+                    grew |= needed.insert(comp[&src]);
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    // Region DAG (writer -> reader) over needed components; Kahn's algorithm
+    // yields the derivation (and node-tree) order, or reports a bus cycle.
+    let mut deps: HashMap<usize, HashSet<usize>> = HashMap::new(); // reader -> writers
+    for &(reader, bus) in &cross_reads {
+        if !needed.contains(&reader) {
+            continue;
+        }
+        if let Some((src, _)) = bus_source(bus) {
+            let writer = comp[&src];
+            if writer != reader {
+                deps.entry(reader).or_default().insert(writer);
+            }
+        }
+    }
+    let mut topo: Vec<usize> = Vec::with_capacity(needed.len());
+    let mut placed: HashSet<usize> = HashSet::new();
+    // Component ids were assigned in node-index order, so iterating them in
+    // order keeps the result deterministic.
+    while topo.len() < needed.len() {
+        let next = (0..n_comps).find(|c| {
+            needed.contains(c)
+                && !placed.contains(c)
+                && deps
+                    .get(c)
+                    .is_none_or(|ws| ws.iter().all(|w| placed.contains(w)))
+        });
+        match next {
+            Some(c) => {
+                placed.insert(c);
+                topo.push(c);
+            }
+            None => return Err(DeriveError::BusCycle),
+        }
+    }
+
+    // Derive each region in topo order; widths flow forward via `bus_width`.
+    let mut regions = Vec::with_capacity(topo.len());
+    let mut bus_width: HashMap<NodeIx, usize> = HashMap::new();
+    for c in topo {
+        // The region's roots: its sinks, plus the buses it writes (an effective
+        // bus sourced here and read from another needed component).
+        let region_sinks: Vec<NodeIx> = sinks.iter().copied().filter(|s| comp[s] == c).collect();
+        let writes: Vec<NodeIx> = boundaries
+            .iter()
+            .copied()
+            .filter(|&b| effective(b) == b)
+            .filter(|&b| bus_source(b).is_some_and(|(s, _)| comp[&s] == c))
+            .filter(|&b| {
+                cross_reads
+                    .iter()
+                    .any(|&(r, bus)| bus == b && needed.contains(&r))
+            })
+            .collect();
+
+        let seeds: Vec<NodeIx> = region_sinks.iter().chain(writes.iter()).copied().collect();
+        let order = merged_pull_order(graph, &seeds, |n| comp.get(&n) == Some(&c));
+
+        let mut builder = DspBuilder::new(out_channels);
+        let mut outputs: HashMap<NodeIx, Vec<Signal>> = HashMap::new();
+        let mut bus_reads: Vec<BusBinding> = Vec::new();
+        // One `In` per bus read, shared by every consumer in the region.
+        let mut in_signals: HashMap<NodeIx, Signal> = HashMap::new();
+
+        for n in order {
+            let Some(dsp) = graph[n].to_node_dsp() else {
+                continue;
+            };
+            let inputs: Vec<Signal> = sources[&n]
+                .iter()
+                .map(|src| match src {
+                    // A boundary source: a wire within the region, an `In` from
+                    // another region's bus, or silence when unsourced.
+                    Some((s, _)) if is_boundary(*s) => match bus_source(*s) {
+                        Some((src, port)) if comp[&src] == c => outputs
+                            .get(&src)
+                            .and_then(|o| o.get(port))
+                            .cloned()
+                            .unwrap_or_else(|| Signal::silent(1)),
+                        Some(_) => {
+                            let bus = effective(*s);
+                            in_signals
+                                .entry(bus)
+                                .or_insert_with(|| {
+                                    let channels = bus_width.get(&bus).copied().unwrap_or(1);
+                                    let unit = builder.push_unit(UnitSpec::new(
+                                        "In",
+                                        Rate::Audio,
+                                        vec![InputRef::Constant(0.0)],
+                                        channels,
+                                    ));
+                                    bus_reads.push(BusBinding {
+                                        node_path: vec![bus.index()],
+                                        channels,
+                                        unit: unit as usize,
+                                    });
+                                    (0..channels as u32)
+                                        .map(|output| InputRef::Unit { unit, output })
+                                        .collect()
+                                })
+                                .clone()
+                        }
+                        None => Signal::silent(1),
+                    },
+                    Some((s, port)) => outputs
+                        .get(s)
+                        .and_then(|o| o.get(*port))
+                        .cloned()
+                        .unwrap_or_else(|| Signal::silent(1)),
+                    None => Signal::silent(1),
+                })
+                .collect();
+            let outs = dsp.ugens(&[n.index()], &inputs, &mut builder);
+            debug_assert_eq!(
+                outs.len(),
+                dsp.n_dsp_outputs(),
+                "a node must return one Signal per dsp output port",
+            );
+            outputs.insert(n, outs);
+        }
+
+        // Emit the region's bus writes: lift each channel to audio, apply the
+        // driver's fade gain, and write to a placeholder bus.
+        let mut bus_writes = Vec::with_capacity(writes.len());
+        for b in writes {
+            let (src, port) = bus_source(b).expect("writes are sourced");
+            let sig = outputs
+                .get(&src)
+                .and_then(|o| o.get(port))
+                .cloned()
+                .unwrap_or_else(|| Signal::silent(1));
+            let fade = builder.push_fade_gain(&[b.index()]);
+            let mut out_inputs = vec![InputRef::Constant(0.0)];
+            for ch in sig.channels() {
+                let ch = builder.ensure_audio(ch);
+                let mul = builder.push_unit(UnitSpec {
+                    name: "BinaryOpUGen".to_string(),
+                    rate: Rate::Audio,
+                    inputs: vec![ch, InputRef::Param(fade)],
+                    num_outputs: 1,
+                    special_index: 2,
+                });
+                out_inputs.push(InputRef::Unit {
+                    unit: mul,
+                    output: 0,
+                });
+            }
+            let unit = builder.push_unit(UnitSpec::new("Out", Rate::Audio, out_inputs, 0));
+            bus_writes.push(BusBinding {
+                node_path: vec![b.index()],
+                channels: sig.width(),
+                unit: unit as usize,
+            });
+            bus_width.insert(b, sig.width());
+        }
+
+        // A stable region identity: its sink and boundary roles + node paths.
+        let mut h = DefaultHasher::new();
+        for s in &region_sinks {
+            (0u8, s.index()).hash(&mut h);
+        }
+        for w in &bus_writes {
+            (1u8, &w.node_path).hash(&mut h);
+        }
+        for r in &bus_reads {
+            (2u8, &r.node_path).hash(&mut h);
+        }
+        let key = h.finish();
+
+        let name = format!("{name_prefix}-{key:016x}");
+        let (def, params, monitors, gains) = builder.finish(name);
+        regions.push(RegionDerived {
+            key,
+            derived: Derived {
+                def,
+                params,
+                monitors,
+                gains,
+            },
+            bus_writes,
+            bus_reads,
+        });
+    }
+    Ok(regions)
 }
 
 /// A hash of a synthdef's *structure* - everything except parameter values.

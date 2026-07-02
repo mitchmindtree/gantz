@@ -26,6 +26,7 @@ const KEYWORD_TAG: &[(&str, &str)] = &[
     ("~scopeout", "ScopeOut"),
     ("~pack", "Pack"),
     ("~unpack", "Unpack"),
+    ("~bus", "Bus"),
 ];
 
 /// The typetag tag for a sugar keyword.
@@ -53,6 +54,7 @@ impl Sugar for PlyphonSugar {
             "~scopeout" => size_spec(args)?,
             "~pack" => count_spec("Pack", args)?,
             "~unpack" => count_spec("Unpack", args)?,
+            "~bus" => node_datum("Bus", vec![]),
             _ => return Ok(None),
         };
         Ok(Some(datum))

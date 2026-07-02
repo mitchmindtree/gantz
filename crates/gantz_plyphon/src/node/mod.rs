@@ -5,6 +5,7 @@
 //! [`ToNodeDsp`](crate::ToNodeDsp) (discovery), and [`gantz_egui::NodeUi`] (the
 //! GUI). Their `~` keyword-name prefix marks them as dsp nodes.
 
+pub use bus::Bus;
 pub use lag::Lag;
 pub use out::Out;
 pub use pack::Pack;
@@ -12,6 +13,7 @@ pub use scope_out::ScopeOut;
 pub use sin_osc::SinOsc;
 pub use unpack::Unpack;
 
+pub mod bus;
 pub mod lag;
 pub mod out;
 pub mod pack;

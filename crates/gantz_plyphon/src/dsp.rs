@@ -148,6 +148,16 @@ pub trait NodeDsp {
         false
     }
 
+    /// Whether this node is a synthdef *boundary* (e.g. `~bus`): the multi-def
+    /// compiler ([`derive_synthdefs`](crate::derive_synthdefs)) cuts the graph
+    /// into per-region synthdefs here, lowering the boundary to a private-bus
+    /// `Out`/`In` pair. Boundary nodes must have exactly one dsp input and one
+    /// dsp output; their [`ugens`](Self::ugens) is only invoked when both sides
+    /// land in the same region (no cut) and should pass the signal through.
+    fn is_boundary(&self) -> bool {
+        false
+    }
+
     /// Emit this node's UGens into `b`, given the resolved [`Signal`] for each
     /// DSP input port, returning one [`Signal`] per DSP output port (so
     /// downstream nodes can reference them).

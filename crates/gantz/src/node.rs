@@ -38,6 +38,7 @@ impl Node for gantz_plyphon::Lag {}
 impl Node for gantz_plyphon::ScopeOut {}
 impl Node for gantz_plyphon::Pack {}
 impl Node for gantz_plyphon::Unpack {}
+impl Node for gantz_plyphon::Bus {}
 
 // `Box<dyn Node>`'s `Serialize`/`Deserialize`: compiled dispatch over the
 // full node set, keyed by each type's `gantz_nodetag::NodeTag`. Adding a
@@ -68,6 +69,7 @@ gantz_format::impl_node_set_serde! {
         gantz_plyphon::ScopeOut,
         gantz_plyphon::Pack,
         gantz_plyphon::Unpack,
+        gantz_plyphon::Bus,
     }
 }
 
@@ -126,6 +128,9 @@ impl gantz_plyphon::ToNodeDsp for Box<dyn Node> {
             return Some(n);
         }
         if let Some(n) = any.downcast_ref::<gantz_plyphon::Unpack>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Bus>() {
             return Some(n);
         }
         None
@@ -293,6 +298,7 @@ mod tests {
             node_datum("Pack", vec![("count", Datum::U64(4))]),
             node_datum("Unpack", vec![]),
             node_datum("Unpack", vec![("count", Datum::U64(4))]),
+            node_datum("Bus", vec![]),
         ];
         for value in cases {
             let node: Box<dyn Node> = from_datum(value.clone())
@@ -394,7 +400,7 @@ mod tests {
         use gantz_format::{NodeSugar, Sugar, to_datum};
 
         let sugar = <Box<dyn Node> as NodeSugar>::sugar();
-        let cases: [(Box<dyn Node>, &str, &str); 6] = [
+        let cases: [(Box<dyn Node>, &str, &str); 7] = [
             (
                 Box::new(gantz_plyphon::SinOsc::default()),
                 "SinOsc",
@@ -413,6 +419,7 @@ mod tests {
                 "Unpack",
                 "~unpack",
             ),
+            (Box::new(gantz_plyphon::Bus::default()), "Bus", "~bus"),
         ];
         for (node, tag, expected) in cases {
             let datum = to_datum(&node).expect("to_datum");
@@ -436,17 +443,21 @@ mod tests {
         use gantz_plyphon::derive_synthdef;
         type G = Graph<Box<dyn Node>>;
 
-        // Two sines packed into one 2-wide edge, unpacked, channel 1 to the out -
-        // covering the whole dsp node set including the routing pair.
+        // Two sines packed into one 2-wide edge, across a `~bus`, unpacked,
+        // channel 1 to the out - covering the whole dsp node set including the
+        // routing pair and the boundary (which the single-def `derive_synthdef`
+        // fuses to a plain wire).
         let mut g: G = Graph::default();
         let s0 = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
         let s1 = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
         let pk = g.add_node(Box::new(gantz_plyphon::Pack::default()) as Box<dyn Node>);
+        let bus = g.add_node(Box::new(gantz_plyphon::Bus::default()) as Box<dyn Node>);
         let up = g.add_node(Box::new(gantz_plyphon::Unpack::default()) as Box<dyn Node>);
         let o = g.add_node(Box::new(gantz_plyphon::Out::default()) as Box<dyn Node>);
         g.add_edge(s0, pk, Edge::new(0.into(), 0.into()));
         g.add_edge(s1, pk, Edge::new(0.into(), 1.into()));
-        g.add_edge(pk, up, Edge::new(0.into(), 0.into()));
+        g.add_edge(pk, bus, Edge::new(0.into(), 0.into()));
+        g.add_edge(bus, up, Edge::new(0.into(), 0.into()));
         g.add_edge(up, o, Edge::new(1.into(), 0.into()));
 
         // Steel-inert: compiles through the control-rate VM (no entrypoints, no

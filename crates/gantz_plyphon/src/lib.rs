@@ -16,13 +16,16 @@
 //! UGens into one gantz node - or emits none, like the `~pack`/`~unpack`
 //! channel-routing pair - gets its own descriptive name instead.
 
-pub use backend::{Backend, BackendError, Embedded};
-pub use compile::{DeriveError, Derived, derive_synthdef, structural_sig};
+pub use backend::{AddAction, Backend, BackendError, Embedded, ROOT_GROUP_ID};
+pub use compile::{
+    BusBinding, DeriveError, Derived, RegionDerived, derive_synthdef, derive_synthdefs,
+    structural_sig,
+};
 pub use dsp::{
     DspBuilder, FADE_LAG, GainRef, NodeDsp, NodeRate, ParamBinding, ScopeOutBinding, Signal,
     ToNodeDsp,
 };
-pub use node::{Lag, Out, Pack, ScopeOut, SinOsc, Unpack};
+pub use node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Unpack};
 pub use sugar::PlyphonSugar;
 
 pub mod backend;

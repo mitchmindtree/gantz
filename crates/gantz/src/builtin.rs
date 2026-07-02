@@ -153,6 +153,9 @@ fn primitives() -> Primitives {
     register_primitive(&mut p, "~unpack", || {
         Box::new(gantz_plyphon::Unpack::default()) as Box<_>
     });
+    register_primitive(&mut p, "~bus", || {
+        Box::new(gantz_plyphon::Bus::default()) as Box<_>
+    });
     p
 }
 

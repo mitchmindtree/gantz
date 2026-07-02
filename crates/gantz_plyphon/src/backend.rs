@@ -5,7 +5,9 @@
 //! OSC for a networked scsynth/plyphon - the compiler and nodes are unaffected.
 
 use plyphon::synthdef::SynthDef;
-use plyphon::{AddAction, CommandTime, Controller, ROOT_GROUP_ID};
+use plyphon::{CommandTime, Controller};
+
+pub use plyphon::{AddAction, ROOT_GROUP_ID};
 
 /// A sink for installing synthdefs and controlling synths, abstracting over an
 /// in-process engine ([`Embedded`]) or, in future, a networked one.
@@ -14,8 +16,16 @@ pub trait Backend {
     fn install_synthdef(&mut self, def: SynthDef) -> Result<(), BackendError>;
     /// Free a previously installed synth definition by name.
     fn free_synthdef(&mut self, name: &str) -> Result<(), BackendError>;
-    /// Spawn a synth from the named def, returning its node id.
-    fn spawn(&mut self, def_name: &str) -> Result<i32, BackendError>;
+    /// Spawn a synth from the named def at `action` relative to the node (or
+    /// group) `target`, returning its node id. Placement matters across
+    /// synthdef boundaries: a bus reader hears only writers computed *earlier*
+    /// in the node tree this block, so writers must precede their readers.
+    fn spawn(
+        &mut self,
+        def_name: &str,
+        target: i32,
+        action: AddAction,
+    ) -> Result<i32, BackendError>;
     /// Free a running synth (or group) by node id.
     fn free_node(&mut self, node: i32) -> Result<(), BackendError>;
     /// Set control parameter `param` (by index) of `node` to `value`, immediately.
@@ -76,9 +86,14 @@ impl Backend for Embedded<'_> {
             .map_err(|_| BackendError::QueueFull)
     }
 
-    fn spawn(&mut self, def_name: &str) -> Result<i32, BackendError> {
+    fn spawn(
+        &mut self,
+        def_name: &str,
+        target: i32,
+        action: AddAction,
+    ) -> Result<i32, BackendError> {
         self.controller
-            .synth_new(def_name, ROOT_GROUP_ID, AddAction::Tail)
+            .synth_new(def_name, target, action)
             .map_err(|e| BackendError::Spawn(format!("{e:?}")))
     }
 

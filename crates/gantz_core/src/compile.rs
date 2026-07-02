@@ -350,7 +350,7 @@ where
 ///
 /// A topological order (sources first) of the connected component ending at
 /// `node`, seeded from the inputs selected by `conns`. A thin wrapper over
-/// [`eval_order`] with no push sources and a single pull source, so a backend
+/// the internal `eval_order` with no push sources and a single pull source, so a backend
 /// that pulls from a node (e.g. deriving a synthdef from the DSP subgraph
 /// feeding an output node) orders nodes the same way Steel does.
 pub fn pull_eval_order<G>(

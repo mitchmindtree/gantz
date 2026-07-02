@@ -1,5 +1,6 @@
 //! The `%args` map: per-evaluation inputs the entrypoint *caller* provides to the
-//! VM, readable by any node's [`expr`](crate::Node::expr) via the [`ARGS`] global.
+//! VM, readable by any node's [`expr`](crate::Node::expr) via the
+//! [`ARGS`](crate::ARGS) global.
 //!
 //! It mirrors `%root-state` (see [`ROOT_STATE`](crate::ROOT_STATE)): a top-level
 //! global the caller sets before invoking an entry fn, rather than a value threaded

@@ -3,7 +3,7 @@
 //! address, and a combined value+lag inspector row.
 //!
 //! A DSP param's *value* lives in the node's VM state (path-keyed, like `number`),
-//! so editing it does not churn the graph's content address; its *lag* lives in
+//! so editing it does not churn the graph's content address. Its *lag* lives in
 //! the node weight, because lag is structural (it bakes a `LagControl` into the
 //! synthdef and so respawns on change).
 
@@ -14,14 +14,14 @@ use gantz_core::steel::{HashMap, SteelVal};
 use plyphon::synthdef::Param;
 
 /// The `value` key of a DSP param's structured VM state: the current scalar value
-/// (the inspector reads/writes it; the driver uses it as the immediate fallback).
+/// (the inspector reads/writes it. The driver uses it as the immediate fallback).
 const VALUE: &str = "value";
 /// The `pending` key: a list of `(time value)` updates a connected control input
 /// has queued since the last frame, drained and scheduled by the audio driver.
 const PENDING: &str = "pending";
 
 /// The plyphon control [`Param`] named `name` with the given default value and
-/// optional one-pole smoothing `lag` (seconds; `0.0` = a plain control).
+/// optional one-pole smoothing `lag` (seconds, `0.0` = a plain control).
 pub fn plyphon_param(name: impl Into<String>, default: f32, lag: f32) -> Param {
     if lag > 0.0 {
         Param::lag(name, default, lag)
@@ -38,7 +38,7 @@ pub fn plyphon_param(name: impl Into<String>, default: f32, lag: f32) -> Param {
 /// written to the param's current `value`. The audio driver drains `pending` each
 /// frame and *schedules* each `(time value)` ahead of the audio clock, so a
 /// `tick!`-driven chain animates the param sample-accurately rather than bunched at
-/// the frame boundary; `value` is the driver's immediate fallback for direct
+/// the frame boundary. `value` is the driver's immediate fallback for direct
 /// inspector edits. The expr always evaluates to `output`: the node's placeholder
 /// dsp output (`"state"` for a source like `~sinosc`, `"'()"` for a sink like
 /// `~out`). DSP nodes are otherwise Steel-inert.
@@ -87,7 +87,7 @@ pub fn cahash_lag(hasher: &mut gantz_ca::Hasher, lag: f32) {
 }
 
 /// One inspector row toggling a node's ugen rate (`ar`/`kr`). Returns `true` on
-/// change - structural (the emitted unit's rate changes → respawn), so the
+/// change - structural (the emitted unit's rate changes -> respawn), so the
 /// caller must `mark_changed`.
 pub fn rate_row(body: &mut egui_extras::TableBody, rate: &mut crate::dsp::NodeRate) -> bool {
     use crate::dsp::NodeRate;
@@ -111,7 +111,7 @@ pub fn rate_row(body: &mut egui_extras::TableBody, rate: &mut crate::dsp::NodeRa
                     rate,
                     NodeRate::Control,
                     "kr",
-                    "control rate: one value per block (cheaper, for modulators; \
+                    "control rate: one value per block (cheaper, for modulators - \
                      audio sinks lift it back to audio)",
                 );
             });
@@ -126,7 +126,7 @@ pub fn rate_row(body: &mut egui_extras::TableBody, rate: &mut crate::dsp::NodeRa
 /// frequency like `20000 Hz`.
 const VALUE_W: f32 = 80.0;
 
-/// One inspector row for a DSP param: the table key column is `name`; the value
+/// One inspector row for a DSP param: the table key column is `name`. The value
 /// column shows `value` (a caller-configured dialer, at a fixed width) with the
 /// smoothing `lag` to its right (e.g. `0.234   0.010 s lag`).
 ///
@@ -211,7 +211,7 @@ pub fn param_state_row(body: &mut egui_extras::TableBody, state: Option<&SteelVa
 
 /// The structured VM state of a DSP param: a hashmap `{ value, pending }`.
 ///
-/// `value` is the current scalar (seeded with `default`); `pending` starts as an
+/// `value` is the current scalar (seeded with `default`). `pending` starts as an
 /// empty list of `(time value)` updates a control input will queue. Seed it from a
 /// node's `register` (mirrors `~sinosc`).
 pub fn param_state(default: f64) -> SteelVal {
@@ -282,7 +282,7 @@ pub fn drain_param(vm: &mut Engine, path: &[usize]) -> Option<(f64, Vec<(f64, f6
             .collect(),
         _ => Vec::new(),
     };
-    // The queue is built by prepending (latest first); return oldest-first.
+    // The queue is built by prepending (latest first). Return oldest-first.
     pending.reverse();
     if !pending.is_empty() {
         let cleared = map.update(sym(PENDING), empty_list());

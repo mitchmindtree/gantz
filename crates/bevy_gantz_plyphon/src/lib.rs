@@ -54,7 +54,7 @@ use bevy_gantz::{DspConfig, DspStatus, EntrypointSet, EvalEpoch, Registry, VmSet
 const OSC_UNITS_PER_SEC: f64 = 4_294_967_296.0;
 
 /// The minimum time a crossfade-retired synth keeps running before its deferred
-/// free (its fade gains ramp to zero over their own lags; a `LagControl` decays
+/// free (its fade gains ramp to zero over their own lags. A `LagControl` decays
 /// to 0.1% within its lag, so this floor comfortably covers
 /// [`gantz_plyphon::FADE_LAG`]). A longer gain lag extends the deadline to match.
 const FADE_GRACE: Duration = Duration::from_millis(100);
@@ -81,7 +81,7 @@ fn osc(secs: f64) -> u64 {
 /// Generic over `N`, the graph node type (must expose its DSP nodes via
 /// [`ToNodeDsp`]). Add it *after* [`bevy_gantz::GantzPlugin`].
 ///
-/// To use custom UGens, register them with [`with_units`](Self::with_units); a
+/// To use custom UGens, register them with [`with_units`](Self::with_units). A
 /// node's [`NodeDsp::ugens`](gantz_plyphon::NodeDsp::ugens) can then name them in a
 /// [`UnitSpec`](plyphon::UnitSpec).
 pub struct PlyphonPlugin<N> {
@@ -106,7 +106,7 @@ impl<N> PlyphonPlugin<N> {
 
     /// Register custom plyphon units into the embedded engine at startup, before
     /// any synth that names them is spawned. The callback gets the controller's
-    /// [`plyphon::UnitRegistry`]; call [`register`](plyphon::UnitRegistry::register)
+    /// [`plyphon::UnitRegistry`]. Call [`register`](plyphon::UnitRegistry::register)
     /// (or `register_demand`) once per unit. Chainable.
     ///
     /// ```ignore
@@ -129,10 +129,10 @@ where
 {
     fn build(&self, app: &mut App) {
         // The shared monotonic epoch (set by `GantzPlugin`, added before this) is
-        // the dsp clock's time base; the cpal callback anchors the engine clock
+        // the dsp clock's time base. The cpal callback anchors the engine clock
         // to it via `fill_at`, matching the firing times queued into `%args`.
         let epoch = *app.world().resource::<EvalEpoch>();
-        // DSP settings (the Settings → DSP tab) + the status it reports.
+        // DSP settings (the Settings -> DSP tab) + the status it reports.
         app.init_resource::<DspConfig>();
         let mut head_synths = HeadSynths::default();
         let status = match build_dsp_engine(epoch, &self.unit_registrars) {
@@ -175,7 +175,7 @@ struct DspEngine {
     /// boundaries.
     first_private_channel: usize,
     private_channels: usize,
-    /// The active output device's name (for the Settings → DSP status readout).
+    /// The active output device's name (for the Settings -> DSP status readout).
     device: String,
     /// The output sample rate (Hz).
     sample_rate: f64,
@@ -393,7 +393,7 @@ struct ParamSlot {
 }
 
 /// A `~scopeout`'s live scope stream: every sample of its dsp input arrives here (via
-/// plyphon `ScopeOut` → `cue_scope`) for the driver to append into the node's rings.
+/// plyphon `ScopeOut` -> `cue_scope`) for the driver to append into the node's rings.
 struct ScopeSlot {
     /// The `~scopeout` node's path in the graph (where its ring state lives).
     node_path: Vec<usize>,
@@ -417,7 +417,7 @@ struct ScopeSlot {
 /// - *Param sync* (every frame): drain each dsp param's queued `(time, value)`
 ///   control updates from VM state and *schedule* them on the running synth at
 ///   `time + SCHED_LEAD` via [`Backend::set_control_at`], so automation plays
-///   sample-accurately; a direct inspector edit (no queue) is applied immediately.
+///   sample-accurately. A direct inspector edit (no queue) is applied immediately.
 ///   Either way the synth is not respawned (preserving phase), and value/automation
 ///   edits no longer change the graph address.
 /// - *Scope sync* (every frame): drain each `~scopeout`'s scope stream and append its
@@ -468,7 +468,7 @@ fn drive_synths<N>(
             continue;
         };
 
-        // --- Structural sync: only when the committed graph changed. ---
+        // Structural sync: only when the committed graph changed.
         if state.heads.get(&entity).map(|h| h.graph) != Some(graph_ca) {
             structural_sync(
                 &mut dsp.controller,
@@ -481,9 +481,9 @@ fn drive_synths<N>(
             );
         }
 
-        // --- Param sync: drain each param's queued control updates and schedule
-        // them ahead of the dsp clock; direct (untimestamped) value edits apply
-        // immediately. ---
+        // Param sync: drain each param's queued control updates and schedule
+        // them ahead of the dsp clock. direct (untimestamped) value edits apply
+        // immediately.
         let (Some(head), Some(vm)) = (state.heads.get_mut(&entity), vms.get_mut(&entity)) else {
             continue;
         };
@@ -523,7 +523,7 @@ fn drive_synths<N>(
 
             // Scope sync: drain each `~scopeout`'s scope stream and append every streamed
             // sample into its per-channel ring state (the list-of-rings its control
-            // `expr` surfaces on a trigger push; `push_ring` deinterleaves and keeps
+            // `expr` surfaces on a trigger push. `push_ring` deinterleaves and keeps
             // the last `size` frames per channel).
             for scope in &mut synth.scopes {
                 let mut samples = Vec::new();
@@ -575,8 +575,8 @@ fn drive_synths<N>(
 /// Split the fade backlog: drains and returns the entries due for freeing - those
 /// past their deadline, plus the *oldest* entries of any head whose backlog
 /// exceeds [`MAX_FADING_PER_HEAD`] (entries are pushed in replacement order, so a
-/// structural-weight drag that respawns every frame retires its pile-up early;
-/// near-click-free, as their gains have already been decaying).
+/// structural-weight drag that respawns every frame retires its pile-up early.
+/// Near-click-free, as their gains have already been decaying).
 fn expire_fades(fading: &mut Vec<FadingSynth>, now: Instant) -> Vec<FadingSynth> {
     let mut backlog: HashMap<Entity, usize> = HashMap::new();
     for f in fading.iter() {
@@ -597,13 +597,13 @@ fn expire_fades(fading: &mut Vec<FadingSynth>, now: Instant) -> Vec<FadingSynth>
 
 /// Re-derive `entity`'s per-region synthdefs and reconcile them with the running
 /// synths: a region whose key + structural signature both match keeps its synth
-/// untouched (its unit state - oscillator phase, delay lines - survives exactly);
-/// a changed region is crossfade-replaced; a disappeared region fades out. Every
+/// untouched (its unit state - oscillator phase, delay lines - survives exactly).
+/// A changed region is crossfade-replaced. A disappeared region fades out. Every
 /// signature is computed on the *unpatched* def - `ScopeOut` bufnums, bus
 /// channels and fade defaults are all placeholders at that point - so a
 /// re-derive of the same graph never spuriously respawns.
 ///
-/// A replacement spawns *silent* (fade defaults patched to `0.0`; defaults seed
+/// A replacement spawns *silent* (fade defaults patched to `0.0`. Defaults seed
 /// both the control wire and the lag state) and ramps its fades to unity once
 /// up, while the old synth's fades ramp to zero ahead of a deferred free - the
 /// overlap is the crossfade (on a bus, `Out` sums the two ramps). Placement
@@ -653,7 +653,7 @@ fn structural_sync<N>(
         // per commit rather than every frame.
         Err(gantz_plyphon::DeriveError::BusCycle) => {
             log::error!(
-                "bevy_gantz_plyphon: `~bus` cycle between regions; keeping the previous synths"
+                "bevy_gantz_plyphon: `~bus` cycle between regions, keeping the previous synths"
             );
             match state.heads.get_mut(&entity) {
                 Some(head) => head.graph = graph_ca,
@@ -708,7 +708,7 @@ fn structural_sync<N>(
                 if p.sig == sig {
                     // Structure unchanged (e.g. a non-dsp edit, or a ring-size
                     // edit that is not in the def): keep the synth + its param
-                    // slots + its cued scope streams; refresh each tap's ring
+                    // slots + its cued scope streams. Refresh each tap's ring
                     // `size` in case a size edit changed it.
                     for m in &r.derived.monitors {
                         if let Some(slot) = p.scopes.iter_mut().find(|s| s.node_path == m.node_path)
@@ -738,7 +738,7 @@ fn structural_sync<N>(
     }
 
     // Each spawn's node-tree anchor: the first KEPT synth later in topo order
-    // (spawning `Before` it keeps writers ahead of readers; successive spawns
+    // (spawning `Before` it keeps writers ahead of readers. Successive spawns
     // before the same anchor preserve their relative order), else the tail.
     let anchors: Vec<Option<i32>> = (0..plans.len())
         .map(|i| {
@@ -859,7 +859,7 @@ fn spawn_region(
     match backend.spawn(&def_name, target, action) {
         Ok(node_id) => {
             // A gain with no param slot (no node state feeds it - every fade
-            // gain) would stay stuck at the patched 0.0 default; ramp it
+            // gain) would stay stuck at the patched 0.0 default. Ramp it
             // straight to unity instead.
             for g in &gains {
                 if !params.iter().any(|b| b.index == g.index) {

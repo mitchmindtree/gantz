@@ -86,7 +86,7 @@ pub struct Derived {
 /// their output groups accordingly (no `gantz_core` graph or edge involvement).
 ///
 /// A graph's dsp *sinks* are its `~out` outputs ([`is_output`](crate::NodeDsp::is_output))
-/// and its `~scopeout` monitors ([`is_monitor`](crate::NodeDsp::is_monitor)); a graph
+/// and its `~scopeout` monitors ([`is_monitor`](crate::NodeDsp::is_monitor)). A graph
 /// may have several of each (e.g. an output plus a couple of taps of interior
 /// signals). Every sink seeds a pull over its *dsp* inputs in gantz_core's
 /// pull-eval order ([`pull_eval_order`]) - the same order Steel uses - and the
@@ -264,9 +264,9 @@ fn merged_pull_order<N: ToNodeDsp>(
 /// region carries its own [`structural_sig`], so an edit respawns only its own
 /// region's synth and every other region's unit state survives untouched.
 ///
-/// Details: a boundary whose two sides share a region lowers to a plain wire; a
+/// A boundary whose two sides share a region lowers to a plain wire. A
 /// boundary fed directly by another boundary *aliases* it (no relay def, no
-/// extra latency); an unconnected boundary reads as mono silence; a region is
+/// extra latency). An unconnected boundary reads as mono silence. A region is
 /// derived only if it feeds a sink transitively. Bus writes are lifted to audio
 /// rate ([`DspBuilder::ensure_audio`]) and fade-gained (the crossfade lever,
 /// [`DspBuilder::push_fade_gain`]). Widths flow forward across boundaries -
@@ -386,7 +386,7 @@ where
         }
     }
 
-    // Region DAG (writer -> reader) over needed components; Kahn's algorithm
+    // Region DAG (writer -> reader) over needed components. Kahn's algorithm
     // yields the derivation (and node-tree) order, or reports a bus cycle.
     let mut deps: HashMap<usize, HashSet<usize>> = HashMap::new(); // reader -> writers
     for &(reader, bus) in &cross_reads {

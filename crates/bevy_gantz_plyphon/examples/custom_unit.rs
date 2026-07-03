@@ -5,14 +5,14 @@
 //! saw played by a custom `Saw` UGen wired into a `~saw -> ~out` graph. It shows the
 //! whole downstream path:
 //!
-//! 1. a custom plyphon [`Unit`] (`Saw`) + its [`UnitDef`] (`SawCtor`);
-//! 2. a custom gantz DSP node (`SawNode`) whose [`NodeDsp::ugens`] emits that unit;
+//! 1. a custom plyphon [`Unit`] (`Saw`) + its [`UnitDef`] (`SawCtor`).
+//! 2. a custom gantz DSP node (`SawNode`) whose [`NodeDsp::ugens`] emits that unit.
 //! 3. a tiny node type `enum N` (no GUI/typetag machinery - a `match`-forwarding
-//!    [`gantz_core::Node`]/[`CaHash`]/[`ToNodeDsp`] is all the runtime needs);
+//!    [`gantz_core::Node`]/[`CaHash`]/[`ToNodeDsp`] is all the runtime needs).
 //! 4. a headless bevy app that registers the unit via
 //!    [`PlyphonPlugin::with_units`], builds the graph, and plays it.
 //!
-//! `Saw`'s frequency is baked in for brevity; see `gantz_plyphon`'s `~sinosc` for the
+//! `Saw`'s frequency is baked in for brevity. See `gantz_plyphon`'s `~sinosc` for the
 //! settable-control-param pattern (a `push_param` + node VM state the driver reads).
 
 use bevy::app::ScheduleRunnerPlugin;
@@ -109,7 +109,7 @@ impl NodeDsp for SawNode {
     }
 
     fn ugens(&self, _path: &[usize], _inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
-        // Name our custom unit; freq is a baked constant (see ~sinosc for a param).
+        // Name our custom unit. Freq is a baked constant (see ~sinosc for a param).
         let unit = b.push_unit(UnitSpec::new(
             "Saw",
             Rate::Audio,
@@ -239,7 +239,7 @@ fn main() {
 }
 
 /// Build `~saw -> ~out`, commit it, and open it as a head. `drive_synths` derives a
-/// synthdef from the `~out` root and spawns it; the cpal stream then plays the saw.
+/// synthdef from the `~out` root and spawns it. The cpal stream then plays the saw.
 fn setup(mut registry: ResMut<Registry<N>>, mut cmds: Commands) {
     let mut g = Graph::<N>::default();
     let saw = g.add_node(N::Saw(SawNode { freq: 220.0 }));

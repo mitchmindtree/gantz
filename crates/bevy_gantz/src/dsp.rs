@@ -1,7 +1,7 @@
 //! DSP runtime configuration + status, shared between the DSP runtime
 //! (`bevy_gantz_plyphon`, which owns the engine) and the GUI (`bevy_gantz_egui`,
-//! which renders the Settings → DSP tab). They live here because those two
-//! crates do not depend on each other; `bevy_gantz` is their common dependency.
+//! which renders the Settings -> DSP tab). They live here because those two
+//! crates do not depend on each other. `bevy_gantz` is their common dependency.
 //!
 //! Both resources are inserted only when a DSP runtime is present, so the GUI
 //! reads them as `Option<Res<…>>` and simply omits the DSP tab otherwise.
@@ -9,7 +9,7 @@
 use bevy_ecs::prelude::Resource;
 use std::time::Duration;
 
-/// Editable DSP settings (the Settings → DSP tab). Runtime-only - not persisted,
+/// Editable DSP settings (the Settings -> DSP tab). Runtime-only - not persisted,
 /// so it resets to the defaults each session (like [`CompileConfig`](crate::CompileConfig)).
 #[derive(Clone, Debug, Resource)]
 pub struct DspConfig {

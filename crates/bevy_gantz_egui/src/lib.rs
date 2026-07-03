@@ -1726,7 +1726,7 @@ where
     );
     panel_ui.set_clip_rect(ctx.content_rect());
 
-    // The Settings → DSP panel: present only when a dsp runtime supplied both
+    // The Settings -> DSP panel: present only when a dsp runtime supplied both
     // its config and status resources (so the demo / a no-dsp app omits the tab).
     let dsp_panel = match (&dsp_config, &dsp_status) {
         (Some(cfg), Some(status)) => Some(gantz_egui::widget::DspPanel {
@@ -1869,7 +1869,7 @@ where
         change_validation.0 = enabled;
     }
 
-    // Apply Settings → DSP changes to the dsp config resource.
+    // Apply Settings -> DSP changes to the dsp config resource.
     if let Some(mut cfg) = dsp_config {
         if let Some(lead_ms) = response.dsp_sched_lead_ms {
             cfg.sched_lead = std::time::Duration::from_secs_f32(lead_ms / 1000.0);

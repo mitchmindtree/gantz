@@ -35,7 +35,7 @@ pub trait Backend {
     /// at the absolute OSC/NTP time `time_osc` on the engine's clock timeline.
     ///
     /// This is how timestamped control automation (e.g. a `tick!`-driven chain)
-    /// lands sample-accurately. The default applies it immediately; a backend with
+    /// lands sample-accurately. The default applies it immediately. A backend with
     /// a scheduling clock (like [`Embedded`]) overrides it.
     fn set_control_at(
         &mut self,
@@ -74,7 +74,7 @@ impl<'a> Embedded<'a> {
 impl Backend for Embedded<'_> {
     fn install_synthdef(&mut self, def: SynthDef) -> Result<(), BackendError> {
         // `add_synthdef` defers compilation to the first `spawn`, so it cannot
-        // fail here; a `BuildError` surfaces from `spawn` instead.
+        // fail here. A `BuildError` surfaces from `spawn` instead.
         self.controller.add_synthdef(def);
         Ok(())
     }
@@ -117,8 +117,8 @@ impl Backend for Embedded<'_> {
         time_osc: u64,
     ) -> Result<(), BackendError> {
         // Open a scheduling window for this one command, then restore immediate
-        // mode. `set_control` pushes to the RT ring tagged with the window's time;
-        // the World holds it until `time_osc` arrives, resolving it to a sample.
+        // mode. `set_control` pushes to the RT ring tagged with the window's time.
+        // The World holds it until `time_osc` arrives, resolving it to a sample.
         self.controller.begin_scheduled(CommandTime::At(time_osc));
         let res = self
             .controller

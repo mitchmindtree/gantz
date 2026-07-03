@@ -5,14 +5,14 @@
 //! control-rate Steel VM (`gantz_core`), and - for nodes implementing
 //! [`NodeDsp`] - the plyphon audio engine via [`derive_synthdef`]. DSP nodes are
 //! inert in the Steel world (their [`Node::expr`](gantz_core::Node::expr) is a
-//! placeholder); an audio driver (see `bevy_gantz_plyphon`) installs and runs
+//! placeholder). An audio driver (see `bevy_gantz_plyphon`) installs and runs
 //! the derived synthdefs through a [`Backend`].
 //!
 //! # Naming convention
 //!
 //! A DSP node's keyword and type mirror the underlying plyphon UGen it emits:
-//! `~sinosc`/[`SinOsc`] → `SinOsc`, `~scopeout`/[`ScopeOut`] → `ScopeOut`,
-//! `~out`/[`Out`] → `Out`, `~lag`/[`Lag`] → `Lag`. A node that composes *several*
+//! `~sinosc`/[`SinOsc`] -> `SinOsc`, `~scopeout`/[`ScopeOut`] -> `ScopeOut`,
+//! `~out`/[`Out`] -> `Out`, `~lag`/[`Lag`] -> `Lag`. A node that composes *several*
 //! UGens into one gantz node - or emits none, like the `~pack`/`~unpack`
 //! channel-routing pair - gets its own descriptive name instead.
 

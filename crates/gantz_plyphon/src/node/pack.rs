@@ -115,7 +115,7 @@ impl NodeUi for Pack {
         body: &mut egui_extras::TableBody,
     ) -> InspectorRowsResponse {
         let mut resp = InspectorRowsResponse::default();
-        // Input count (structural: it changes the node's sockets → respawn).
+        // Input count (structural: it changes the node's sockets -> respawn).
         let mut count = self.count;
         let dv = egui::DragValue::new(&mut count).range(1..=64).speed(1.0);
         if value_row(body, "count", dv) {

@@ -537,9 +537,9 @@ pub struct GantzResponse {
     pub compile_config: Option<gantz_core::compile::Config>,
     /// The change-tracking validation toggle was changed (its new value).
     pub validate_change_tracking: Option<bool>,
-    /// The scheduling lead (ms) was changed in the Settings → DSP subtab.
+    /// The scheduling lead (ms) was changed in the Settings -> DSP subtab.
     pub dsp_sched_lead_ms: Option<f32>,
-    /// The DSP enable/mute toggle was changed in the Settings → DSP subtab.
+    /// The DSP enable/mute toggle was changed in the Settings -> DSP subtab.
     pub dsp_enabled: Option<bool>,
     /// Heads whose graph had a CA-affecting edit this frame (from a node UI, an
     /// inspector edit, or a structural scene edit). Lets the application
@@ -693,7 +693,7 @@ impl<'a> Gantz<'a> {
         self
     }
 
-    /// Provide the dsp status + live settings so the Settings → DSP subtab
+    /// Provide the dsp status + live settings so the Settings -> DSP subtab
     /// appears. Changes are reported via [`GantzResponse::dsp_sched_lead_ms`] and
     /// [`GantzResponse::dsp_enabled`].
     pub fn dsp(mut self, panel: widget::DspPanel) -> Self {

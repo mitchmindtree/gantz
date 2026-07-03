@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// emitted [`UnitSpec`]'s rate, so a change respawns the synth.
 ///
 /// A consumer reading a control-rate wire at audio rate holds the value for the
-/// whole block; audio *sinks* (whose units read inputs strictly as audio, like
+/// whole block. Audio *sinks* (whose units read inputs strictly as audio, like
 /// `Out`) lift control wires explicitly via [`DspBuilder::ensure_audio`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeRate {
@@ -68,7 +68,7 @@ impl Signal {
         Signal(vec![input])
     }
 
-    /// `n` channels of silence (constant `0.0`); `n` is clamped to at least 1.
+    /// `n` channels of silence (constant `0.0`). `n` is clamped to at least 1.
     pub fn silent(n: usize) -> Self {
         Signal(vec![InputRef::Constant(0.0); n.max(1)])
     }
@@ -89,14 +89,14 @@ impl Signal {
     }
 
     /// Concatenate channel groups into one wide group (width = the sum of the
-    /// input widths); an empty iterator concatenates to mono silence.
+    /// input widths). An empty iterator concatenates to mono silence.
     pub fn concat(signals: impl IntoIterator<Item = Signal>) -> Self {
         signals.into_iter().flat_map(|s| s.0).collect()
     }
 }
 
 impl FromIterator<InputRef> for Signal {
-    /// Collect per-channel wires into a group; an empty iterator collects to
+    /// Collect per-channel wires into a group. An empty iterator collects to
     /// mono silence (a `Signal` is never empty).
     fn from_iter<I: IntoIterator<Item = InputRef>>(iter: I) -> Self {
         let channels: Vec<InputRef> = iter.into_iter().collect();
@@ -112,7 +112,7 @@ impl FromIterator<InputRef> for Signal {
 /// This is the audio/DSP analogue of [`gantz_core::Node`]: where `Node::expr`
 /// emits control-rate Steel, [`NodeDsp::ugens`] emits plyphon [`UnitSpec`]s into
 /// the synthdef under construction. A node is "DSP" simply by implementing this
-/// trait (and being discoverable via [`ToNodeDsp`]); the same gantz graph is
+/// trait (and being discoverable via [`ToNodeDsp`]). The same gantz graph is
 /// compiled by both backends independently.
 pub trait NodeDsp {
     /// The number of DSP (signal) input *ports* - the leading inputs that carry
@@ -152,7 +152,7 @@ pub trait NodeDsp {
     /// compiler ([`derive_synthdefs`](crate::derive_synthdefs)) cuts the graph
     /// into per-region synthdefs here, lowering the boundary to a private-bus
     /// `Out`/`In` pair. Boundary nodes must have exactly one dsp input and one
-    /// dsp output; their [`ugens`](Self::ugens) is only invoked when both sides
+    /// dsp output. Their [`ugens`](Self::ugens) is only invoked when both sides
     /// land in the same region (no cut) and should pass the signal through.
     fn is_boundary(&self) -> bool {
         false
@@ -163,9 +163,9 @@ pub trait NodeDsp {
     /// downstream nodes can reference them).
     ///
     /// `path` is the node's path within the graph (e.g. `[2]` for the node at
-    /// index 2 of a flat graph); use it to name any control [`Param`]s
+    /// index 2 of a flat graph). Use it to name any control [`Param`]s
     /// uniquely within the synthdef (see [`param_name`](crate::param::param_name)).
-    /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs); an unconnected
+    /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs). An unconnected
     /// input is [`Signal::silent`]`(1)` (mono silence). Params should broadcast
     /// across an input's channels (e.g. `~lag` emits one `Lag` unit per channel,
     /// all sharing the one `dur` param).
@@ -175,7 +175,7 @@ pub trait NodeDsp {
 /// A downcast hook so the synthdef compiler and the audio driver can find
 /// [`NodeDsp`] nodes inside an erased node type (e.g. `Box<dyn Node>`).
 ///
-/// Implemented per concrete DSP node type (returning `Some(self)`); the
+/// Implemented per concrete DSP node type (returning `Some(self)`). The
 /// application implements it for its boxed node enum by trying each known DSP
 /// node type - mirroring `ToTickBang` in `bevy_gantz_egui`. (A blanket
 /// `impl<T: NodeDsp>` is deliberately avoided so the application's
@@ -205,7 +205,7 @@ pub const FADE_LAG: f32 = 0.05;
 /// output - so the audio driver can fade the synth in and out across a
 /// crossfaded replacement (the respawn de-click). The driver patches the
 /// param's `default` from `1.0` to `0.0` before install (the synth spawns
-/// silent; [`structural_sig`](crate::structural_sig) excludes defaults) and
+/// silent. [`structural_sig`](crate::structural_sig) excludes defaults) and
 /// ramps it via the param's own `LagControl` - to `1.0` once the synth is up,
 /// to `0.0` ahead of a deferred free. Fade gains have NO [`ParamBinding`]: no
 /// node state feeds them, the driver alone drives them.
@@ -220,7 +220,7 @@ pub struct GainRef {
 /// Records a monitor (`~scopeout`) node's `ScopeOut`, so the audio driver can cue a live
 /// scope stream and route its samples into the right node's ring-buffer state,
 /// capped at `size`. The `ScopeOut`'s `bufnum` input is a placeholder in the derived
-/// def; the driver allocates a globally-unique cued index and patches the unit at
+/// def. The driver allocates a globally-unique cued index and patches the unit at
 /// `scope_unit` before installing the def.
 #[derive(Clone, Debug)]
 pub struct ScopeOutBinding {
@@ -285,7 +285,7 @@ impl DspBuilder {
     /// Declare a driver-controlled *fade gain* for the sink at `path`: a lagged
     /// param (default `1.0`, [`FADE_LAG`] ramp) that must scale the sink's whole
     /// output, recorded as a [`GainRef`] but with NO [`ParamBinding`] - node
-    /// state never feeds it; the driver alone drives it across a crossfaded
+    /// state never feeds it. the driver alone drives it across a crossfaded
     /// replacement. Returns the param's index for [`InputRef::Param`].
     pub fn push_fade_gain(&mut self, path: &[usize]) -> u32 {
         let index = self.params.len();

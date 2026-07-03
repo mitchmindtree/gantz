@@ -28,7 +28,6 @@
         gantz-unwrapped = prev.callPackage ./pkgs/gantz-unwrapped.nix { };
         gantz = final.callPackage ./pkgs/gantz.nix { };
         gantz-website = final.callPackage ./pkgs/gantz-website.nix { };
-        gantz-website-legacy = final.callPackage ./pkgs/gantz-website-legacy.nix { };
         serve-gantz-website = final.callPackage ./pkgs/serve-gantz-website.nix { };
         wasm-bindgen-cli = prev.callPackage ./pkgs/wasm-bindgen-cli.nix { };
         # Nightly wasm toolchain for the AudioWorklet website build: `-Z build-std`
@@ -46,7 +45,6 @@
       packages = perSystemPkgs (pkgs: {
         gantz = pkgs.gantz;
         gantz-website = pkgs.gantz-website;
-        gantz-website-legacy = pkgs.gantz-website-legacy;
         serve-gantz-website = pkgs.serve-gantz-website;
         wasm-bindgen-cli = pkgs.wasm-bindgen-cli;
         default = pkgs.gantz;

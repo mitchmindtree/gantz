@@ -10,7 +10,7 @@
 # transform set up per-thread state (without them it fails with "failed to find `__heap_base`").
 #
 # Shared by `pkgs/gantz-website.nix` and the `gantz-web` dev shell so the flags can't drift
-# between the Nix build and local `trunk serve --config Trunk.worklet.toml`.
+# between the Nix build and local `trunk serve`.
 {
   RUSTFLAGS = builtins.concatStringsSep " " [
     # SIMD128 vectorizes the per-sample DSP loops (broad browser support alongside threads).

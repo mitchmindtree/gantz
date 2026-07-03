@@ -33,9 +33,12 @@ steel-core.workspace = true
 web-time.workspace = true
 
 [features]
-# Opt into cpal's AudioWorklet backend on the web (see `bevy_gantz_plyphon`). Enabled by
-# the website's worklet build (`crates/gantz/web/worklet/index.html`), which supplies the
-# WASM-threads build flags it requires.
+# cpal's AudioWorklet backend on the web - audio on a dedicated Web Audio thread, off the
+# deprecated main-thread ScriptProcessor host. Enabled by default (the shipped website is the
+# AudioWorklet build); the cpal deps it pulls are wasm32-gated, so it is a no-op on native. Build
+# with `--no-default-features` to fall back to cpal's default ScriptProcessor host on the web. The
+# website build supplies the WASM-threads flags it needs (see `pkgs/gantz-website.nix`).
+default = ["audioworklet"]
 audioworklet = ["bevy_gantz_plyphon/audioworklet"]
 
 [dev-dependencies]

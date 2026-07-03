@@ -21,9 +21,9 @@ mod storage;
 mod window;
 
 fn main() {
-    // cpal's AudioWorklet backend (the website's worklet build) re-instantiates
-    // this wasm module on the audio thread, re-running `main` there; only boot
-    // the app on the main browser thread.
+    // cpal's AudioWorklet backend (the website build) re-instantiates this wasm
+    // module on the audio thread, re-running `main` there; only boot the app on
+    // the main browser thread.
     if bevy_gantz_plyphon::on_worklet_thread() {
         return;
     }

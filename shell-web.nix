@@ -1,5 +1,5 @@
-# Dev shell for the AudioWorklet web build (`trunk serve --config Trunk.worklet.toml`). It uses
-# the nightly toolchain and the WASM-threads build flags, so cargo here recompiles `std` with
+# Dev shell for the AudioWorklet web build (`trunk serve`). It uses the nightly toolchain and
+# the WASM-threads build flags, so cargo here recompiles `std` with
 # atomics via `-Z build-std`. Native `cargo` commands belong in the default `gantz-dev` shell
 # instead - the build-std flags here would make a host build fail.
 {

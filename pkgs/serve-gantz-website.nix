@@ -1,4 +1,4 @@
-# Short-hand for serving the default `gantz-website` (the AudioWorklet build) locally with the
+# Short-hand for serving the `gantz-website` (the AudioWorklet build) locally with the
 # COOP/COEP headers its SharedArrayBuffer needs. With real headers the bundled coi-serviceworker
 # is a no-op; it only matters on hosts that can't send headers (e.g. GitHub Pages).
 {

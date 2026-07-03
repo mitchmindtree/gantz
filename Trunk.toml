@@ -1,7 +1,20 @@
+# Trunk config for the gantz website (the AudioWorklet build; used by pkgs/gantz-website.nix and
+# local `trunk serve` from the `gantz-web` dev shell). A post-build hook prepends a
+# TextEncoder/TextDecoder polyfill to the wasm-bindgen glue - cpal loads that glue on the audio
+# worklet thread, whose scope (notably in Firefox) lacks them.
 [build]
 target = "crates/gantz/web/index.html"
 public_url = "./"
 filehash = false
+# The post-build hook below rewrites the wasm-bindgen glue (to add the TextEncoder/TextDecoder
+# polyfill) after Trunk computes subresource-integrity hashes, which would make the baked-in
+# `integrity` attributes mismatch and block loading. Disable SRI for this (same-origin) build.
+no_sri = true
+
+[[hooks]]
+stage = "post_build"
+command = "bash"
+command_arguments = ["crates/gantz/web/prepend-polyfill.sh"]
 
 [serve]
 port = 8088

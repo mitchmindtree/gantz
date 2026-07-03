@@ -1,9 +1,7 @@
-# The gantz website (the default site that ships): the app built for cpal's AudioWorklet
-# backend, which runs audio on a dedicated Web Audio thread via WASM threads
-# (SharedArrayBuffer). It needs a *nightly* toolchain (`-Z build-std` to recompile `std` with
-# atomics) and the shared-memory build flags from `wasm-threads-env.nix`. The legacy
-# ScriptProcessor build is kept as `gantz-website-legacy` (stable toolchain, no cross-origin
-# isolation needed) as a fallback.
+# The gantz website (the site that ships): the app built for cpal's AudioWorklet backend, which
+# runs audio on a dedicated Web Audio thread via WASM threads (SharedArrayBuffer). It needs a
+# *nightly* toolchain (`-Z build-std` to recompile `std` with atomics) and the shared-memory
+# build flags from `wasm-threads-env.nix`.
 #
 # This is a plain `mkDerivation` rather than `buildRustPackage` because `-Z build-std`
 # recompiles `std` from the rust-src component, so `std`'s own crates.io deps must be vendored
@@ -45,7 +43,7 @@ let
   stdDeps = rustPlatform.importCargoLock {
     lockFile = "${rustToolchainWasmNightly}/lib/rustlib/src/rust/library/Cargo.lock";
   };
-  cargoVendor = runCommand "gantz-worklet-vendor" { } ''
+  cargoVendor = runCommand "gantz-website-vendor" { } ''
     mkdir -p $out
     cp -r ${appDeps}/. $out/
     # Shared crate+version dirs are byte-identical, so skipping collisions is safe.
@@ -87,9 +85,10 @@ stdenv.mkDerivation (
 
     buildPhase = ''
       runHook preBuild
-      # The worklet page (crates/gantz/web/worklet/index.html) opts into cpal's `audioworklet`
-      # feature; the shared build flags (atomics + build-std) come from the derivation env below.
-      trunk build --config Trunk.worklet.toml --release --dist $out
+      # The page (crates/gantz/web/index.html) builds on cpal's AudioWorklet backend (the
+      # `audioworklet` feature, now the app's default); the shared build flags (atomics +
+      # build-std) come from the derivation env below.
+      trunk build --release --dist $out
       runHook postBuild
     '';
 

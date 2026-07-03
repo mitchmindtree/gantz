@@ -28,9 +28,11 @@ cpal = { workspace = true, features = ["wasm-bindgen"] }
 web-sys = { workspace = true, features = ["Window"] }
 
 [features]
-# Opt into cpal's AudioWorklet backend on the web. Only ever enable this for `wasm32`
-# builds compiled with WASM atomics + `-Z build-std` (see `pkgs/wasm-threads-env.nix`) -
-# cpal only exposes the host under `target_feature = "atomics"`.
+# cpal's AudioWorklet host on the web - a real audio thread, off the deprecated ScriptProcessor
+# host. The `gantz` app enables it by default; the cpal deps it pulls are wasm32-gated, so it is a
+# no-op on native. The website build compiles this with WASM atomics + `-Z build-std` for the
+# shared-memory worklet thread (cpal only exposes the host under `target_feature = "atomics"`; see
+# `pkgs/wasm-threads-env.nix`).
 audioworklet = ["cpal/audioworklet"]
 
 [dev-dependencies]

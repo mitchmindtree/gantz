@@ -1059,14 +1059,26 @@ where
             move |output: &mut [T], info: &cpal::OutputCallbackInfo| {
                 scratch.clear();
                 scratch.resize(output.len(), 0.0);
-                // Anchor the engine clock to this buffer's heard-time on the shared
-                // monotonic epoch (`now` + the callback-to-playback latency), so
-                // scheduled control updates resolve to the right sample even as the
-                // audio device clock drifts against the epoch.
-                let ts = info.timestamp();
-                let ahead = ts.playback.duration_since(ts.callback).as_secs_f64();
-                let buffer_time = osc(epoch.now_secs() + ahead);
-                world.fill_at(&mut scratch, channels, buffer_time);
+                // Natively, anchor the engine clock to this buffer's heard-time on the
+                // shared monotonic epoch (`now` + the callback-to-playback latency), so
+                // scheduled control updates resolve to the right sample even as the audio
+                // device clock drifts against the epoch. On the web there is no clock on
+                // cpal's AudioWorklet thread (no `performance`/`window` in an
+                // `AudioWorkletGlobalScope`), so the engine clock free-runs at the nominal
+                // rate instead - control times are then relative to engine start, matching
+                // plyphon's web audio path.
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let ts = info.timestamp();
+                    let ahead = ts.playback.duration_since(ts.callback).as_secs_f64();
+                    let buffer_time = osc(epoch.now_secs() + ahead);
+                    world.fill_at(&mut scratch, channels, buffer_time);
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (info, &epoch);
+                    world.fill(&mut scratch, channels);
+                }
                 for (o, s) in output.iter_mut().zip(scratch.iter()) {
                     *o = T::from_sample(*s);
                 }

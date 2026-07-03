@@ -492,7 +492,7 @@ pub fn drive_tick_bangs<N>(
             // Trigger one eval per elapsed tick, oldest first, each stamped with the
             // exact monotonic time it should fire: the i-th most-recent tick (i = 0
             // latest) fired at `now - acc - i*dur`. Carrying each tick's own time
-            // lets the audio driver schedule them sample-accurately, spread across
+            // lets the dsp driver schedule them sample-accurately, spread across
             // the interval, rather than bunched at the frame boundary.
             for i in (0..n).rev() {
                 let t = now - acc - i as f64 * *dur;

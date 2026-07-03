@@ -107,7 +107,7 @@ impl bevy_gantz_egui::node::ToTickBang for Box<dyn Node> {
     }
 }
 
-// Lets the synthdef compiler and audio driver find DSP nodes within an erased
+// Lets the synthdef compiler and dsp driver find DSP nodes within an erased
 // node by downcasting to each known `NodeDsp` type (mirrors `ToTickBang`).
 impl gantz_plyphon::ToNodeDsp for Box<dyn Node> {
     fn to_node_dsp(&self) -> Option<&dyn gantz_plyphon::NodeDsp> {
@@ -461,7 +461,7 @@ mod tests {
         g.add_edge(up, o, Edge::new(1.into(), 0.into()));
 
         // Steel-inert: compiles through the control-rate VM (no entrypoints, no
-        // error) even though it is a pure-audio graph.
+        // error) even though it is a pure-dsp graph.
         let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
         let config = gantz_core::compile::Config::default();
         gantz_core::vm::init(&get_node, &g, &[], &config)
@@ -508,7 +508,7 @@ mod tests {
 
     /// A control input on a DSP node: connecting a `number` to `~sinosc`'s freq
     /// socket and pushing the number writes the number's value into `~sinosc`'s VM
-    /// state (which the audio driver then applies via `set_control`). Guards the
+    /// state (which the dsp driver then applies via `set_control`). Guards the
     /// ctrl/dsp bridge end to end on the Steel side.
     #[test]
     fn control_input_writes_dsp_node_state() {
@@ -557,7 +557,7 @@ mod tests {
         );
 
         // The control value landed in ~sinosc's freq param: the current value is
-        // updated, and the timestamped update is queued for the audio driver.
+        // updated, and the timestamped update is queued for the dsp driver.
         let (value, pending) = gantz_plyphon::param::drain_param(&mut vm, &[sine.index()])
             .expect("~sinosc param state present");
         assert_eq!(value, 440.0, "control input must update the param value");
@@ -569,7 +569,7 @@ mod tests {
     }
 
     /// `~scopeout`'s control side: firing its trigger input outputs the per-channel
-    /// ring-buffer state (which the audio driver fills) as a list of rings on
+    /// ring-buffer state (which the dsp driver fills) as a list of rings on
     /// output 0, and the channel count - the number of rings - on output 1. Here
     /// the rings are seeded directly (standing in for the driver's `push_ring`), a
     /// `number` pushes the trigger, and the outputs land downstream in `inspect`
@@ -614,7 +614,7 @@ mod tests {
             }
         };
 
-        // Seed the tap with one ring of known samples (as the audio driver would),
+        // Seed the tap with one ring of known samples (as the dsp driver would),
         // then fire the number's push entrypoint: it triggers the tap, which fires
         // both outputs (branch 0) into the inspect nodes.
         let rings = SteelVal::ListV(vec![ring(&[1.0, 2.0, 3.0])].into_iter().collect());

@@ -13,7 +13,7 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use bevy_gantz::head;
 use bevy_gantz::reg::Registry;
 use bevy_gantz::vm::EvalEntryEvent;
-use bevy_gantz::{AudioConfig, AudioStatus, BuiltinNodes, CompileConfig, EvalEntryComplete};
+use bevy_gantz::{BuiltinNodes, CompileConfig, DspConfig, DspStatus, EvalEntryComplete};
 use bevy_log as log;
 use gantz_ca as ca;
 use gantz_core::Node;
@@ -1662,15 +1662,15 @@ pub fn update<N>(
         base_immutable,
         mut compile_config,
         mut change_validation,
-        audio_config,
-        audio_status,
+        dsp_config,
+        dsp_status,
     ): (
         Res<BaseNames>,
         Res<BaseImmutable>,
         ResMut<CompileConfig>,
         ResMut<bevy_gantz::ValidateCommitted>,
-        Option<ResMut<AudioConfig>>,
-        Option<Res<AudioStatus>>,
+        Option<ResMut<DspConfig>>,
+        Option<Res<DspStatus>>,
     ),
     mut demos: ResMut<Demos>,
     dispatchers: Res<ResponseDispatchers>,
@@ -1726,10 +1726,10 @@ where
     );
     panel_ui.set_clip_rect(ctx.content_rect());
 
-    // The Settings → Audio panel: present only when an audio runtime supplied both
-    // its config and status resources (so the demo / a no-audio app omits the tab).
-    let audio_panel = match (&audio_config, &audio_status) {
-        (Some(cfg), Some(status)) => Some(gantz_egui::widget::AudioPanel {
+    // The Settings → DSP panel: present only when a dsp runtime supplied both
+    // its config and status resources (so the demo / a no-dsp app omits the tab).
+    let dsp_panel = match (&dsp_config, &dsp_status) {
+        (Some(cfg), Some(status)) => Some(gantz_egui::widget::DspPanel {
             present: status.present,
             device: status.device.clone(),
             sample_rate: status.sample_rate,
@@ -1750,8 +1750,8 @@ where
                 .validate_change_tracking(current_validate_change_tracking)
                 .trace_capture(trace_capture.0.clone(), level)
                 .perf_captures(&mut perf_vm.0, &mut perf_gui.0);
-            if let Some(panel) = audio_panel {
-                widget = widget.audio(panel);
+            if let Some(panel) = dsp_panel {
+                widget = widget.dsp(panel);
             }
             widget.show(&mut *gui_state, focused_ix, &mut access, ui)
         })
@@ -1869,12 +1869,12 @@ where
         change_validation.0 = enabled;
     }
 
-    // Apply Settings → Audio changes to the audio config resource.
-    if let Some(mut cfg) = audio_config {
-        if let Some(lead_ms) = response.audio_sched_lead_ms {
+    // Apply Settings → DSP changes to the dsp config resource.
+    if let Some(mut cfg) = dsp_config {
+        if let Some(lead_ms) = response.dsp_sched_lead_ms {
             cfg.sched_lead = std::time::Duration::from_secs_f32(lead_ms / 1000.0);
         }
-        if let Some(enabled) = response.audio_enabled {
+        if let Some(enabled) = response.dsp_enabled {
             cfg.enabled = enabled;
         }
     }

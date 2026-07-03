@@ -1,7 +1,7 @@
 //! The "Settings" sidebar tab: globally-relevant configuration grouped into
 //! Global / Style / Keybinds / Panes subtabs.
 
-use super::AudioPanel;
+use super::DspPanel;
 use super::gantz::{LayoutConfig, SceneConfig, ViewToggles};
 use crate::Keymap;
 
@@ -13,7 +13,7 @@ enum SettingsTab {
     Style,
     Keybinds,
     Panes,
-    Audio,
+    Dsp,
 }
 
 /// Response from [`settings`].
@@ -27,10 +27,10 @@ pub struct SettingsResponse {
     pub reset_all_demos: bool,
     /// The "reset all" layout button was clicked (Panes subtab).
     pub reset_layout: bool,
-    /// The scheduling lead (ms) was changed (Audio subtab).
-    pub audio_sched_lead_ms: Option<f32>,
-    /// The audio enable/mute toggle was changed (Audio subtab).
-    pub audio_enabled: Option<bool>,
+    /// The scheduling lead (ms) was changed (DSP subtab).
+    pub dsp_sched_lead_ms: Option<f32>,
+    /// The DSP enable/mute toggle was changed (DSP subtab).
+    pub dsp_enabled: Option<bool>,
 }
 
 /// Render the Settings pane: a subtab selector over Global / Style / Keybinds /
@@ -42,7 +42,7 @@ pub fn settings(
     layout_config: &mut LayoutConfig,
     scene_config: &mut SceneConfig,
     keymap: &mut Keymap,
-    audio: Option<AudioPanel>,
+    dsp: Option<DspPanel>,
     ui: &mut egui::Ui,
 ) -> SettingsResponse {
     let id = ui.id().with("settings_subtab");
@@ -74,9 +74,9 @@ pub fn settings(
         tab_label(ui, SettingsTab::Style, "Style");
         tab_label(ui, SettingsTab::Keybinds, "Keybinds");
         tab_label(ui, SettingsTab::Panes, "Panes");
-        // The Audio tab only exists when the app supplies audio state (not the demo).
-        if audio.is_some() {
-            tab_label(ui, SettingsTab::Audio, "Audio");
+        // The DSP tab only exists when the app supplies dsp state (not the demo).
+        if dsp.is_some() {
+            tab_label(ui, SettingsTab::Dsp, "DSP");
         }
     });
     ui.separator();
@@ -129,14 +129,14 @@ pub fn settings(
             res.validate_change_tracking = g.validate_change_tracking;
             res.reset_all_demos = g.reset_all_demos;
         }
-        SettingsTab::Audio => {
-            if let Some(panel) = &audio {
+        SettingsTab::Dsp => {
+            if let Some(panel) = &dsp {
                 let a = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| super::audio_settings(panel, ui))
+                    .show(ui, |ui| super::dsp_settings(panel, ui))
                     .inner;
-                res.audio_sched_lead_ms = a.sched_lead_ms;
-                res.audio_enabled = a.enabled;
+                res.dsp_sched_lead_ms = a.sched_lead_ms;
+                res.dsp_enabled = a.enabled;
             }
         }
     }

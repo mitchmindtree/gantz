@@ -1,8 +1,8 @@
 //! A collection of useful widgets for gantz.
 use time::{OffsetDateTime, UtcOffset, format_description};
 
-pub use audio_settings::{AudioPanel, AudioSettingsResponse, audio_settings};
 pub use checkbox_enabled::CheckboxEnabled;
+pub use dsp_settings::{DspPanel, DspSettingsResponse, dsp_settings};
 pub use gantz::{
     AlignConfig, Gantz, GantzState, GridConfig, LayoutConfig, SceneConfig, SnapConfig, SnapMode,
     update_graph_pane_head,
@@ -27,8 +27,8 @@ pub use steel_view::SteelView;
 pub use style_config::style_config;
 pub use tab::{Tab, TabResponse};
 
-pub mod audio_settings;
 pub mod checkbox_enabled;
+pub mod dsp_settings;
 pub mod gantz;
 pub mod global_config;
 pub mod graph_config;

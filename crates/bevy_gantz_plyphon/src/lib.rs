@@ -1,6 +1,6 @@
-//! Bevy + plyphon audio runtime for gantz.
+//! Bevy + plyphon DSP runtime for gantz.
 //!
-//! [`PlyphonPlugin`] owns the audio engine: at startup it opens a cpal output
+//! [`PlyphonPlugin`] owns the dsp engine: at startup it opens a cpal output
 //! stream (its own audio thread, running [`plyphon::World::fill_at`] so the engine
 //! clock is anchored to the host) and keeps the [`plyphon::Controller`] +
 //! [`plyphon::Nrt`] handles. Each update, after [`bevy_gantz::VmSet`], it derives
@@ -12,7 +12,7 @@
 //!
 //! The bridge runs both ways: control values drive dsp params via `set_control`,
 //! and each `~scopeout` monitor's scope stream is drained here into the node's
-//! ring-buffer state (so the control world can scope an audio signal).
+//! ring-buffer state (so the control world can scope a dsp signal).
 //!
 //! Mixing across heads is free: every head's `~out` synth writes to output bus 0,
 //! and plyphon sums all synths on that bus.
@@ -48,7 +48,7 @@ pub use plyphon;
 type UnitRegistrar = Box<dyn Fn(&mut plyphon::UnitRegistry) + Send + Sync>;
 
 use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
-use bevy_gantz::{AudioConfig, AudioStatus, EntrypointSet, EvalEpoch, Registry, VmSet};
+use bevy_gantz::{DspConfig, DspStatus, EntrypointSet, EvalEpoch, Registry, VmSet};
 
 /// OSC/NTP fixed-point units per second (OSC time is 32.32 fixed point: 2^32).
 const OSC_UNITS_PER_SEC: f64 = 4_294_967_296.0;
@@ -76,7 +76,7 @@ fn osc(secs: f64) -> u64 {
     (secs * OSC_UNITS_PER_SEC) as u64
 }
 
-/// Plugin wiring plyphon audio into a gantz bevy app.
+/// Plugin wiring plyphon DSP into a gantz bevy app.
 ///
 /// Generic over `N`, the graph node type (must expose its DSP nodes via
 /// [`ToNodeDsp`]). Add it *after* [`bevy_gantz::GantzPlugin`].
@@ -129,15 +129,15 @@ where
 {
     fn build(&self, app: &mut App) {
         // The shared monotonic epoch (set by `GantzPlugin`, added before this) is
-        // the audio clock's time base; the cpal callback anchors the engine clock
+        // the dsp clock's time base; the cpal callback anchors the engine clock
         // to it via `fill_at`, matching the firing times queued into `%args`.
         let epoch = *app.world().resource::<EvalEpoch>();
-        // Audio settings (the Settings → Audio tab) + the status it reports.
-        app.init_resource::<AudioConfig>();
+        // DSP settings (the Settings → DSP tab) + the status it reports.
+        app.init_resource::<DspConfig>();
         let mut head_synths = HeadSynths::default();
-        let status = match build_audio_engine(epoch, &self.unit_registrars) {
+        let status = match build_dsp_engine(epoch, &self.unit_registrars) {
             Some(engine) => {
-                let status = AudioStatus {
+                let status = DspStatus {
                     present: true,
                     device: Some(engine.device.clone()),
                     sample_rate: engine.sample_rate,
@@ -149,10 +149,8 @@ where
                 status
             }
             None => {
-                log::warn!(
-                    "bevy_gantz_plyphon: no audio output device; `~out` nodes will be silent"
-                );
-                AudioStatus::default()
+                log::warn!("bevy_gantz_plyphon: no DSP output device; `~out` nodes will be silent");
+                DspStatus::default()
             }
         };
         app.insert_resource(status);
@@ -168,7 +166,7 @@ where
 /// The in-process plyphon engine: the control handle, the NRT cleanup handle, and
 /// the held cpal output stream (kept alive for audio to continue). The plyphon
 /// [`World`] itself lives inside the stream's audio callback.
-struct AudioEngine {
+struct DspEngine {
     controller: Controller,
     nrt: Nrt,
     out_channels: usize,
@@ -177,7 +175,7 @@ struct AudioEngine {
     /// boundaries.
     first_private_channel: usize,
     private_channels: usize,
-    /// The active output device's name (for the Settings → Audio status readout).
+    /// The active output device's name (for the Settings → DSP status readout).
     device: String,
     /// The output sample rate (Hz).
     sample_rate: f64,
@@ -428,8 +426,8 @@ struct ScopeSlot {
 /// Also tears down synths for closed heads.
 fn drive_synths<N>(
     registry: Res<Registry<N>>,
-    audio: Option<NonSendMut<AudioEngine>>,
-    audio_config: Res<AudioConfig>,
+    dsp: Option<NonSendMut<DspEngine>>,
+    dsp_config: Res<DspConfig>,
     mut enabled_applied: Local<Option<bool>>,
     state: NonSendMut<HeadSynths>,
     mut vms: NonSendMut<HeadVms>,
@@ -437,31 +435,31 @@ fn drive_synths<N>(
 ) where
     N: 'static + ToNodeDsp + Send + Sync,
 {
-    let Some(audio) = audio else {
+    let Some(dsp) = dsp else {
         return;
     };
-    let audio = audio.into_inner();
+    let dsp = dsp.into_inner();
     let state = state.into_inner();
 
     // Apply the enable/mute toggle by pausing/playing the output stream on change.
-    if *enabled_applied != Some(audio_config.enabled) {
-        let result = if audio_config.enabled {
-            audio.stream.play()
+    if *enabled_applied != Some(dsp_config.enabled) {
+        let result = if dsp_config.enabled {
+            dsp.stream.play()
         } else {
-            audio.stream.pause()
+            dsp.stream.pause()
         };
         if let Err(e) = result {
             log::error!("bevy_gantz_plyphon: audio stream play/pause failed: {e}");
         }
-        *enabled_applied = Some(audio_config.enabled);
+        *enabled_applied = Some(dsp_config.enabled);
     }
 
     // Tick NRT cleanup off the audio thread (drops freed synths, surfaces events).
-    audio.nrt.process();
-    while audio.nrt.poll().is_some() {}
+    dsp.nrt.process();
+    while dsp.nrt.poll().is_some() {}
 
-    let out_channels = audio.out_channels;
-    let sample_rate = audio.sample_rate;
+    let out_channels = dsp.out_channels;
+    let sample_rate = dsp.sample_rate;
     let mut live: HashSet<Entity> = HashSet::new();
 
     for (entity, head_ref, wg) in heads.iter() {
@@ -473,7 +471,7 @@ fn drive_synths<N>(
         // --- Structural sync: only when the committed graph changed. ---
         if state.heads.get(&entity).map(|h| h.graph) != Some(graph_ca) {
             structural_sync(
-                &mut audio.controller,
+                &mut dsp.controller,
                 state,
                 entity,
                 graph_ca,
@@ -484,14 +482,14 @@ fn drive_synths<N>(
         }
 
         // --- Param sync: drain each param's queued control updates and schedule
-        // them ahead of the audio clock; direct (untimestamped) value edits apply
+        // them ahead of the dsp clock; direct (untimestamped) value edits apply
         // immediately. ---
         let (Some(head), Some(vm)) = (state.heads.get_mut(&entity), vms.get_mut(&entity)) else {
             continue;
         };
         for synth in &mut head.regions {
             let node_id = synth.node_id;
-            let mut backend = Embedded::new(&mut audio.controller);
+            let mut backend = Embedded::new(&mut dsp.controller);
             for slot in &mut synth.params {
                 let Some((value, pending)) = gantz_plyphon::param::drain_param(vm, &slot.node_path)
                 else {
@@ -511,7 +509,7 @@ fn drive_synths<N>(
                     // Timestamped automation: schedule each update at its own time
                     // plus the lead, preserving the inter-tick spacing.
                     for (t, v) in pending {
-                        let when = osc(t + audio_config.sched_lead.as_secs_f64());
+                        let when = osc(t + dsp_config.sched_lead.as_secs_f64());
                         if let Err(e) = backend.set_control_at(node_id, slot.index, v as f32, when)
                         {
                             log::error!("bevy_gantz_plyphon: set_control_at failed: {e:?}");
@@ -558,8 +556,8 @@ fn drive_synths<N>(
         if let Some(head) = state.heads.remove(&e) {
             for synth in head.regions {
                 let def_name = synth.def_name.clone();
-                fade_out(&mut audio.controller, state, e, synth);
-                let _ = Embedded::new(&mut audio.controller).free_synthdef(&def_name);
+                fade_out(&mut dsp.controller, state, e, synth);
+                let _ = Embedded::new(&mut dsp.controller).free_synthdef(&def_name);
             }
         }
         state.bus_alloc.release_head(e, Instant::now());
@@ -568,8 +566,8 @@ fn drive_synths<N>(
     // Sweep crossfade-retired synths, freeing those whose fade has died away,
     // and return quarantined bus runs whose grace has passed.
     for f in expire_fades(&mut state.fading, Instant::now()) {
-        let _ = Embedded::new(&mut audio.controller).free_node(f.node_id);
-        free_scopes(&mut audio.controller, &mut state.scope_alloc, f.scopes);
+        let _ = Embedded::new(&mut dsp.controller).free_node(f.node_id);
+        free_scopes(&mut dsp.controller, &mut state.scope_alloc, f.scopes);
     }
     state.bus_alloc.sweep(Instant::now());
 }
@@ -976,7 +974,7 @@ fn output_host() -> cpal::Host {
 /// is the shared monotonic clock the callback anchors the engine clock to;
 /// `unit_registrars` register any custom units into the controller's registry
 /// before the stream starts.
-fn build_audio_engine(epoch: EvalEpoch, unit_registrars: &[UnitRegistrar]) -> Option<AudioEngine> {
+fn build_dsp_engine(epoch: EvalEpoch, unit_registrars: &[UnitRegistrar]) -> Option<DspEngine> {
     let host = output_host();
     let device = host.default_output_device()?;
     // cpal's `Device` `Display` is its name (there is no `name()` in 0.18).
@@ -1006,7 +1004,7 @@ fn build_audio_engine(epoch: EvalEpoch, unit_registrars: &[UnitRegistrar]) -> Op
     let stream = build_stream(&device, config, channels, sample_format, world, epoch)?;
     stream.play().ok()?;
 
-    Some(AudioEngine {
+    Some(DspEngine {
         controller,
         nrt,
         out_channels: channels,

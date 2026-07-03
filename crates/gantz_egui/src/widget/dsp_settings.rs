@@ -1,11 +1,11 @@
-//! The "Audio" settings subtab: the audio runtime's status plus a couple of live
+//! The "DSP" settings subtab: the dsp runtime's status plus a couple of live
 //! knobs (scheduling lead and mute). Supplied by the bevy app; absent in the
 //! non-bevy demo, so the subtab does not appear there.
 
-/// Audio status (read-only) + the editable live settings for the Audio subtab.
+/// DSP status (read-only) + the editable live settings for the DSP subtab.
 #[derive(Clone, Debug, Default)]
-pub struct AudioPanel {
-    /// Whether an audio output device is present (else the app runs silent).
+pub struct DspPanel {
+    /// Whether a DSP output device is present (else the app runs silent).
     pub present: bool,
     /// The active output device's name.
     pub device: Option<String>,
@@ -15,27 +15,27 @@ pub struct AudioPanel {
     pub channels: usize,
     /// The scheduling lead in milliseconds (latency vs sample-accurate timing).
     pub sched_lead_ms: f32,
-    /// Whether audio output is enabled (unmuted).
+    /// Whether DSP output is enabled (unmuted).
     pub enabled: bool,
 }
 
-/// What the user changed in the Audio subtab this frame.
+/// What the user changed in the DSP subtab this frame.
 #[derive(Default)]
-pub struct AudioSettingsResponse {
+pub struct DspSettingsResponse {
     /// The scheduling lead (ms) was changed to this value.
     pub sched_lead_ms: Option<f32>,
     /// The enable/mute toggle was changed to this value.
     pub enabled: Option<bool>,
 }
 
-/// Render the Audio settings subtab: a read-only status readout plus a live
+/// Render the DSP settings subtab: a read-only status readout plus a live
 /// scheduling-lead control and an enable/mute toggle.
-pub fn audio_settings(panel: &AudioPanel, ui: &mut egui::Ui) -> AudioSettingsResponse {
-    let mut res = AudioSettingsResponse::default();
+pub fn dsp_settings(panel: &DspPanel, ui: &mut egui::Ui) -> DspSettingsResponse {
+    let mut res = DspSettingsResponse::default();
 
     ui.label("Status:");
     if panel.present {
-        egui::Grid::new("audio_status_grid")
+        egui::Grid::new("dsp_status_grid")
             .num_columns(2)
             .spacing([12.0, 4.0])
             .show(ui, |ui| {
@@ -52,7 +52,7 @@ pub fn audio_settings(panel: &AudioPanel, ui: &mut egui::Ui) -> AudioSettingsRes
     } else {
         ui.colored_label(
             ui.visuals().warn_fg_color,
-            "No audio output device — running silent.",
+            "No DSP output device — running silent.",
         );
     }
 
@@ -62,8 +62,8 @@ pub fn audio_settings(panel: &AudioPanel, ui: &mut egui::Ui) -> AudioSettingsRes
     ui.add_enabled_ui(panel.present, |ui| {
         let mut enabled = panel.enabled;
         if ui
-            .checkbox(&mut enabled, "Audio enabled")
-            .on_hover_text("Mute/unmute audio output (pauses the output stream).")
+            .checkbox(&mut enabled, "DSP enabled")
+            .on_hover_text("Mute/unmute DSP output (pauses the output stream).")
             .changed()
         {
             res.enabled = Some(enabled);

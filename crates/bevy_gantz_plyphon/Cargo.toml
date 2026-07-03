@@ -1,7 +1,7 @@
 [package]
 name = "bevy_gantz_plyphon"
 version = "0.1.0"
-description = "Bevy + plyphon audio runtime for gantz: a cpal output stream driving synthdefs derived from DSP graphs."
+description = "Bevy + plyphon DSP runtime for gantz: a cpal output stream driving synthdefs derived from DSP graphs."
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true

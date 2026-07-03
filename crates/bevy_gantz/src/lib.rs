@@ -21,18 +21,18 @@
 //! per-frame streams consumed by polling systems -
 //! [`debounced_input::DebouncedInputEvent`] is the one case.
 
-pub mod audio;
 pub mod builtin;
 pub mod debounced_input;
+pub mod dsp;
 pub mod head;
 pub mod reg;
 pub mod storage;
 pub mod vm;
 
-pub use audio::{AudioConfig, AudioStatus};
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Resource, SystemSet};
 pub use builtin::{BuiltinNodes, Builtins};
+pub use dsp::{DspConfig, DspStatus};
 use gantz_core::Node;
 pub use head::{
     FocusedHead, HeadRef, HeadTabOrder, HeadVms, OpenHead, OpenHeadData, OpenHeadDataReadOnly,
@@ -55,7 +55,7 @@ pub struct VmSet;
 /// The system set grouping the entrypoint drivers that fire timed evaluations
 /// (`tick!`, `update!`), in the `Update` schedule.
 ///
-/// Consumers that read state written by those evaluations - notably the audio
+/// Consumers that read state written by those evaluations - notably the dsp
 /// driver, which drains the per-tick control values an evaluation queues - should
 /// run `.after(EntrypointSet)`. The auto-inserted `apply_deferred` at that
 /// boundary flushes the drivers' `cmds.trigger`ed [`vm::on_eval_entry`] observers,
@@ -66,7 +66,7 @@ pub struct EntrypointSet;
 /// A monotonic clock epoch shared across the app, captured once at startup.
 ///
 /// It is the single time base for entrypoint firing times (written into
-/// `%args`'s `time`) and the audio engine's scheduling clock, so a `tick!`'s
+/// `%args`'s `time`) and the dsp engine's scheduling clock, so a `tick!`'s
 /// exact firing time and the audio thread's buffer time live on one timeline -
 /// no cross-clock mapping, and monotonic so NTP steps can't glitch audio timing.
 #[derive(Clone, Copy, Debug, Resource)]

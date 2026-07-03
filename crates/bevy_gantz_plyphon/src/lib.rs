@@ -18,7 +18,7 @@
 //! and plyphon sums all synths on that bus.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
@@ -33,6 +33,10 @@ use gantz_plyphon::{
     derive_synthdefs, structural_sig,
 };
 use plyphon::{Controller, InputRef, Nrt, Options, StreamConsumer, World, engine};
+// `std::time::Instant` panics ("time not implemented") on `wasm32-unknown-unknown`;
+// `web_time::Instant` shims it to `performance.now()` there and is plain `std::Instant`
+// on native. This clock drives the crossfade fade-out deadlines and the bus-run graveyard.
+use web_time::Instant;
 
 /// Re-export of [`plyphon`] so downstream crates can implement custom units
 /// (`Unit`, `UnitDef`, `unit_spec`, …) against the exact version this runtime

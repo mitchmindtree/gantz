@@ -17,6 +17,7 @@ gantz_core.workspace = true
 gantz_plyphon.workspace = true
 log.workspace = true
 plyphon.workspace = true
+web-time.workspace = true
 
 bevy_gantz.workspace = true
 

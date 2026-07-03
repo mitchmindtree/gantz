@@ -532,6 +532,44 @@ pub fn redo(
     redo_stacks.get_mut(head)?.pop()
 }
 
+/// Build a view for a navigation target commit that has no stored view by
+/// carrying the live view's node positions forward through the navigation
+/// node-identity `matching` (old index -> new index), keeping the live
+/// camera.
+///
+/// Nodes of the new graph absent from the matching (e.g. merged-in from a
+/// peer) are placed in a cascade from the camera centre. An empty live
+/// layout, or a matching that
+/// carries no positions at all, yields an empty result: the scene's one-shot
+/// auto-layout is the right treatment for a genuinely layoutless graph (e.g.
+/// a join placeholder), not a cascade of every node.
+pub fn carry_layout(
+    live: &crate::SceneView,
+    matching: &gantz_ca::Matching,
+    new_node_count: usize,
+) -> crate::SceneView {
+    let node_id = |ix: usize| egui_graph::NodeId::from_u64(ix as u64);
+    let mut view = crate::SceneView {
+        camera: live.camera,
+        layout: Default::default(),
+    };
+    for (&old_ix, &new_ix) in matching {
+        if let Some(pos) = live.layout.get(&node_id(old_ix)) {
+            view.layout.insert(node_id(new_ix), *pos);
+        }
+    }
+    if view.layout.is_empty() {
+        return view;
+    }
+    let unmapped: Vec<usize> = (0..new_node_count)
+        .filter(|&ix| !view.layout.contains_key(&node_id(ix)))
+        .collect();
+    for (i, ix) in unmapped.into_iter().enumerate() {
+        let pos = view.camera.center + egui::vec2(20.0, 20.0) * i as f32;
+        view.layout.insert(node_id(ix), pos);
+    }
+    view
+}
 /// The result of a [`merge_head`] call.
 #[derive(Debug)]
 pub enum MergeHeadOutcome {
@@ -771,6 +809,59 @@ mod tests {
             selection.nodes.iter().copied().collect::<Vec<_>>(),
             vec![NodeIx::new(1)],
         );
+    }
+
+    // carry_layout maps live positions through the navigation matching, keeps
+    // the camera, and cascades unmapped new nodes from the camera centre.
+    #[test]
+    fn carry_layout_remaps_and_places_new_nodes() {
+        let mut live = crate::SceneView::default();
+        live.camera.center = egui::pos2(100.0, 50.0);
+        live.layout.insert(node_id(0), egui::pos2(1.0, 1.0));
+        live.layout.insert(node_id(1), egui::pos2(2.0, 2.0));
+        live.layout.insert(node_id(2), egui::pos2(3.0, 3.0));
+
+        // 0 -> 1, 2 -> 0 (a swap-style remap); live node 1 was removed; the
+        // new graph has an extra node at index 2 with no provenance.
+        let matching: gantz_ca::Matching = [(0, 1), (2, 0)].into_iter().collect();
+        let view = carry_layout(&live, &matching, 3);
+
+        assert_eq!(view.camera, live.camera);
+        assert_eq!(view.layout.len(), 3);
+        assert_eq!(
+            view.layout.get(&node_id(1)).copied(),
+            Some(egui::pos2(1.0, 1.0))
+        );
+        assert_eq!(
+            view.layout.get(&node_id(0)).copied(),
+            Some(egui::pos2(3.0, 3.0))
+        );
+        // The unmapped new node cascades from the camera centre.
+        assert_eq!(
+            view.layout.get(&node_id(2)).copied(),
+            Some(egui::pos2(100.0, 50.0))
+        );
+    }
+
+    // An empty live layout carries nothing: the scene's one-shot auto-layout
+    // is the right treatment for a genuinely layoutless graph.
+    #[test]
+    fn carry_layout_empty_live_yields_empty() {
+        let live = crate::SceneView::default();
+        let matching: gantz_ca::Matching = [(0, 0)].into_iter().collect();
+        let view = carry_layout(&live, &matching, 4);
+        assert!(view.layout.is_empty());
+    }
+
+    // When the matching carries no positions at all, the result stays empty
+    // rather than cascading every node from the camera centre.
+    #[test]
+    fn carry_layout_no_carried_positions_yields_empty() {
+        let mut live = crate::SceneView::default();
+        live.layout.insert(node_id(5), egui::pos2(1.0, 1.0));
+        let matching = gantz_ca::Matching::new();
+        let view = carry_layout(&live, &matching, 3);
+        assert!(view.layout.is_empty());
     }
 
     /// A minimal node type satisfying [`merge_head`]'s bounds.

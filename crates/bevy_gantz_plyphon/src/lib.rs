@@ -934,13 +934,46 @@ fn free_scopes(controller: &mut Controller, scope_alloc: &mut ScopeAlloc, scopes
     }
 }
 
+/// Whether this call is running on cpal's AudioWorklet audio thread.
+///
+/// cpal's AudioWorklet backend re-instantiates the wasm module on the audio
+/// thread, re-running `main` there - an application `main` must return early
+/// when this is `true`, or the whole app would boot again on the audio thread.
+/// Always `false` off the web / without the `audioworklet` feature.
+pub fn on_worklet_thread() -> bool {
+    #[cfg(all(target_arch = "wasm32", feature = "audioworklet"))]
+    {
+        web_sys::window().is_none()
+    }
+    #[cfg(not(all(target_arch = "wasm32", feature = "audioworklet")))]
+    {
+        false
+    }
+}
+
+/// The cpal host the output stream is built from: the platform default, or -
+/// on the web with the `audioworklet` feature - cpal's AudioWorklet host (the
+/// default there is the deprecated ScriptProcessor-based Web Audio host, which
+/// runs audio on the main thread).
+fn output_host() -> cpal::Host {
+    #[cfg(all(target_arch = "wasm32", feature = "audioworklet"))]
+    {
+        cpal::host_from_id(cpal::HostId::AudioWorklet)
+            .expect("AudioWorklet host unavailable (the page must be cross-origin isolated)")
+    }
+    #[cfg(not(all(target_arch = "wasm32", feature = "audioworklet")))]
+    {
+        cpal::default_host()
+    }
+}
+
 /// Build the plyphon engine + cpal output stream from the default output device.
 /// Returns `None` (and the app runs silently) if no device is available. `epoch`
 /// is the shared monotonic clock the callback anchors the engine clock to;
 /// `unit_registrars` register any custom units into the controller's registry
 /// before the stream starts.
 fn build_audio_engine(epoch: EvalEpoch, unit_registrars: &[UnitRegistrar]) -> Option<AudioEngine> {
-    let host = cpal::default_host();
+    let host = output_host();
     let device = host.default_output_device()?;
     // cpal's `Device` `Display` is its name (there is no `name()` in 0.18).
     let device_name = device.to_string();

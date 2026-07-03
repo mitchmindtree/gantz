@@ -28,13 +28,25 @@
         gantz-unwrapped = prev.callPackage ./pkgs/gantz-unwrapped.nix { };
         gantz = final.callPackage ./pkgs/gantz.nix { };
         gantz-website = final.callPackage ./pkgs/gantz-website.nix { };
+        gantz-website-legacy = final.callPackage ./pkgs/gantz-website-legacy.nix { };
         serve-gantz-website = final.callPackage ./pkgs/serve-gantz-website.nix { };
         wasm-bindgen-cli = prev.callPackage ./pkgs/wasm-bindgen-cli.nix { };
+        # Nightly wasm toolchain for the AudioWorklet website build: `-Z build-std`
+        # (recompiling `std` with atomics for WASM threads) is nightly-only, and
+        # `rust-src` supplies the `std` sources it rebuilds from.
+        rustToolchainWasmNightly = final.rust-bin.selectLatestNightlyWith (
+          toolchain:
+          toolchain.default.override {
+            extensions = [ "rust-src" ];
+            targets = [ "wasm32-unknown-unknown" ];
+          }
+        );
       };
 
       packages = perSystemPkgs (pkgs: {
         gantz = pkgs.gantz;
         gantz-website = pkgs.gantz-website;
+        gantz-website-legacy = pkgs.gantz-website-legacy;
         serve-gantz-website = pkgs.serve-gantz-website;
         wasm-bindgen-cli = pkgs.wasm-bindgen-cli;
         default = pkgs.gantz;
@@ -42,6 +54,7 @@
 
       devShells = perSystemPkgs (pkgs: {
         gantz-dev = pkgs.callPackage ./shell.nix { };
+        gantz-web = pkgs.callPackage ./shell-web.nix { };
         default = inputs.self.devShells.${pkgs.stdenv.hostPlatform.system}.gantz-dev;
       });
 

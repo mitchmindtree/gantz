@@ -32,6 +32,12 @@ serde.workspace = true
 steel-core.workspace = true
 web-time.workspace = true
 
+[features]
+# Opt into cpal's AudioWorklet backend on the web (see `bevy_gantz_plyphon`). Enabled by
+# the website's worklet build (`crates/gantz/web/worklet/index.html`), which supplies the
+# WASM-threads build flags it requires.
+audioworklet = ["bevy_gantz_plyphon/audioworklet"]
+
 [dev-dependencies]
 ron.workspace = true
 

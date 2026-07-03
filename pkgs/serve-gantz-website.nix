@@ -1,4 +1,6 @@
-# Short-hand for running `miniserve` to serve `gantz-website`.
+# Short-hand for serving the default `gantz-website` (the AudioWorklet build) locally with the
+# COOP/COEP headers its SharedArrayBuffer needs. With real headers the bundled coi-serviceworker
+# is a no-op; it only matters on hosts that can't send headers (e.g. GitHub Pages).
 {
   writeShellScriptBin,
   gantz-website,
@@ -6,7 +8,7 @@
 }:
 writeShellScriptBin "serve-gantz-website" ''
   ${miniserve}/bin/miniserve \
-    --index ${gantz-website}/index.html \
+    --index index.html \
     --disable-indexing \
     --hide-version-footer \
     --hide-theme-selector \

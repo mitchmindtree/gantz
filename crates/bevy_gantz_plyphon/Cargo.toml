@@ -20,6 +20,19 @@ plyphon.workspace = true
 
 bevy_gantz.workspace = true
 
+# Web-only: cpal's wasm backend. Without the `audioworklet` feature this is the default
+# Web Audio (ScriptProcessor) host; with it, cpal's AudioWorklet host is selected instead.
+# `web-sys` (Window) lets the app detect the worklet thread (see `on_worklet_thread`).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cpal = { workspace = true, features = ["wasm-bindgen"] }
+web-sys = { workspace = true, features = ["Window"] }
+
+[features]
+# Opt into cpal's AudioWorklet backend on the web. Only ever enable this for `wasm32`
+# builds compiled with WASM atomics + `-Z build-std` (see `pkgs/wasm-threads-env.nix`) -
+# cpal only exposes the host under `target_feature = "atomics"`.
+audioworklet = ["cpal/audioworklet"]
+
 [dev-dependencies]
 # The `custom_unit` example runs a minimal headless bevy app.
 bevy.workspace = true

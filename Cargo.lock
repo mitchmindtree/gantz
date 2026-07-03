@@ -964,6 +964,7 @@ dependencies = [
  "gantz_plyphon",
  "log",
  "plyphon",
+ "web-sys",
 ]
 
 [[package]]
@@ -2390,6 +2391,8 @@ dependencies = [
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "windows",
  "windows-core",

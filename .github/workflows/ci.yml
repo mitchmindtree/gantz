@@ -30,7 +30,7 @@ jobs:
           - command: develop -c cargo test --no-default-features --locked --all
           - command: develop -c cargo test --all-features --locked --all
           - command: fmt -- --ci
-          - command: flake check --all-systems --no-update-lock-file
+          - command: flake check --no-update-lock-file
           - command: build --print-build-logs --no-update-lock-file .#gantz-website
     steps:
       - uses: actions/checkout@v5

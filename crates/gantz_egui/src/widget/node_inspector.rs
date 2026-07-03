@@ -61,6 +61,20 @@ pub fn table_row_h(ui: &egui::Ui) -> f32 {
     ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y
 }
 
+/// A clickable collapse/expand triangle for the inspector's state row. Returns
+/// whether it was clicked this frame.
+fn state_triangle(ui: &mut egui::Ui, expanded: bool) -> bool {
+    let arrow = if expanded { "\u{25BC}" } else { "\u{25B6}" }; // ▼ / ▶
+    ui.add(
+        egui::Label::new(arrow)
+            .sense(egui::Sense::click())
+            .selectable(false),
+    )
+    .on_hover_cursor(egui::CursorIcon::PointingHand)
+    .on_hover_text(if expanded { "collapse" } else { "expand" })
+    .clicked()
+}
+
 /// The fixed width (px) for the optional-numeric dialers in `range`/`prec.`
 /// inspector rows, so a following column stays put as a value's width changes.
 pub const DIAL_W: f32 = 44.0;
@@ -148,6 +162,31 @@ pub fn table(
     );
     ui.add_space(ui.spacing().item_spacing.y);
     let row_h = table_row_h(ui);
+    // The state row is a collapsed single line by default; a persistent per-node flag
+    // controls whether it is expanded, which drives the row height (one line, or the
+    // measured height of the pretty-printed value).
+    let state_id = egui::Id::new(("inspector_state_expanded", &path));
+    let state_texts = match &state_value {
+        Some(Ok(Some(state))) => Some((format!("{state:?}"), format!("{state:#?}"))),
+        _ => None,
+    };
+    let state_multiline = state_texts
+        .as_ref()
+        .is_some_and(|(_, pretty)| pretty.contains('\n'));
+    let state_expanded =
+        state_multiline && ui.data(|d| d.get_temp::<bool>(state_id)).unwrap_or(false);
+    let state_row_h = match (&state_texts, state_expanded) {
+        (Some((_, pretty)), true) => {
+            let galley = ui.painter().layout_no_wrap(
+                pretty.clone(),
+                egui::TextStyle::Monospace.resolve(ui.style()),
+                ui.visuals().text_color(),
+            );
+            galley.size().y + row_h
+        }
+        _ => row_h,
+    };
+    let mut state_toggled = false;
     let mut rows_resp = InspectorRowsResponse::default();
     let scroll_area_output = TableBuilder::new(ui)
         .vscroll(false)
@@ -191,13 +230,45 @@ pub fn table(
             }
 
             if let Some(ref state_result) = state_value {
-                body.row(row_h, |mut row| {
+                body.row(state_row_h, |mut row| {
                     row.col(|ui| {
                         ui.label("state");
                     });
                     row.col(|ui| match state_result {
-                        Ok(Some(state)) => {
-                            ui.label(format!("{state:#?}"));
+                        Ok(Some(_)) => {
+                            // `state_texts` is `Some` exactly in this arm.
+                            let (compact, pretty) = state_texts.as_ref().unwrap();
+                            if state_expanded {
+                                ui.vertical(|ui| {
+                                    if state_triangle(ui, true) {
+                                        state_toggled = true;
+                                    }
+                                    // No-wrap so the rendered height matches the
+                                    // measured `state_row_h` (no overflow).
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(pretty).monospace())
+                                            .wrap_mode(egui::TextWrapMode::Extend),
+                                    );
+                                });
+                            } else {
+                                ui.horizontal(|ui| {
+                                    // The triangle only makes sense for a multi-line
+                                    // value; a scalar has nothing to expand.
+                                    if state_multiline && state_triangle(ui, false) {
+                                        state_toggled = true;
+                                    }
+                                    // One clipped line; hover shows the full value.
+                                    // Suppress egui's built-in elided-text tooltip
+                                    // (the compact `{:?}`) so only the pretty
+                                    // `{:#?}` tooltip below shows, not both.
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(compact).monospace())
+                                            .truncate()
+                                            .show_tooltip_when_elided(false),
+                                    )
+                                    .on_hover_text(pretty);
+                                });
+                            }
                         }
                         Ok(None) => {
                             ui.weak("None");
@@ -214,6 +285,9 @@ pub fn table(
             }
             rows_resp = node.inspector_rows(ctx, &mut body);
         });
+    if state_toggled {
+        ui.data_mut(|d| d.insert_temp(state_id, !state_expanded));
+    }
     (scroll_area_output, label_response, rows_resp)
 }
 

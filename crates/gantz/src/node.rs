@@ -32,6 +32,14 @@ impl Node for bevy_gantz_egui::node::TickBang {}
 impl Node for gantz_egui::node::Inspect {}
 impl Node for gantz_egui::node::Plot {}
 
+impl Node for gantz_plyphon::SinOsc {}
+impl Node for gantz_plyphon::Out {}
+impl Node for gantz_plyphon::Lag {}
+impl Node for gantz_plyphon::ScopeOut {}
+impl Node for gantz_plyphon::Pack {}
+impl Node for gantz_plyphon::Unpack {}
+impl Node for gantz_plyphon::Bus {}
+
 // `Box<dyn Node>`'s `Serialize`/`Deserialize`: compiled dispatch over the
 // full node set, keyed by each type's `gantz_nodetag::NodeTag`. Adding a
 // node type to the app is an `impl Node` above plus one line here (the
@@ -55,6 +63,13 @@ gantz_format::impl_node_set_serde! {
         bevy_gantz_egui::node::TickBang,
         gantz_egui::node::Inspect,
         gantz_egui::node::Plot,
+        gantz_plyphon::SinOsc,
+        gantz_plyphon::Out,
+        gantz_plyphon::Lag,
+        gantz_plyphon::ScopeOut,
+        gantz_plyphon::Pack,
+        gantz_plyphon::Unpack,
+        gantz_plyphon::Bus,
     }
 }
 
@@ -92,6 +107,36 @@ impl bevy_gantz_egui::node::ToTickBang for Box<dyn Node> {
     }
 }
 
+// Lets the synthdef compiler and dsp driver find DSP nodes within an erased
+// node by downcasting to each known `NodeDsp` type (mirrors `ToTickBang`).
+impl gantz_plyphon::ToNodeDsp for Box<dyn Node> {
+    fn to_node_dsp(&self) -> Option<&dyn gantz_plyphon::NodeDsp> {
+        let any: &dyn Any = &**self;
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::SinOsc>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Out>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Lag>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::ScopeOut>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Pack>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Unpack>() {
+            return Some(n);
+        }
+        if let Some(n) = any.downcast_ref::<gantz_plyphon::Bus>() {
+            return Some(n);
+        }
+        None
+    }
+}
+
 impl Node for Box<dyn Node> {}
 
 /// The composite `.gantz` keyword sugar for this app's full node set: the
@@ -103,6 +148,7 @@ impl gantz_format::NodeSugar for Box<dyn Node> {
             &gantz_std::StdSugar,
             &gantz_egui::EguiSugar,
             &bevy_gantz_egui::BevySugar,
+            &gantz_plyphon::PlyphonSugar,
         ])
     }
 }
@@ -111,6 +157,25 @@ impl gantz_format::NodeSugar for Box<dyn Node> {
 mod tests {
     use super::Node;
 
+    /// Fire the push entrypoint of the node at `node_ix` (a flat-graph index).
+    fn fire_push(
+        vm: &mut gantz_core::steel::steel_vm::engine::Engine,
+        eps: &[gantz_core::compile::Entrypoint],
+        node_ix: usize,
+    ) {
+        use gantz_core::compile::{EvalKind, entry_fn_name};
+        let ep = eps
+            .iter()
+            .find(|ep| {
+                ep.0.iter()
+                    .any(|s| s.kind == EvalKind::Push && s.path == [node_ix])
+            })
+            .expect("push entrypoint");
+        vm.call_function_by_name_with_args(&entry_fn_name(&ep.id()), vec![])
+            .expect("push entrypoint");
+    }
+
+    /// Read an `inspect` node's stored value as a list of `f64`s.
     /// Gate test for the `.gantz` text format: confirm `Box<dyn Node>`
     /// round-trips through the self-describing `gantz_format::Datum` codec.
     /// The format bridges node specs to/from the node set's serde dispatch
@@ -215,6 +280,25 @@ mod tests {
                     ("y_max", Datum::Null),
                 ],
             ),
+            node_datum("SinOsc", vec![]),
+            node_datum("SinOsc", vec![("rate", Datum::Str("kr".into()))]),
+            node_datum("Out", vec![]),
+            node_datum("Lag", vec![]),
+            node_datum("Lag", vec![("rate", Datum::Str("kr".into()))]),
+            node_datum("ScopeOut", vec![]),
+            node_datum("ScopeOut", vec![("size", Datum::U64(64))]),
+            // Legacy: pre-channel-group `~scopeout` data carries a `channels`
+            // field; serde ignores the unknown field so old registries still load
+            // (the count is inferred from the input signal's width now).
+            node_datum(
+                "ScopeOut",
+                vec![("channels", Datum::U64(3)), ("size", Datum::U64(64))],
+            ),
+            node_datum("Pack", vec![]),
+            node_datum("Pack", vec![("count", Datum::U64(4))]),
+            node_datum("Unpack", vec![]),
+            node_datum("Unpack", vec![("count", Datum::U64(4))]),
+            node_datum("Bus", vec![]),
         ];
         for value in cases {
             let node: Box<dyn Node> = from_datum(value.clone())
@@ -306,6 +390,303 @@ mod tests {
             let from_ron: Box<dyn Node> = ron::de::from_str(&ron).unwrap();
             assert_eq!(to_datum(&from_ron).unwrap(), expected_datum);
         }
+    }
+
+    /// `PlyphonSugar` is composed into the app's `NodeSugar`, so the DSP nodes
+    /// serialize as their `~`-prefixed keyword forms (not the generic
+    /// `(node "SinOsc" ...)` fallback). Guards that the sugar stays wired in.
+    #[test]
+    fn dsp_nodes_use_plyphon_keyword_sugar() {
+        use gantz_format::{NodeSugar, Sugar, to_datum};
+
+        let sugar = <Box<dyn Node> as NodeSugar>::sugar();
+        let cases: [(Box<dyn Node>, &str, &str); 7] = [
+            (
+                Box::new(gantz_plyphon::SinOsc::default()),
+                "SinOsc",
+                "~sinosc",
+            ),
+            (Box::new(gantz_plyphon::Out::default()), "Out", "~out"),
+            (Box::new(gantz_plyphon::Lag::default()), "Lag", "~lag"),
+            (
+                Box::new(gantz_plyphon::ScopeOut::default()),
+                "ScopeOut",
+                "~scopeout",
+            ),
+            (Box::new(gantz_plyphon::Pack::default()), "Pack", "~pack"),
+            (
+                Box::new(gantz_plyphon::Unpack::default()),
+                "Unpack",
+                "~unpack",
+            ),
+            (Box::new(gantz_plyphon::Bus::default()), "Bus", "~bus"),
+        ];
+        for (node, tag, expected) in cases {
+            let datum = to_datum(&node).expect("to_datum");
+            assert_eq!(
+                sugar.write_spec(tag, &datum).as_deref(),
+                Some(expected),
+                "default {tag} should sugar to bare `{expected}`",
+            );
+        }
+    }
+
+    /// The DSP nodes are inert in the control-rate Steel world (they emit
+    /// placeholder exprs and declare no entrypoints), so a `~sinosc -> ~out` graph
+    /// still compiles through the VM without error - and the app's `ToNodeDsp`
+    /// impl lets a synthdef derive from the same graph. This guards the
+    /// two-independent-backends design end to end.
+    #[test]
+    fn dsp_nodes_are_steel_inert_and_derive() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_plyphon::derive_synthdef;
+        type G = Graph<Box<dyn Node>>;
+
+        // Two sines packed into one 2-wide edge, across a `~bus`, unpacked,
+        // channel 1 to the out - covering the whole dsp node set including the
+        // routing pair and the boundary (which the single-def `derive_synthdef`
+        // fuses to a plain wire).
+        let mut g: G = Graph::default();
+        let s0 = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
+        let s1 = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
+        let pk = g.add_node(Box::new(gantz_plyphon::Pack::default()) as Box<dyn Node>);
+        let bus = g.add_node(Box::new(gantz_plyphon::Bus::default()) as Box<dyn Node>);
+        let up = g.add_node(Box::new(gantz_plyphon::Unpack::default()) as Box<dyn Node>);
+        let o = g.add_node(Box::new(gantz_plyphon::Out::default()) as Box<dyn Node>);
+        g.add_edge(s0, pk, Edge::new(0.into(), 0.into()));
+        g.add_edge(s1, pk, Edge::new(0.into(), 1.into()));
+        g.add_edge(pk, bus, Edge::new(0.into(), 0.into()));
+        g.add_edge(bus, up, Edge::new(0.into(), 0.into()));
+        g.add_edge(up, o, Edge::new(1.into(), 0.into()));
+
+        // Steel-inert: compiles through the control-rate VM (no entrypoints, no
+        // error) even though it is a pure-dsp graph.
+        let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+        let config = gantz_core::compile::Config::default();
+        gantz_core::vm::init(&get_node, &g, &[], &config)
+            .expect("DSP graph must compile in the Steel VM");
+
+        // The `~out` sink is discoverable via `ToNodeDsp` and a synthdef derives;
+        // the routing pair emits no units.
+        let derived = derive_synthdef(&g, 2, "test").expect("derive");
+        assert_eq!(
+            derived.def.units.len(),
+            5,
+            "2 SinOsc + level/channel muls + Out",
+        );
+    }
+
+    /// `~unpack`'s placeholder expr honours the multi-output contract for any
+    /// `count`: a single value for one output, a list of values otherwise. A
+    /// wrong shape (e.g. `(list 0)` for count 1) fails `vm::init`'s compile.
+    #[test]
+    fn unpack_expr_is_steel_inert_for_any_count() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        type G = Graph<Box<dyn Node>>;
+
+        for count in [1usize, 2, 3] {
+            let mut unpack = gantz_plyphon::Unpack::default();
+            unpack.set_count(count);
+            let mut g: G = Graph::default();
+            let s = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
+            let up = g.add_node(Box::new(unpack) as Box<dyn Node>);
+            let insp = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
+            g.add_edge(s, up, Edge::new(0.into(), 0.into()));
+            // An edge off the last output forces the expr's output shape through
+            // the lowerer.
+            g.add_edge(up, insp, Edge::new(((count - 1) as u16).into(), 0.into()));
+
+            let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+            let config = gantz_core::compile::Config::default();
+            let eps = gantz_core::compile::push_pull_entrypoints(&get_node, &g);
+            gantz_core::vm::init(&get_node, &g, &eps, &config)
+                .unwrap_or_else(|e| panic!("~unpack count {count} must compile: {e:?}"));
+        }
+    }
+
+    /// A control input on a DSP node: connecting a `number` to `~sinosc`'s freq
+    /// socket and pushing the number writes the number's value into `~sinosc`'s VM
+    /// state (which the dsp driver then applies via `set_control`). Guards the
+    /// ctrl/dsp bridge end to end on the Steel side.
+    #[test]
+    fn control_input_writes_dsp_node_state() {
+        use gantz_core::compile::{EvalKind, entry_fn_name, push_pull_entrypoints};
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_core::steel::SteelVal;
+        type G = Graph<Box<dyn Node>>;
+
+        // number (a push source) -> ~sinosc.freq (control input at index 0).
+        let mut g: G = Graph::default();
+        let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
+        let sine = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
+        g.add_edge(num, sine, Edge::new(0.into(), 0.into()));
+
+        let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+        let config = gantz_core::compile::Config::default();
+        let eps = push_pull_entrypoints(&get_node, &g);
+        let (mut vm, _compiled) =
+            gantz_core::vm::init(&get_node, &g, &eps, &config).expect("compile number -> ~sinosc");
+
+        // Stamp the firing time the queued control update should carry, set the
+        // number's value, then fire its push entrypoint.
+        vm.update_value(gantz_core::ARGS, gantz_core::args::time(1.25));
+        gantz_core::node::state::update_value(&mut vm, &[num.index()], SteelVal::NumV(440.0))
+            .expect("set number state");
+        let ep = eps
+            .iter()
+            .find(|ep| {
+                ep.0.iter()
+                    .any(|s| s.kind == EvalKind::Push && s.path == [num.index()])
+            })
+            .expect("number push entrypoint");
+        vm.call_function_by_name_with_args(&entry_fn_name(&ep.id()), vec![])
+            .expect("push number");
+
+        // A non-draining peek reports the queued-update count (the state-row summary
+        // the inspector shows) - it must NOT drain the queue.
+        let queued = gantz_core::node::state::extract_value(&vm, &[sine.index()])
+            .expect("extract ~sinosc state")
+            .expect("~sinosc state present");
+        assert_eq!(
+            gantz_plyphon::param::pending_len(&queued),
+            1,
+            "pending_len must count the queued update without draining",
+        );
+
+        // The control value landed in ~sinosc's freq param: the current value is
+        // updated, and the timestamped update is queued for the dsp driver.
+        let (value, pending) = gantz_plyphon::param::drain_param(&mut vm, &[sine.index()])
+            .expect("~sinosc param state present");
+        assert_eq!(value, 440.0, "control input must update the param value");
+        assert_eq!(
+            pending,
+            vec![(1.25, 440.0)],
+            "control input must queue (time, value) for sample-accurate scheduling",
+        );
+    }
+
+    /// `~scopeout`'s control side: firing its trigger input outputs the per-channel
+    /// ring-buffer state (which the dsp driver fills) as a list of rings on
+    /// output 0, and the channel count - the number of rings - on output 1. Here
+    /// the rings are seeded directly (standing in for the driver's `push_ring`), a
+    /// `number` pushes the trigger, and the outputs land downstream in `inspect`
+    /// nodes. Guards the dsp->control read-out path + the two-output `branches`
+    /// contract on the Steel side.
+    #[test]
+    fn scopeout_trigger_outputs_rings_and_channels() {
+        use gantz_core::compile::push_pull_entrypoints;
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_core::steel::SteelVal;
+        type G = Graph<Box<dyn Node>>;
+
+        // number -> ~scopeout.trigger (input 1, after the dsp input); output 0 ->
+        // inspect_samples, output 1 -> inspect_channels.
+        let mut g: G = Graph::default();
+        let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
+        let tap = g.add_node(Box::new(gantz_plyphon::ScopeOut::default()) as Box<dyn Node>);
+        let samples = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
+        let chans = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
+        g.add_edge(num, tap, Edge::new(0.into(), 1.into()));
+        g.add_edge(tap, samples, Edge::new(0.into(), 0.into()));
+        g.add_edge(tap, chans, Edge::new(1.into(), 0.into()));
+
+        let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+        let config = gantz_core::compile::Config::default();
+        let eps = push_pull_entrypoints(&get_node, &g);
+        let (mut vm, _compiled) = gantz_core::vm::init(&get_node, &g, &eps, &config)
+            .expect("compile number -> ~scopeout");
+
+        let ring = |vals: &[f64]| -> SteelVal {
+            SteelVal::ListV(vals.iter().map(|&v| SteelVal::NumV(v)).collect())
+        };
+        let channel_count = |vm: &gantz_core::steel::steel_vm::engine::Engine| -> f64 {
+            let ch = gantz_core::node::state::extract_value(vm, &[chans.index()])
+                .expect("extract channel inspect")
+                .expect("channel inspect present");
+            match ch {
+                SteelVal::IntV(i) => i as f64,
+                SteelVal::NumV(f) => f,
+                other => panic!("output 1 must be a number, got {other:?}"),
+            }
+        };
+
+        // Seed the tap with one ring of known samples (as the dsp driver would),
+        // then fire the number's push entrypoint: it triggers the tap, which fires
+        // both outputs (branch 0) into the inspect nodes.
+        let rings = SteelVal::ListV(vec![ring(&[1.0, 2.0, 3.0])].into_iter().collect());
+        gantz_core::node::state::update_value(&mut vm, &[tap.index()], rings.clone())
+            .expect("seed rings");
+        fire_push(&mut vm, &eps, num.index());
+
+        // Output 0: the list of rings, unchanged.
+        let got = gantz_core::node::state::extract_value(&vm, &[samples.index()])
+            .expect("extract samples inspect")
+            .expect("samples inspect present");
+        assert_eq!(got, rings, "output 0 must be the per-channel rings");
+
+        // Output 1: the channel count is the number of rings.
+        assert_eq!(channel_count(&vm), 1.0, "one ring -> channel count 1");
+
+        // A second, wider write (a stereo tap after a rewire): the count follows.
+        let rings = SteelVal::ListV(
+            vec![ring(&[1.0, 2.0]), ring(&[-1.0, -2.0])]
+                .into_iter()
+                .collect(),
+        );
+        gantz_core::node::state::update_value(&mut vm, &[tap.index()], rings)
+            .expect("seed stereo rings");
+        fire_push(&mut vm, &eps, num.index());
+        assert_eq!(channel_count(&vm), 2.0, "two rings -> channel count 2");
+    }
+
+    /// A push arriving through `~scopeout`'s *dsp* input (not the control trigger)
+    /// must NOT surface the buffer - the node's `branches` gates the outlets on the
+    /// trigger, so a plot downstream does not update on an inert dsp-edge push.
+    #[test]
+    fn scopeout_suppresses_output_without_trigger() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_core::steel::SteelVal;
+        type G = Graph<Box<dyn Node>>;
+
+        // number -> ~scopeout.dsp (input 0); output 0 -> inspect. Firing the number
+        // pushes the dsp input, leaving the trigger (input 1) inactive.
+        let mut g: G = Graph::default();
+        let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
+        let tap = g.add_node(Box::new(gantz_plyphon::ScopeOut::default()) as Box<dyn Node>);
+        let inspect = g.add_node(Box::new(gantz_egui::node::Inspect::default()) as Box<dyn Node>);
+        g.add_edge(num, tap, Edge::new(0.into(), 0.into()));
+        g.add_edge(tap, inspect, Edge::new(0.into(), 0.into()));
+
+        let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+        let config = gantz_core::compile::Config::default();
+        let eps = gantz_core::compile::push_pull_entrypoints(&get_node, &g);
+        let (mut vm, _compiled) = gantz_core::vm::init(&get_node, &g, &eps, &config)
+            .expect("compile number -> ~scopeout dsp");
+
+        let ring: SteelVal = SteelVal::ListV(
+            vec![SteelVal::NumV(1.0), SteelVal::NumV(2.0)]
+                .into_iter()
+                .collect(),
+        );
+        let rings: SteelVal = SteelVal::ListV(vec![ring].into_iter().collect());
+        gantz_core::node::state::update_value(&mut vm, &[tap.index()], rings).expect("seed rings");
+
+        fire_push(&mut vm, &eps, num.index());
+
+        // The inspect node was never fed (output suppressed): its state stays the
+        // initial `Void`, not the ring list.
+        let got = gantz_core::node::state::extract_value(&vm, &[inspect.index()])
+            .expect("extract inspect state")
+            .expect("inspect state present");
+        assert!(
+            matches!(got, SteelVal::Void),
+            "a dsp-only push must not surface the buffer, got {got:?}",
+        );
     }
 
     /// Lowering a hand-authored `mul` (declared in base.gantz's index order)

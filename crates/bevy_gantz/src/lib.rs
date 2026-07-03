@@ -23,14 +23,16 @@
 
 pub mod builtin;
 pub mod debounced_input;
+pub mod dsp;
 pub mod head;
 pub mod reg;
 pub mod storage;
 pub mod vm;
 
 use bevy_app::{App, Plugin, Update};
-use bevy_ecs::prelude::{IntoScheduleConfigs, SystemSet};
+use bevy_ecs::prelude::{IntoScheduleConfigs, Resource, SystemSet};
 pub use builtin::{BuiltinNodes, Builtins};
+pub use dsp::{DspConfig, DspStatus};
 use gantz_core::Node;
 pub use head::{
     FocusedHead, HeadRef, HeadTabOrder, HeadVms, OpenHead, OpenHeadData, OpenHeadDataReadOnly,
@@ -49,6 +51,33 @@ pub use vm::{
 /// VM being (re)initialized.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
 pub struct VmSet;
+
+/// The system set grouping the entrypoint drivers that fire timed evaluations
+/// (`tick!`, `update!`), in the `Update` schedule.
+///
+/// Consumers that read state written by those evaluations - notably the dsp
+/// driver, which drains the per-tick control values an evaluation queues - should
+/// run `.after(EntrypointSet)`. The auto-inserted `apply_deferred` at that
+/// boundary flushes the drivers' `cmds.trigger`ed [`vm::on_eval_entry`] observers,
+/// so the queued values are visible by the time the consumer runs.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SystemSet)]
+pub struct EntrypointSet;
+
+/// A monotonic clock epoch shared across the app, captured once at startup.
+///
+/// It is the single time base for entrypoint firing times (written into
+/// `%args`'s `time`) and the dsp engine's scheduling clock, so a `tick!`'s
+/// exact firing time and the audio thread's buffer time live on one timeline -
+/// no cross-clock mapping, and monotonic so NTP steps can't glitch audio timing.
+#[derive(Clone, Copy, Debug, Resource)]
+pub struct EvalEpoch(pub web_time::Instant);
+
+impl EvalEpoch {
+    /// Monotonic seconds elapsed since the epoch was captured.
+    pub fn now_secs(&self) -> f64 {
+        self.0.elapsed().as_secs_f64()
+    }
+}
 
 /// Plugin providing core gantz functionality.
 ///
@@ -84,6 +113,7 @@ where
         .init_resource::<Registry<N>>()
         .init_resource::<vm::CompileConfig>()
         .init_resource::<vm::ValidateCommitted>()
+        .insert_resource(EvalEpoch(web_time::Instant::now()))
         .init_non_send::<HeadVms>()
         // Register head event handlers.
         .add_observer(head::on_open::<N>)

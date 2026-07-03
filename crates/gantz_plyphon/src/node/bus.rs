@@ -1,0 +1,101 @@
+//! The `~bus` node: a synthdef boundary on a signal wire.
+
+use gantz_ca::CaHash;
+use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
+use gantz_egui::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind};
+use gantz_nodetag::NodeTag;
+use serde::{Deserialize, Serialize};
+
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+
+/// A synthdef *boundary*: drop it on a signal wire to cut the derived synthdef
+/// there. The upstream region ends in an `Out` to a driver-allocated private
+/// bus and the downstream region begins with an `In` from it, so the two sides
+/// become separate synths - an edit then respawns only its own region, and the
+/// other side's unit state (oscillator phase, delay lines) survives untouched.
+///
+/// The bus carries the input signal's full channel group (width inferred, like
+/// `~scopeout`). A `~bus` whose two sides land in the same region anyway (an
+/// uncut path also connects them) costs nothing - it lowers to a plain wire.
+/// Cutting comes at a price on the wire itself: the write is lifted to audio
+/// rate and fade-gained (the crossfade lever), and cross-region feedback is not
+/// yet supported (a bus cycle fails derivation).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
+pub struct Bus {}
+
+impl CaHash for Bus {
+    fn hash(&self, hasher: &mut gantz_ca::Hasher) {
+        hasher.update(b"gantz.plyphon.bus");
+    }
+}
+
+impl gantz_core::Node for Bus {
+    fn n_inputs(&self, _ctx: MetaCtx) -> usize {
+        1
+    }
+
+    fn n_outputs(&self, _ctx: MetaCtx) -> usize {
+        1
+    }
+
+    fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
+        // Steel-inert: the boundary exists only at synthdef derivation. A
+        // placeholder output feeds the inert dsp output edge.
+        gantz_core::node::parse_expr("0")
+    }
+}
+
+impl NodeDsp for Bus {
+    fn n_dsp_inputs(&self) -> usize {
+        1
+    }
+
+    fn n_dsp_outputs(&self) -> usize {
+        1
+    }
+
+    fn is_boundary(&self) -> bool {
+        true
+    }
+
+    fn ugens(&self, _path: &[usize], inputs: &[Signal], _b: &mut DspBuilder) -> Vec<Signal> {
+        // Only reached when both sides share a region (the boundary was not a
+        // cut): a plain wire. The cut case is lowered by the compiler itself
+        // (`derive_synthdefs`), which emits the bus `Out`/`In` pair.
+        vec![inputs.first().cloned().unwrap_or_else(|| Signal::silent(1))]
+    }
+}
+
+impl ToNodeDsp for Bus {
+    fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
+        Some(self)
+    }
+}
+
+impl NodeUi for Bus {
+    fn name(&self, _: &dyn Registry) -> &str {
+        "~bus"
+    }
+
+    fn description(&self) -> Option<&'static str> {
+        Some("Synthdef boundary: edits beyond it leave this side's synth running")
+    }
+
+    fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
+        let framed =
+            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~bus").selectable(false)));
+        NodeUiResponse::new(framed)
+    }
+
+    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {
+        match kind {
+            SocketKind::Input => Some(SocketDoc::ty("signal").with_description(
+                "signal to carry across the synthdef boundary (any channel width)",
+            )),
+            SocketKind::Output => Some(
+                SocketDoc::ty("signal")
+                    .with_description("the same signal, entering the downstream synthdef"),
+            ),
+        }
+    }
+}

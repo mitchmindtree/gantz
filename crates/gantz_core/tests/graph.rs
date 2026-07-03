@@ -610,9 +610,9 @@ fn test_graph_branch_both_outputs_same_target() {
 //    |  outer_result  |
 //    ------------------
 //
-// Push 0 → outer-left → inner-right (since select_inner gets '()
-// which != 0) → seven(7) → inner_result(7) → outer_result(7).
-// Push 1 → outer-right → eight(8) → outer_result(8).
+// Push 0 -> outer-left -> inner-right (since select_inner gets '()
+// which != 0) -> seven(7) -> inner_result(7) -> outer_result(7).
+// Push 1 -> outer-right -> eight(8) -> outer_result(8).
 #[test]
 fn test_graph_nested_diamond() {
     #[derive(Debug)]
@@ -673,8 +673,8 @@ fn test_graph_nested_diamond() {
         vm.run(format!("{f}")).unwrap();
     }
 
-    // Push 0: outer-left → inner-right (since '() != 0) → seven(7)
-    // → inner_result stores 7, outer_result stores 7.
+    // Push 0: outer-left -> inner-right (since '() != 0) -> seven(7)
+    // -> inner_result stores 7, outer_result stores 7.
     let ep_0 = entrypoint::push(vec![push_0.index()], g[push_0].n_outputs(ctx) as u8);
     vm.call_function_by_name_with_args(&entry_fn_name(&ep_0.id()), vec![])
         .unwrap();
@@ -687,7 +687,7 @@ fn test_graph_nested_diamond() {
         .expect("outer_result state was None");
     assert_eq!(outer, 7);
 
-    // Push 1: outer-right → eight(8) → outer_result stores 8.
+    // Push 1: outer-right -> eight(8) -> outer_result stores 8.
     // inner_result is not evaluated, stays at 7.
     let ep_1 = entrypoint::push(vec![push_1.index()], g[push_1].n_outputs(ctx) as u8);
     vm.call_function_by_name_with_args(&entry_fn_name(&ep_1.id()), vec![])
@@ -816,7 +816,7 @@ fn test_graph_lattice_reconvergence() {
         vm.run(format!("{f}")).unwrap();
     }
 
-    // Push 0: outer-left → sel_L → right (default) → seven(7) → number(7).
+    // Push 0: outer-left -> sel_L -> right (default) -> seven(7) -> number(7).
     let ep_0 = entrypoint::push(vec![push_0.index()], g[push_0].n_outputs(ctx) as u8);
     vm.call_function_by_name_with_args(&entry_fn_name(&ep_0.id()), vec![])
         .unwrap();
@@ -825,7 +825,7 @@ fn test_graph_lattice_reconvergence() {
         .expect("state was None");
     assert_eq!(state, 7);
 
-    // Push 1: outer-right → sel_R → right (default) → seven(7) → number(7).
+    // Push 1: outer-right -> sel_R -> right (default) -> seven(7) -> number(7).
     let ep_1 = entrypoint::push(vec![push_1.index()], g[push_1].n_outputs(ctx) as u8);
     vm.call_function_by_name_with_args(&entry_fn_name(&ep_1.id()), vec![])
         .unwrap();

@@ -13,7 +13,7 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass};
 use bevy_gantz::head;
 use bevy_gantz::reg::Registry;
 use bevy_gantz::vm::EvalEntryEvent;
-use bevy_gantz::{BuiltinNodes, CompileConfig, EvalEntryComplete};
+use bevy_gantz::{BuiltinNodes, CompileConfig, DspConfig, DspStatus, EvalEntryComplete};
 use bevy_log as log;
 use gantz_ca as ca;
 use gantz_core::Node;
@@ -170,8 +170,12 @@ where
             .add_systems(
                 Update,
                 (
-                    node::update_bang::drive_update_bangs::<N>.after(bevy_gantz::VmSet),
-                    node::tick_bang::drive_tick_bangs::<N>.after(bevy_gantz::VmSet),
+                    node::update_bang::drive_update_bangs::<N>
+                        .after(bevy_gantz::VmSet)
+                        .in_set(bevy_gantz::EntrypointSet),
+                    node::tick_bang::drive_tick_bangs::<N>
+                        .after(bevy_gantz::VmSet)
+                        .in_set(bevy_gantz::EntrypointSet),
                     persist_camera_and_seed::<N>,
                     // On layout settle, fork a layout-only commit. Runs after
                     // `VmSet` (so a graph edit commits first and its baseline is
@@ -1653,11 +1657,20 @@ pub fn update<N>(
     mut focused: ResMut<head::FocusedHead>,
     mut heads_query: Query<OpenHeadViews<N>, With<head::OpenHead>>,
     import_task: Option<Res<ImportTask>>,
-    (base_names, base_immutable, mut compile_config, mut change_validation): (
+    (
+        base_names,
+        base_immutable,
+        mut compile_config,
+        mut change_validation,
+        dsp_config,
+        dsp_status,
+    ): (
         Res<BaseNames>,
         Res<BaseImmutable>,
         ResMut<CompileConfig>,
         ResMut<bevy_gantz::ValidateCommitted>,
+        Option<ResMut<DspConfig>>,
+        Option<Res<DspStatus>>,
     ),
     mut demos: ResMut<Demos>,
     dispatchers: Res<ResponseDispatchers>,
@@ -1713,17 +1726,34 @@ where
     );
     panel_ui.set_clip_rect(ctx.content_rect());
 
+    // The Settings -> DSP panel: present only when a dsp runtime supplied both
+    // its config and status resources (so the demo / a no-dsp app omits the tab).
+    let dsp_panel = match (&dsp_config, &dsp_status) {
+        (Some(cfg), Some(status)) => Some(gantz_egui::widget::DspPanel {
+            present: status.present,
+            device: status.device.clone(),
+            sample_rate: status.sample_rate,
+            channels: status.channels,
+            sched_lead_ms: cfg.sched_lead.as_secs_f32() * 1000.0,
+            enabled: cfg.enabled,
+        }),
+        _ => None,
+    };
+
     let mut response = egui::containers::CentralPanel::default()
         .frame(egui::Frame::default())
         .show_inside(&mut panel_ui, |ui| {
-            gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
+            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .demos(&demos.0)
                 .compile_config(current_compile_config)
                 .validate_change_tracking(current_validate_change_tracking)
                 .trace_capture(trace_capture.0.clone(), level)
-                .perf_captures(&mut perf_vm.0, &mut perf_gui.0)
-                .show(&mut *gui_state, focused_ix, &mut access, ui)
+                .perf_captures(&mut perf_vm.0, &mut perf_gui.0);
+            if let Some(panel) = dsp_panel {
+                widget = widget.dsp(panel);
+            }
+            widget.show(&mut *gui_state, focused_ix, &mut access, ui)
         })
         .inner;
 
@@ -1839,6 +1869,16 @@ where
         change_validation.0 = enabled;
     }
 
+    // Apply Settings -> DSP changes to the dsp config resource.
+    if let Some(mut cfg) = dsp_config {
+        if let Some(lead_ms) = response.dsp_sched_lead_ms {
+            cfg.sched_lead = std::time::Duration::from_secs_f32(lead_ms / 1000.0);
+        }
+        if let Some(enabled) = response.dsp_enabled {
+            cfg.enabled = enabled;
+        }
+    }
+
     // Handle import button - open a file dialog (only if none already in flight).
     if response.import() && import_task.is_none() {
         let ext = gantz_egui::export::FILE_EXTENSION;
@@ -1929,7 +1969,12 @@ fn dispatch_eval_entry(entity: Option<Entity>, payload: DynResponse, cmds: &mut 
         return;
     };
     let gantz_egui::EvalEntry(entrypoint) = downcast_payload(payload);
-    cmds.trigger(EvalEntryEvent { head, entrypoint });
+    cmds.trigger(EvalEntryEvent {
+        head,
+        entrypoint,
+        // A user-driven push fires "now".
+        time: None,
+    });
 }
 
 /// Dispatch a [`gantz_egui::OpenHead`] payload as a [`head::OpenEvent`].

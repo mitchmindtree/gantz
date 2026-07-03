@@ -1,0 +1,43 @@
+[package]
+name = "bevy_gantz_plyphon"
+version = "0.1.0"
+description = "Bevy + plyphon DSP runtime for gantz: a cpal output stream driving synthdefs derived from DSP graphs."
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[dependencies]
+bevy_app.workspace = true
+bevy_ecs.workspace = true
+cpal.workspace = true
+gantz_ca.workspace = true
+gantz_core.workspace = true
+gantz_plyphon.workspace = true
+log.workspace = true
+plyphon.workspace = true
+web-time.workspace = true
+
+bevy_gantz.workspace = true
+
+# Web-only: cpal's wasm backend. Without the `audioworklet` feature this is the default
+# Web Audio (ScriptProcessor) host; with it, cpal's AudioWorklet host is selected instead.
+# `web-sys` (Window) lets the app detect the worklet thread (see `on_worklet_thread`).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cpal = { workspace = true, features = ["wasm-bindgen"] }
+web-sys = { workspace = true, features = ["Window"] }
+
+[features]
+# cpal's AudioWorklet host on the web - a real audio thread, off the deprecated ScriptProcessor
+# host. The `gantz` app enables it by default; the cpal deps it pulls are wasm32-gated, so it is a
+# no-op on native. The website build compiles this with WASM atomics + `-Z build-std` for the
+# shared-memory worklet thread (cpal only exposes the host under `target_feature = "atomics"`; see
+# `pkgs/wasm-threads-env.nix`).
+audioworklet = ["cpal/audioworklet"]
+
+[dev-dependencies]
+# The `custom_unit` example runs a minimal headless bevy app.
+bevy.workspace = true
+# For deriving `Pod`/`Zeroable` on a custom unit's state.
+bytemuck = { version = "1", features = ["derive"] }

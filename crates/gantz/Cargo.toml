@@ -5,7 +5,7 @@ description = "An environment for creative systems."
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true
-license.workspace = true
+license = "GPL-3.0-or-later"
 repository.workspace = true
 default-run = "gantz"
 
@@ -15,6 +15,7 @@ bevy.workspace = true
 bevy_egui.workspace = true
 bevy_gantz.workspace = true
 bevy_gantz_egui.workspace = true
+bevy_gantz_plyphon.workspace = true
 bevy_pkv.workspace = true
 dyn-clone.workspace = true
 dyn-hash.workspace = true
@@ -24,11 +25,21 @@ gantz_ca.workspace = true
 gantz_core.workspace = true
 gantz_egui.workspace = true
 gantz_format.workspace = true
+gantz_plyphon.workspace = true
 gantz_std.workspace = true
 petgraph.workspace = true
 serde.workspace = true
 steel-core.workspace = true
 web-time.workspace = true
+
+[features]
+# cpal's AudioWorklet backend on the web - audio on a dedicated Web Audio thread, off the
+# deprecated main-thread ScriptProcessor host. Enabled by default (the shipped website is the
+# AudioWorklet build); the cpal deps it pulls are wasm32-gated, so it is a no-op on native. Build
+# with `--no-default-features` to fall back to cpal's default ScriptProcessor host on the web. The
+# website build supplies the WASM-threads flags it needs (see `pkgs/gantz-website.nix`).
+default = ["audioworklet"]
+audioworklet = ["bevy_gantz_plyphon/audioworklet"]
 
 [dev-dependencies]
 ron.workspace = true

@@ -6,8 +6,13 @@ resolver = "3"
 authors = ["nannou-org"]
 edition = "2024"
 homepage = "https://github.com/nannou-org/gantz"
-license = "Apache-2.0"
 repository = "https://github.com/nannou-org/gantz"
+# NOTE: no `license` here on purpose - each crate must declare its own `license`
+# explicitly. This repo is multi-license: the pure-library crates are
+# `MIT OR Apache-2.0`, while the plyphon-linked crates (`gantz_plyphon`,
+# `bevy_gantz_plyphon`) and the `gantz` app are `GPL-3.0-or-later` (plyphon is
+# GPL). Requiring an explicit per-crate license avoids silently mis-licensing a
+# newly added crate.
 
 [workspace.dependencies]
 async-channel = "2.5"
@@ -34,11 +39,13 @@ bevy_tasks = "0.19"
 bevy_egui = { version = "0.40", features = ["serde"] }
 bevy_gantz = { version = "0.3.1", path = "crates/bevy_gantz" }
 bevy_gantz_egui = { version = "0.3.1", path = "crates/bevy_gantz_egui" }
+bevy_gantz_plyphon = { version = "0.1.0", path = "crates/bevy_gantz_plyphon" }
 bevy_input = "0.19"
 bevy_pkv = "0.16"
 bevy_time = "0.19"
 bevy_window = "0.19"
 blake3 = "1"
+cpal = "0.18"
 dyn-clone = "1"
 dyn-hash = "0.2.2"
 eframe = { version = "0.34", default-features = false, features = [
@@ -61,11 +68,13 @@ gantz_egui = { version = "0.4.0", path = "crates/gantz_egui" }
 gantz_format = { version = "0.2.1", path = "crates/gantz_format" }
 gantz_nodetag = { version = "0.1.0", path = "crates/gantz_nodetag" }
 gantz_nodetag_derive = { version = "0.1.0", path = "crates/gantz_nodetag_derive" }
+gantz_plyphon = { version = "0.1.0", path = "crates/gantz_plyphon" }
 gantz_std = { version = "0.3.0", path = "crates/gantz_std" }
 hex = "0.4"
 humantime = "2.3"
 log = { version = "0.4", features = ["serde"] }
 petgraph = { version = "0.8", features = ["serde-1"] }
+plyphon = "0.1.1"
 pollster = "0.4"
 rfd = "0.15"
 ron = "0.10"

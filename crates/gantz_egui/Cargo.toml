@@ -5,7 +5,7 @@ description = "UI traits and widgets that make up the GUI for gantz, an environm
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 [features]

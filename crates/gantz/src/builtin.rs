@@ -135,6 +135,27 @@ fn primitives() -> Primitives {
     register_primitive(&mut p, "plot", || {
         Box::new(gantz_egui::node::Plot::default()) as Box<_>
     });
+    register_primitive(&mut p, "~sinosc", || {
+        Box::new(gantz_plyphon::SinOsc::default()) as Box<_>
+    });
+    register_primitive(&mut p, "~out", || {
+        Box::new(gantz_plyphon::Out::default()) as Box<_>
+    });
+    register_primitive(&mut p, "~lag", || {
+        Box::new(gantz_plyphon::Lag::default()) as Box<_>
+    });
+    register_primitive(&mut p, "~scopeout", || {
+        Box::new(gantz_plyphon::ScopeOut::default()) as Box<_>
+    });
+    register_primitive(&mut p, "~pack", || {
+        Box::new(gantz_plyphon::Pack::default()) as Box<_>
+    });
+    register_primitive(&mut p, "~unpack", || {
+        Box::new(gantz_plyphon::Unpack::default()) as Box<_>
+    });
+    register_primitive(&mut p, "~bus", || {
+        Box::new(gantz_plyphon::Bus::default()) as Box<_>
+    });
     p
 }
 

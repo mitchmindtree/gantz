@@ -1,4 +1,12 @@
 <!DOCTYPE html>
+<!--
+The gantz website. Audio runs on cpal's AudioWorklet backend (a dedicated Web Audio thread over
+WASM threads), selected by the `audioworklet` cargo feature (the app's default) plus the
+wasm-threads build flags in `Trunk.toml` / `pkgs/wasm-threads-env.nix`. `coi-serviceworker.min.js`
+supplies the cross-origin isolation that SharedArrayBuffer (WASM threads) needs on header-less
+hosts like GitHub Pages (a no-op when real COOP/COEP headers are served). There is no PWA service
+worker: only one service worker can own the scope, and the cross-origin-isolation worker wins.
+-->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -6,20 +14,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,">
 
+    <!-- Cross-origin isolation for SharedArrayBuffer on header-less hosts (e.g. GitHub
+         Pages); a no-op when the server already sends COOP/COEP headers. -->
+    <script src="coi-serviceworker.min.js"></script>
+
     <!-- trunk asset directives -->
     <link data-trunk rel="rust" href="../Cargo.toml" data-bin="gantz"
           data-cargo-profile-release="wasm_release"
           data-wasm-opt="z"
-          data-wasm-opt-params="--enable-bulk-memory --enable-reference-types --enable-multivalue --enable-tail-call --enable-nontrapping-float-to-int"
+          data-wasm-opt-params="--enable-simd --enable-threads --enable-mutable-globals --enable-bulk-memory --enable-reference-types --enable-multivalue --enable-tail-call --enable-nontrapping-float-to-int"
           data-initializer="initializer.js" />
-    <link data-trunk rel="copy-file" href="manifest.json" />
-    <link data-trunk rel="copy-file" href="sw.js" />
-
-    <!-- PWA stuff -->
-    <link rel="manifest" href="manifest.json">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black">
-    <meta name="apple-mobile-web-app-title" content="PAW">
+    <link data-trunk rel="copy-file" href="coi-serviceworker.min.js" />
 
     <title>gantz</title>
     <style>
@@ -114,19 +119,6 @@
                 document.addEventListener(eventName, resumeAllContexts);
             });
         })();
-
-        // Service Worker for the PWA
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('sw.js')
-                    .then(registration => {
-                        console.log('ServiceWorker registered:', registration);
-                    })
-                    .catch(error => {
-                        console.log('ServiceWorker registration failed:', error);
-                    });
-            });
-        }
     </script>
 </body>
 </html>

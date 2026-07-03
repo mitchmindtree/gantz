@@ -5,7 +5,7 @@ description = "A bevy plugin for gantz"
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 [dependencies]

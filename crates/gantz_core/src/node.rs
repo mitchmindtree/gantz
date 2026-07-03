@@ -386,6 +386,16 @@ impl<'env, 'data> ExprCtx<'env, 'data> {
     pub fn get_node(&self) -> GetNode<'env> {
         self.get_node
     }
+
+    /// The Steel binding name of the read-only entrypoint [`args`](crate::args)
+    /// map, for nodes whose `expr` needs a per-evaluation input.
+    ///
+    /// For example, a timing-sensitive node reads the firing time with
+    /// `format!("(hash-ref {} '{})", ctx.args(), gantz_core::args::TIME)`. The
+    /// caller sets `%args` before invoking the entry fn (see [`args`](crate::args)).
+    pub fn args(&self) -> &str {
+        crate::ARGS
+    }
 }
 
 macro_rules! impl_node_for_ptr {

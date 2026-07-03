@@ -151,7 +151,12 @@ where
     for e_ref in g.edges_directed(n, petgraph::Outgoing) {
         for edge in e_ref.weight().edges() {
             let conn_ix = src_conn(&edge);
-            let include = conns.get(conn_ix).unwrap();
+            // An edge to a connection index not represented in `conns` is not part
+            // of this eval configuration, so exclude it. This happens when pulling
+            // over only a subset of a node's inputs - e.g. `derive_synthdef` seeds
+            // the pull with just a DSP node's dsp inputs, so a control input at a
+            // higher index falls outside `conns` and must not be traversed.
+            let include = conns.get(conn_ix).unwrap_or(false);
             if include {
                 set.insert(e_ref.target());
             }
@@ -339,6 +344,30 @@ where
         pull_reachable(g, n, &pl).collect::<Vec<_>>()
     }));
     Topo::new(g).iter(g).filter(move |n| reachable.contains(&n))
+}
+
+/// The evaluation order of the nodes feeding `node` via pull evaluation.
+///
+/// A topological order (sources first) of the connected component ending at
+/// `node`, seeded from the inputs selected by `conns`. A thin wrapper over
+/// the internal `eval_order` with no push sources and a single pull source, so a backend
+/// that pulls from a node (e.g. deriving a synthdef from the DSP subgraph
+/// feeding an output node) orders nodes the same way Steel does.
+pub fn pull_eval_order<G>(
+    g: G,
+    node: G::NodeId,
+    conns: node::Conns,
+) -> impl Iterator<Item = G::NodeId>
+where
+    G: IntoEdgesDirected + IntoNodeReferences + Visitable,
+    G::EdgeWeight: Edges,
+    G::NodeId: Eq + Hash,
+{
+    eval_order(
+        g,
+        std::iter::empty::<(G::NodeId, node::Conns)>(),
+        std::iter::once((node, conns)),
+    )
 }
 
 /// Group entrypoint sources by graph level (parent path).

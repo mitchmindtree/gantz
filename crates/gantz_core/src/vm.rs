@@ -78,6 +78,7 @@ where
 {
     let mut vm = Engine::new_base();
     vm.register_value(crate::ROOT_STATE, SteelVal::empty_hashmap());
+    vm.register_value(crate::ARGS, crate::args::default());
     crate::graph::register(get_node, graph, &[], &mut vm);
     let compiled = compile(get_node, graph, &mut vm, entrypoints, config)?;
     Ok((vm, compiled))

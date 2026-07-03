@@ -144,6 +144,10 @@ pub struct ChangedEvent {
     pub entity: Entity,
     pub old_head: ca::Head,
     pub new_head: ca::Head,
+    /// The commit the head pointed at before the change, if it resolved.
+    pub old_commit: Option<ca::CommitAddr>,
+    /// The commit the head points at after the change, if it resolves.
+    pub new_commit: Option<ca::CommitAddr>,
     /// Whether the new commit shares the previous commit's graph content
     /// address, i.e. only layout/metadata changed (e.g. a layout undo/redo).
     /// The VM and its node state are preserved across such a change.
@@ -380,13 +384,13 @@ pub fn on_replace<N>(
     let old_graph = old_head
         .as_ref()
         .and_then(|h| registry.head_commit(h).map(|c| c.graph));
+    let new_ca = registry.head_commit_ca(new_head).copied();
     let new_graph = registry.head_commit(new_head).map(|c| c.graph);
     let same_graph = matches!((old_graph, new_graph), (Some(a), Some(b)) if a == b);
     if same_graph {
         cmds.entity(focused_entity)
             .insert((HeadRef(new_head.clone()), WorkingGraph(graph)));
     } else {
-        let new_ca = registry.head_commit_ca(new_head).copied();
         crate::vm::migrate_vm_state(&registry, &mut vms, focused_entity, old_ca, new_ca);
         cmds.entity(focused_entity).insert((
             HeadRef(new_head.clone()),
@@ -401,6 +405,8 @@ pub fn on_replace<N>(
             entity: focused_entity,
             old_head: old,
             new_head: new_head.clone(),
+            old_commit: old_ca,
+            new_commit: new_ca,
             same_graph,
         });
     }
@@ -550,6 +556,8 @@ pub fn on_move_branch<N>(
         entity: event.entity,
         old_head: head.clone(),
         new_head: head,
+        old_commit: old_ca,
+        new_commit: Some(event.target),
         same_graph,
     });
 }

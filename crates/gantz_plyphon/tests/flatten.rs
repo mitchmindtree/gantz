@@ -441,17 +441,22 @@ fn nested_synth_plays_expected_tone() {
     g.add_edge(r, o, Edge::new(0.into(), 0.into()));
 
     let flat = flatten_with(&g, &map);
-    let def = derive_synthdef(&flat, 1, "test").expect("derive").def;
+    let derived = derive_synthdef(&flat, 1, "test").expect("derive");
 
     let (mut controller, _nrt, mut world) = engine(Options {
         sample_rate: SR as f64,
         output_channels: 1,
         ..Options::default()
     });
-    controller.add_synthdef(def);
-    controller
+    controller.add_synthdef(derived.def);
+    let node = controller
         .synth_new("test", ROOT_GROUP_ID, AddAction::Tail)
         .expect("synth_new");
+    for gain in &derived.gains {
+        controller
+            .set_control(node, gain.index, 1.0)
+            .expect("fade in");
+    }
 
     let a = render(&mut world, SR as usize / 2);
     assert!(a.iter().any(|s| s.abs() > 0.1), "nested synth was silent");

@@ -32,7 +32,7 @@ use gantz_plyphon::{
     AddAction, AsRefNode, Backend, Embedded, GainRef, ROOT_GROUP_ID, RegionDerived, ToNodeDsp,
     derive_synthdefs, flatten_from_registry, structural_sig,
 };
-use plyphon::{Controller, InputRef, Nrt, Options, StreamConsumer, World, engine};
+use plyphon::{Controller, Nrt, Options, StreamConsumer, World, engine};
 // `std::time::Instant` panics ("time not implemented") on `wasm32-unknown-unknown`;
 // `web_time::Instant` shims it to `performance.now()` there and is plain `std::Instant`
 // on native. This clock drives the crossfade fade-out deadlines and the bus-run graveyard.
@@ -734,9 +734,10 @@ fn expire_fades(fading: &mut Vec<FadingSynth>, now: Instant) -> Vec<FadingSynth>
 /// synths: a region whose key + structural signature both match keeps its synth
 /// untouched (its unit state - oscillator phase, delay lines - survives exactly).
 /// A changed region is crossfade-replaced. A disappeared region fades out. Every
-/// signature is computed on the *unpatched* def - `ScopeOut` bufnums, bus
-/// channels and fade defaults are all placeholders at that point - so a
-/// re-derive of the same graph never spuriously respawns.
+/// signature is computed on the final def - bus indices, `ScopeOut` bufnums
+/// and fade defaults are all no-lag control params / baked defaults excluded
+/// from [`structural_sig`] - so a re-derive of the same graph never spuriously
+/// respawns (and the driver never mutates a def copy).
 ///
 /// Park `entity` at `graph_ca` without touching its running synths, so an
 /// unactionable commit (a flatten or derive error) is not retried (and its
@@ -925,12 +926,14 @@ fn structural_sync<N>(
     );
 }
 
-/// Cue scope streams and patch every placeholder (`ScopeOut` bufnums, bus
-/// channels from [`BusAlloc`], fade-gain defaults to `0.0` so the synth spawns
-/// silent), then install and spawn one region's def - `Before` the given anchor
-/// when present, else at the root group's tail. Unbound fade gains are ramped
-/// straight to unity (bound params re-send from node state via the same-frame
-/// param sync). Returns `None` on failure, having cleaned up after itself.
+/// Cue scope streams and allocate buses (so their indices are known), then
+/// install and spawn one region's def - `Before` the given anchor when present,
+/// else at the root group's tail. The synth spawns silent behind its fade
+/// gains' baked `0.0` defaults; bus indices, scope bufnums and unbound
+/// fade-to-unity are then set via `set_control` in one command-ring drain
+/// (landing before the first audible block). Bound params re-send from node
+/// state via the same-frame param sync. Returns `None` on failure, having
+/// cleaned up after itself.
 fn spawn_region(
     controller: &mut Controller,
     state: &mut HeadSynths,
@@ -948,45 +951,45 @@ fn spawn_region(
         bus_reads,
     } = region;
     let gantz_plyphon::Derived {
-        mut def,
+        def,
         params,
         monitors,
         gains,
     } = derived;
 
-    // Patch the bus placeholders from the per-bus-node allocations.
+    // Allocate buses and cue scope streams up front so their indices are known
+    // for the post-spawn `set_control` drain below (no def mutation: the bus
+    // indices and bufnums are no-lag control params, set live per block).
+    let mut set_after_spawn: Vec<(usize, f32)> = Vec::new();
     for binding in bus_writes.iter().chain(&bus_reads) {
         let bus_key = (entity, binding.node_path.clone());
         let Some(run) = state.bus_alloc.get_or_alloc(bus_key, binding.channels, now) else {
             log::error!("bevy_gantz_plyphon: private audio buses exhausted; region not spawned");
             return None;
         };
-        def.units[binding.unit].inputs[0] = InputRef::Constant(run.start as f32);
+        set_after_spawn.push((binding.param, run.start as f32));
     }
 
-    // Cue a scope stream per `~scopeout`, patching its `ScopeOut` bufnum.
     let mut scopes = Vec::new();
     for m in &monitors {
         let index = state.scope_alloc.alloc();
-        def.units[m.scope_unit].inputs[0] = InputRef::Constant(index as f32);
         let channels = m.channels.max(1);
         match controller.cue_scope(index, channels, sample_rate, CHUNK_FRAMES, NUM_CHUNKS) {
-            Ok(consumer) => scopes.push(ScopeSlot {
-                node_path: m.node_path.clone(),
-                size: m.size,
-                channels,
-                index,
-                consumer,
-            }),
+            Ok(consumer) => {
+                set_after_spawn.push((m.bufnum_param, index as f32));
+                scopes.push(ScopeSlot {
+                    node_path: m.node_path.clone(),
+                    size: m.size,
+                    channels,
+                    index,
+                    consumer,
+                })
+            }
             Err(e) => {
                 log::error!("bevy_gantz_plyphon: cue_scope failed: {e:?}");
                 state.scope_alloc.free(index);
             }
         }
-    }
-    // Spawn silent; the fades ramp in below / via the same-frame param sync.
-    for g in &gains {
-        def.params[g.index].default = 0.0;
     }
 
     let def_name = def.name.clone();
@@ -1003,9 +1006,15 @@ fn spawn_region(
     };
     match backend.spawn(&def_name, target, action) {
         Ok(node_id) => {
-            // A gain with no param slot (no node state feeds it - every fade
-            // gain) would stay stuck at the patched 0.0 default. Ramp it
-            // straight to unity instead.
+            // Wire the synth in one command-ring drain: bus indices, scope
+            // bufnums, then the unbound fade gains ramped to unity. All land
+            // before the synth's first audible block (it spawns silent behind
+            // the fade's baked `0.0` default).
+            for (param, value) in &set_after_spawn {
+                if let Err(e) = backend.set_control(node_id, *param, *value) {
+                    log::error!("bevy_gantz_plyphon: post-spawn set_control failed: {e:?}");
+                }
+            }
             for g in &gains {
                 if !params.iter().any(|b| b.index == g.index) {
                     if let Err(e) = backend.set_control(node_id, g.index, 1.0) {

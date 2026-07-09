@@ -838,7 +838,13 @@ pub fn on_branch_node<N>(
     mut cmds: Commands,
     mut heads: Query<head::OpenHeadData<N>, With<head::OpenHead>>,
 ) where
-    N: 'static + Clone + ca::CaHash + From<gantz_egui::node::NamedRef> + Send + Sync,
+    N: 'static
+        + Clone
+        + ca::CaHash
+        + From<gantz_egui::node::NamedRef>
+        + gantz_egui::sync::AsNamedRef
+        + Send
+        + Sync,
 {
     let event = trigger.event();
     let Ok(mut data) = heads.get_mut(event.head) else {

@@ -44,6 +44,17 @@ impl Ref {
         self.addr
     }
 
+    /// The same reference (including its ext data) pointing at `addr`.
+    ///
+    /// For repointing operations where the referenced content is equivalent
+    /// (e.g. forking a reference to a new name), so domain flags still apply.
+    pub fn retarget(&self, addr: gantz_ca::ContentAddr) -> Self {
+        Self {
+            addr,
+            ext: self.ext.clone(),
+        }
+    }
+
     /// The raw extension datum stored under `key`, if any.
     pub fn ext(&self, key: &str) -> Option<&Datum> {
         self.ext.get(key)

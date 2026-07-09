@@ -19,7 +19,7 @@
 
 use crate::{
     BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, Demos, GuiState, HeadAccess,
-    HostNativePaneWindows, ImportTask, OpenHeadViews, PerfGui, PerfVm, Registry,
+    HostNativePaneWindows, ImportTask, OpenHeadViews, PerfGui, PerfVm, RefExtUis, Registry,
     ResponseDispatchers, SettingsTabs, TraceCapture, WindowedPanesRequested, handle_gantz_response,
     head, registry_ref,
 };
@@ -192,6 +192,7 @@ fn render_windowed_panes<N: PaneNode>(
         mut compile_config,
         mut change_validation,
         mut settings_tabs,
+        ref_ext_uis,
         mut demos,
         dispatchers,
     ): (
@@ -200,6 +201,7 @@ fn render_windowed_panes<N: PaneNode>(
         ResMut<CompileConfig>,
         ResMut<bevy_gantz::ValidateCommitted>,
         ResMut<SettingsTabs>,
+        Res<RefExtUis>,
         ResMut<Demos>,
         Res<ResponseDispatchers>,
     ),
@@ -245,6 +247,11 @@ fn render_windowed_panes<N: PaneNode>(
                 .iter_mut()
                 .map(|t| &mut **t as &mut dyn gantz_egui::widget::SettingsTab)
                 .collect();
+            let exts: Vec<&dyn gantz_egui::node::RefExtUi> = ref_ext_uis
+                .0
+                .iter()
+                .map(|e| &**e as &dyn gantz_egui::node::RefExtUi)
+                .collect();
             let widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .demos(&demos.0)
@@ -252,7 +259,8 @@ fn render_windowed_panes<N: PaneNode>(
                 .validate_change_tracking(change_validation.0)
                 .trace_capture(trace_capture.0.clone(), level)
                 .perf_captures(&mut perf_vm.0, &mut perf_gui.0)
-                .settings_tabs(&mut tabs);
+                .settings_tabs(&mut tabs)
+                .ref_ext_uis(&exts);
 
             // A background `Ui` spanning the window (as `update` builds for the
             // primary context).

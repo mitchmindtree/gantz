@@ -49,8 +49,8 @@ type UnitRegistrar = Box<dyn Fn(&mut plyphon::UnitRegistry) + Send + Sync>;
 
 use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
 use bevy_gantz::{EntrypointSet, EvalEpoch, Registry, VmSet};
-use bevy_gantz_egui::{RegisterResponseExt, SettingsTabs};
-use gantz_plyphon::{Config, DspSettingsTab, Status};
+use bevy_gantz_egui::{RefExtUis, RegisterResponseExt, SettingsTabs};
+use gantz_plyphon::{Config, DspRefExtUi, DspSettingsTab, Status, dsp_commits};
 
 /// Editable DSP settings: the domain's [`Config`] as a bevy resource.
 /// Runtime-only - not persisted, so it resets to the defaults each session.
@@ -173,12 +173,15 @@ where
         app.insert_resource(DspStatus(status));
         // The Settings -> DSP tab: the tab's emitted `Config` payloads dispatch
         // into a buffered message, applied (and re-snapshotted into the tab)
-        // by `sync_dsp_settings`. `init_resource::<SettingsTabs>` is idempotent
-        // and keeps the provider valid without the egui plugin.
+        // by `sync_dsp_settings`. The `NamedRef` inspector's DSP `inline`
+        // toggle is provided per frame by `provide_dsp_ref_ext`. The
+        // `init_resource` calls are idempotent and keep the providers valid
+        // without the egui plugin.
         app.init_resource::<SettingsTabs>()
+            .init_resource::<RefExtUis>()
             .add_message::<DspSettingsChanged>()
             .register_response_with::<Config>(dispatch_dsp_settings)
-            .add_systems(PreUpdate, sync_dsp_settings);
+            .add_systems(PreUpdate, (sync_dsp_settings, provide_dsp_ref_ext::<N>));
         // `.after(EntrypointSet)`: run once the `tick!`/`update!` drivers' triggered
         // evaluations have flushed, so the control values they queue are visible to
         // the param drain below in the same frame. `HeadSynths` is a NonSend resource:
@@ -463,6 +466,28 @@ fn sync_dsp_settings(
         config: config.0.clone(),
         status: status.0.clone(),
     }));
+}
+
+/// Provide this frame's DSP `NamedRef` inspector extension: the `inline`
+/// toggle for references to DSP graphs (see [`RefExtUis`] for the
+/// First/PreUpdate schedule contract).
+///
+/// The DSP-graph set requires the concrete node type (typed probes like
+/// [`ToNodeDsp`] are unreachable through the GUI's erased registry), so it is
+/// computed here and handed to the UI - recomputed only when the registry
+/// changes.
+fn provide_dsp_ref_ext<N>(
+    registry: Res<Registry<N>>,
+    mut dsp_graphs: Local<Option<std::sync::Arc<std::collections::HashSet<ca::ContentAddr>>>>,
+    mut ref_ext_uis: ResMut<RefExtUis>,
+) where
+    N: 'static + ToNodeDsp + gantz_core::Node + AsNamedRef + Send + Sync,
+{
+    if registry.is_changed() || dsp_graphs.is_none() {
+        *dsp_graphs = Some(std::sync::Arc::new(dsp_commits(&registry)));
+    }
+    let dsp_graphs = dsp_graphs.clone().expect("just initialised");
+    ref_ext_uis.0.push(Box::new(DspRefExtUi { dsp_graphs }));
 }
 
 /// Keep each open head's synth in sync, `.after(VmSet)` and `.after(EntrypointSet)`.

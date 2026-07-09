@@ -208,6 +208,72 @@ impl std::hash::Hash for Datum {
     }
 }
 
+impl gantz_ca::CaHash for Datum {
+    /// Content-address folding over the datum's structure.
+    ///
+    /// A variant marker byte plus length-prefixed variable-size contents keep
+    /// distinct values from colliding through adjacency (e.g. `Str("ab")`
+    /// followed by another value vs `Str("abc")`). `F64` folds its bit
+    /// pattern, matching the bitwise `Eq`/`Hash` semantics. Identity-sensitive
+    /// callers hash the [canonical](Datum::canonicalize) form so one logical
+    /// value has exactly one address.
+    fn hash(&self, hasher: &mut gantz_ca::Hasher) {
+        fn len(hasher: &mut gantz_ca::Hasher, n: usize) {
+            hasher.update(&(n as u64).to_be_bytes());
+        }
+        match self {
+            Datum::Null => {
+                hasher.update(&[0]);
+            }
+            Datum::Bool(b) => {
+                hasher.update(&[1, *b as u8]);
+            }
+            Datum::I64(n) => {
+                hasher.update(&[2]);
+                hasher.update(&n.to_be_bytes());
+            }
+            Datum::U64(n) => {
+                hasher.update(&[3]);
+                hasher.update(&n.to_be_bytes());
+            }
+            Datum::F64(x) => {
+                hasher.update(&[4]);
+                hasher.update(&x.to_bits().to_be_bytes());
+            }
+            Datum::Char(c) => {
+                hasher.update(&[5]);
+                hasher.update(&(*c as u32).to_be_bytes());
+            }
+            Datum::Str(s) => {
+                hasher.update(&[6]);
+                len(hasher, s.len());
+                hasher.update(s.as_bytes());
+            }
+            Datum::Bytes(b) => {
+                hasher.update(&[7]);
+                len(hasher, b.len());
+                hasher.update(b);
+            }
+            Datum::Seq(items) => {
+                hasher.update(&[8]);
+                len(hasher, items.len());
+                for item in items {
+                    gantz_ca::CaHash::hash(item, hasher);
+                }
+            }
+            Datum::Map(entries) => {
+                hasher.update(&[9]);
+                len(hasher, entries.len());
+                for (k, v) in entries {
+                    len(hasher, k.len());
+                    hasher.update(k.as_bytes());
+                    gantz_ca::CaHash::hash(v, hasher);
+                }
+            }
+        }
+    }
+}
+
 impl Serialize for Datum {
     /// Serializes the *represented* value (`Str("x")` as a string, `Map` as a
     /// map, ...), so a datum embedded in a larger `Serialize` type round-trips
@@ -1542,6 +1608,54 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
         )
+    }
+
+    /// Distinct datums fold to distinct addresses: variant markers and length
+    /// prefixes prevent adjacency and cross-variant collisions.
+    #[test]
+    fn ca_hash_distinctness() {
+        fn ca(d: &Datum) -> gantz_ca::ContentAddr {
+            gantz_ca::content_addr(d)
+        }
+        // Same numeric value, different variant.
+        assert_ne!(ca(&Datum::I64(1)), ca(&Datum::U64(1)));
+        // Empty containers are distinct.
+        assert_ne!(ca(&Datum::Map(vec![])), ca(&Datum::Seq(vec![])));
+        // Adjacent strings must not collide via length ambiguity.
+        assert_ne!(
+            ca(&Datum::Seq(vec![
+                Datum::Str("ab".into()),
+                Datum::Str("c".into())
+            ])),
+            ca(&Datum::Seq(vec![
+                Datum::Str("a".into()),
+                Datum::Str("bc".into())
+            ])),
+        );
+        // Key vs value content must not blur.
+        assert_ne!(
+            ca(&map(&[("ab", Datum::Str("c".into()))])),
+            ca(&map(&[("a", Datum::Str("bc".into()))])),
+        );
+    }
+
+    /// Pin the fold so accidental scheme changes are caught: ext data is
+    /// content-addressed, so this scheme is wire-stability-critical.
+    #[test]
+    fn ca_hash_stability_pin() {
+        let d = map(&[
+            ("flag", Datum::Bool(true)),
+            ("ratio", Datum::F64(1.5)),
+            (
+                "tags",
+                Datum::Seq(vec![Datum::Str("a".into()), Datum::Null]),
+            ),
+        ]);
+        assert_eq!(
+            gantz_ca::content_addr(&d).to_string(),
+            "62ff57c18727d269cad8e0cfd62856b57efbecec761aadc2caad0073445dd09d",
+            "Datum CaHash scheme changed - this breaks existing ext-carrying addresses",
+        );
     }
 
     /// `Eq`/`Hash` are bitwise for floats: total, reflexive, hash-consistent.

@@ -32,8 +32,10 @@ mod writer;
 
 pub mod sexpr;
 
-pub use datum::{Datum, DatumError, datum_from_expr, datum_text, from_datum, node_datum, to_datum};
+pub use datum::{datum_from_expr, datum_text};
 pub use error::{ErrorKind, FormatError, Span};
+#[doc(inline)]
+pub use gantz_core::datum::{Datum, DatumError, from_datum, node_datum, to_datum};
 pub use lower::Loaded;
 pub use model::{Addr, Document, Form};
 #[doc(hidden)]

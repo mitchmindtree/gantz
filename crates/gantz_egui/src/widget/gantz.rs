@@ -63,6 +63,7 @@ pub struct Gantz<'a> {
     compile_config: Option<gantz_core::compile::Config>,
     validate_change_tracking: Option<bool>,
     settings_tabs: &'a mut [&'a mut dyn widget::SettingsTab],
+    ref_ext_uis: &'a [&'a dyn crate::node::RefExtUi],
     pane_window_mode: PaneWindowMode,
 }
 
@@ -759,6 +760,7 @@ impl<'a> Gantz<'a> {
             compile_config: None,
             validate_change_tracking: None,
             settings_tabs: &mut [],
+            ref_ext_uis: &[],
             pane_window_mode: PaneWindowMode::default(),
         }
     }
@@ -798,6 +800,14 @@ impl<'a> Gantz<'a> {
     /// [`GantzResponse::responses`].
     pub fn settings_tabs(mut self, tabs: &'a mut [&'a mut dyn widget::SettingsTab]) -> Self {
         self.settings_tabs = tabs;
+        self
+    }
+
+    /// Provide domain extensions for the `NamedRef` node inspector (see
+    /// [`RefExtUi`][crate::node::RefExtUi]). Each applicable extension's rows
+    /// are appended after the ref's own inspector rows.
+    pub fn ref_ext_uis(mut self, uis: &'a [&'a dyn crate::node::RefExtUi]) -> Self {
+        self.ref_ext_uis = uis;
         self
     }
 
@@ -1588,9 +1598,17 @@ where
             if let Some(fh) = access.heads().get(*focused_head).cloned() {
                 let immutable = head_immutable(&fh, gantz.base_immutable, base_names);
                 let head_state = state.open_heads.entry(fh.clone()).or_default();
+                let ref_ext_uis = gantz.ref_ext_uis;
                 let result = access.with_head_mut(&fh, |data| {
                     node_inspector(
-                        gantz.env, data.graph, data.vm, head_state, &fh, immutable, ui,
+                        gantz.env,
+                        data.graph,
+                        data.vm,
+                        head_state,
+                        &fh,
+                        immutable,
+                        ref_ext_uis,
+                        ui,
                     )
                     .inner
                 });
@@ -1647,7 +1665,7 @@ where
                                 let node = data
                                     .graph
                                     .node_weight_mut(graph_scene::NodeIndex::new(n_ix))?;
-                                let ctx = NodeCtx::new(env, &path, &inlets, &outlets, data.vm);
+                                let ctx = NodeCtx::new(env, &path, &inlets, &outlets, &[], data.vm);
                                 let r = node.view_ui(ctx, ui);
                                 Some((r.changed, r.payloads))
                             })
@@ -3118,13 +3136,14 @@ fn head_immutable(
 
 /// Returns whether any inspected node had a CA-affecting edit, together with
 /// the payloads emitted by node UIs within the inspector.
-fn node_inspector<N>(
-    registry: &dyn Registry,
+fn node_inspector<'a, N>(
+    registry: &'a dyn Registry,
     root: &mut gantz_core::node::graph::Graph<N>,
     vm: &mut Engine,
     head_state: &mut OpenHeadState,
     head: &gantz_ca::Head,
     immutable: bool,
+    ref_ext_uis: &'a [&'a dyn crate::node::RefExtUi],
     ui: &mut egui::Ui,
 ) -> egui::InnerResponse<(bool, Vec<DynResponse>)>
 where
@@ -3154,7 +3173,8 @@ where
                         };
                         let ix = id.index();
                         let path = [ix];
-                        let ctx = NodeCtx::new(registry, &path[..], &inlets, &outlets, vm);
+                        let ctx =
+                            NodeCtx::new(registry, &path[..], &inlets, &outlets, ref_ext_uis, vm);
                         let resp = widget::NodeInspector::new(node, ctx, immutable).show(ui);
                         changed |= resp.changed;
                         responses.extend(resp.payloads);

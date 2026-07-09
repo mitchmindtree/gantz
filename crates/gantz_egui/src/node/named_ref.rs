@@ -370,6 +370,16 @@ impl NodeUi for NamedRef {
                 });
             });
         }
+
+        // Domain extension rows (see `RefExtUi`). Read out of the ctx first
+        // (the accessor returns the ctx's own lifetime) so the ctx can be
+        // passed down to each extension.
+        let ext_uis = ctx.ref_ext_uis();
+        for ext_ui in ext_uis {
+            let inner = ext_ui.inspector_rows(self, ctx, body);
+            resp.set_changed(inner.changed);
+            resp.payloads.extend(inner.payloads);
+        }
         resp
     }
 

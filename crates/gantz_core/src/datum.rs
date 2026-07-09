@@ -30,7 +30,13 @@ use std::vec;
 
 /// A self-describing value mirroring the serde data model; the bridge between
 /// node types and reader-valid Steel text.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// `Datum` has bit-level value semantics: `PartialEq`/`Eq`/`Hash` compare
+/// [`Datum::F64`] via `to_bits`, so equality is total, reflexive and
+/// hash-consistent. (This diverges from `f64` semantics for the values
+/// `to_datum` never produces anyway: NaN compares equal to itself and
+/// `0.0 != -0.0`.)
+#[derive(Clone, Debug)]
 pub enum Datum {
     /// `null` / unit / `None` -> the `null` symbol.
     Null,
@@ -139,6 +145,100 @@ impl Datum {
         match self {
             Datum::Seq(items) => Some(items),
             _ => None,
+        }
+    }
+
+    /// Recursively sort map entries by key, in place.
+    ///
+    /// [`to_datum`] preserves a struct's field declaration order while the
+    /// codec's free-form map serialization sorts keys, so the same logical
+    /// value can otherwise take two shapes. Contexts that treat datums as
+    /// identity (e.g. content addressing of ref extension data) canonicalize
+    /// first so one logical value has exactly one form.
+    pub fn canonicalize(&mut self) {
+        match self {
+            Datum::Seq(items) => items.iter_mut().for_each(Self::canonicalize),
+            Datum::Map(entries) => {
+                entries.iter_mut().for_each(|(_, v)| v.canonicalize());
+                entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            }
+            _ => (),
+        }
+    }
+}
+
+// -- value semantics -----------------------------------------------------------
+
+impl PartialEq for Datum {
+    fn eq(&self, other: &Self) -> bool {
+        use Datum::*;
+        match (self, other) {
+            (Null, Null) => true,
+            (Bool(a), Bool(b)) => a == b,
+            (I64(a), I64(b)) => a == b,
+            (U64(a), U64(b)) => a == b,
+            (F64(a), F64(b)) => a.to_bits() == b.to_bits(),
+            (Char(a), Char(b)) => a == b,
+            (Str(a), Str(b)) => a == b,
+            (Bytes(a), Bytes(b)) => a == b,
+            (Seq(a), Seq(b)) => a == b,
+            (Map(a), Map(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Datum {}
+
+impl std::hash::Hash for Datum {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Datum::Null => (),
+            Datum::Bool(b) => b.hash(state),
+            Datum::I64(n) => n.hash(state),
+            Datum::U64(n) => n.hash(state),
+            Datum::F64(x) => x.to_bits().hash(state),
+            Datum::Char(c) => c.hash(state),
+            Datum::Str(s) => s.hash(state),
+            Datum::Bytes(b) => b.hash(state),
+            Datum::Seq(items) => items.hash(state),
+            Datum::Map(entries) => entries.hash(state),
+        }
+    }
+}
+
+impl Serialize for Datum {
+    /// Serializes the *represented* value (`Str("x")` as a string, `Map` as a
+    /// map, ...), so a datum embedded in a larger `Serialize` type round-trips
+    /// through any self-describing format. Note `to_datum(&datum) == datum`
+    /// holds for [canonical](Datum::canonicalize) datums - this codec's own
+    /// map serialization sorts keys.
+    fn serialize<S: ser::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap as _, SerializeSeq as _};
+        match self {
+            Datum::Null => s.serialize_unit(),
+            Datum::Bool(b) => s.serialize_bool(*b),
+            Datum::I64(n) => s.serialize_i64(*n),
+            Datum::U64(n) => s.serialize_u64(*n),
+            Datum::F64(x) => s.serialize_f64(*x),
+            Datum::Char(c) => s.serialize_char(*c),
+            Datum::Str(v) => s.serialize_str(v),
+            Datum::Bytes(b) => s.serialize_bytes(b),
+            Datum::Seq(items) => {
+                let mut seq = s.serialize_seq(Some(items.len()))?;
+                for item in items {
+                    seq.serialize_element(item)?;
+                }
+                seq.end()
+            }
+            Datum::Map(entries) => {
+                let mut map = s.serialize_map(Some(entries.len()))?;
+                for (k, v) in entries {
+                    map.serialize_entry(k, v)?;
+                }
+                map.end()
+            }
         }
     }
 }
@@ -1428,5 +1528,66 @@ impl<'de> VariantAccess<'de> for VariantDeserializer {
                 &"struct variant",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(entries: &[(&str, Datum)]) -> Datum {
+        Datum::Map(
+            entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    /// `Eq`/`Hash` are bitwise for floats: total, reflexive, hash-consistent.
+    #[test]
+    fn value_semantics_are_bitwise() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        fn h(d: &Datum) -> u64 {
+            let mut s = DefaultHasher::new();
+            d.hash(&mut s);
+            s.finish()
+        }
+        let nan = Datum::F64(f64::NAN);
+        assert_eq!(nan, nan.clone());
+        assert_eq!(h(&nan), h(&nan.clone()));
+        assert_ne!(Datum::F64(0.0), Datum::F64(-0.0));
+        assert_eq!(Datum::F64(1.5), Datum::F64(1.5));
+        assert_ne!(Datum::I64(1), Datum::U64(1));
+    }
+
+    /// A canonical datum round-trips through `to_datum` unchanged, and
+    /// canonicalization recursively sorts map keys.
+    #[test]
+    fn canonical_datum_roundtrips_through_to_datum() {
+        let mut d = map(&[
+            (
+                "b",
+                Datum::Seq(vec![map(&[("z", Datum::Null), ("a", Datum::Bool(true))])]),
+            ),
+            ("a", Datum::I64(1)),
+        ]);
+        // Non-canonical: to_datum sorts the maps, so the value changes shape.
+        assert_ne!(to_datum(&d).unwrap(), d);
+        d.canonicalize();
+        assert_eq!(
+            d,
+            map(&[
+                ("a", Datum::I64(1)),
+                (
+                    "b",
+                    Datum::Seq(vec![map(&[("a", Datum::Bool(true)), ("z", Datum::Null)])])
+                ),
+            ])
+        );
+        assert_eq!(to_datum(&d).unwrap(), d);
+        let rt: Datum = from_datum(d.clone()).unwrap();
+        assert_eq!(rt, d);
     }
 }

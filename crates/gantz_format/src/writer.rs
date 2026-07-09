@@ -94,6 +94,10 @@ fn ref_spec(r: &crate::model::RefSpec) -> String {
     if r.sync {
         s.push_str(" #:sync");
     }
+    if let Some(ext) = &r.ext {
+        s.push_str(" #:ext ");
+        s.push_str(&datum_text(ext));
+    }
     s.push(')');
     s
 }

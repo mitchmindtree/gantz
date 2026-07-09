@@ -224,19 +224,22 @@ fn node_spec_from_datum(
                 .and_then(Datum::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let addr = pin.then(|| {
-                let hex = value
-                    .get("ref_")
-                    .and_then(Datum::as_str)
-                    .unwrap_or_default();
-                Addr::Concrete(hex.get(..8).unwrap_or(hex).to_string())
-            });
+            // `ref_` is a bare address when the reference carries no extension
+            // data, else a map of address + ext (`gantz_core::node::Ref`'s
+            // serde shape).
+            let ref_ = value.get("ref_");
+            let hex = ref_
+                .and_then(|r| r.as_str().or_else(|| r.get("addr").and_then(Datum::as_str)))
+                .unwrap_or_default();
+            let addr = pin.then(|| Addr::Concrete(hex.get(..8).unwrap_or(hex).to_string()));
+            let ext = ref_.and_then(|r| r.get("ext")).cloned();
             let sync = value.get("sync").and_then(Datum::as_bool).unwrap_or(false);
             let spec = NodeSpec::Ref(RefSpec {
                 func,
                 name,
                 addr,
                 sync,
+                ext,
             });
             Ok((spec, if func { "fnref" } else { "ref" }.to_string()))
         }

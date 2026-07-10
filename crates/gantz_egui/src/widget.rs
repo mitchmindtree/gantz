@@ -3,7 +3,7 @@ use time::{OffsetDateTime, UtcOffset, format_description};
 
 pub use checkbox_enabled::CheckboxEnabled;
 pub use gantz::{
-    AlignConfig, Gantz, GantzState, GridConfig, LayoutConfig, NodeViewPane, Pane,
+    AlignConfig, BaseSourcesCtx, Gantz, GantzState, GridConfig, LayoutConfig, NodeViewPane, Pane,
     PaneWindowGeometry, PaneWindowMode, SceneConfig, SnapConfig, SnapMode, WindowedPane,
     close_windowed_pane, pane_key, redock_windowed_pane, update_graph_pane_head,
 };

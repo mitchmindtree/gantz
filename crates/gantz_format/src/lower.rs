@@ -246,10 +246,19 @@ fn resolve_ref_value(refspec: &RefSpec, resolve: &Resolve) -> Result<Datum, Form
     } else {
         "NamedRef"
     };
+    // Mirror `gantz_core::node::Ref`'s serde shape: a bare address when the
+    // reference carries no extension data, else a map of address + ext.
+    let ref_value = match &refspec.ext {
+        None => Datum::Str(hex),
+        Some(ext) => Datum::Map(vec![
+            ("addr".to_string(), Datum::Str(hex)),
+            ("ext".to_string(), ext.clone()),
+        ]),
+    };
     Ok(Datum::tagged(
         tag,
         vec![
-            ("ref_".to_string(), Datum::Str(hex)),
+            ("ref_".to_string(), ref_value),
             ("name".to_string(), Datum::Str(refspec.name.clone())),
             ("sync".to_string(), Datum::Bool(refspec.sync)),
         ],

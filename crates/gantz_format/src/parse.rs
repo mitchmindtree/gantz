@@ -164,9 +164,14 @@ fn parse_ref_spec(func: bool, rest: &[ExprKind], src: &str) -> Result<NodeSpec, 
         })?;
     let mut addr = None;
     let mut sync = false;
-    for a in &rest[1..] {
+    let mut ext = None;
+    let mut args = rest[1..].iter();
+    while let Some(a) = args.next() {
         if as_keyword(a).as_deref() == Some("sync") {
             sync = true;
+        } else if as_keyword(a).as_deref() == Some("ext") {
+            // `#:ext` takes the following expr (a datum map) as its payload.
+            ext = args.next().map(|payload| datum_from_expr(payload, src));
         } else if let Some(s) = as_string(a) {
             addr = Some(Addr::Concrete(s));
         } else if let Some(s) = as_symbol(a) {
@@ -178,6 +183,7 @@ fn parse_ref_spec(func: bool, rest: &[ExprKind], src: &str) -> Result<NodeSpec, 
         name,
         addr,
         sync,
+        ext,
     }))
 }
 
@@ -592,5 +598,44 @@ mod tests {
             format!("{:?}", node2.spec),
             "generic node spec must survive a write/re-parse\n--- text2 ---\n{text2}",
         );
+    }
+}
+
+#[cfg(test)]
+mod ref_ext_tests {
+    use super::*;
+    use crate::sugar::CoreSugar;
+
+    /// A ref's `#:ext` datum-map tail parses, writes and re-parses
+    /// structurally intact, and stays absent when a ref carries none.
+    #[test]
+    fn ref_spec_ext_round_trips() {
+        let text = "\
+(graph g
+  (x (ref mysynth \"0000000000000000000000000000000000000000000000000000000000000000\" #:sync #:ext ((\"plyphon.dsp-ref\" ((inline #t))))))
+  (y (ref plain)))";
+        let expected_ext = Datum::Map(vec![(
+            "plyphon.dsp-ref".to_string(),
+            Datum::Map(vec![("inline".to_string(), Datum::Bool(true))]),
+        )]);
+        let doc1 = parse(text, &CoreSugar).expect("parse 1");
+        let ref_spec = |doc: &Document, ix: usize| match &doc.graphs[0].body.nodes[ix].spec {
+            NodeSpec::Ref(r) => r.clone(),
+            other => panic!("expected ref, got {other:?}"),
+        };
+        let r1 = ref_spec(&doc1, 0);
+        assert!(r1.sync);
+        assert_eq!(r1.ext, Some(expected_ext.clone()));
+        assert_eq!(ref_spec(&doc1, 1).ext, None);
+
+        let text2 = crate::writer::write_document(&doc1, &CoreSugar);
+        assert!(text2.contains("#:ext"));
+        let doc2 = parse(&text2, &CoreSugar).expect("parse 2");
+        let r2 = ref_spec(&doc2, 0);
+        assert!(r2.sync);
+        assert_eq!(r2.ext, Some(expected_ext));
+        assert_eq!(ref_spec(&doc2, 1).ext, None);
+        // A no-ext ref writes without any `#:ext` tail.
+        assert_eq!(text2.matches("#:ext").count(), 1);
     }
 }

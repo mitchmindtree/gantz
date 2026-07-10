@@ -43,7 +43,8 @@ impl NodeUi for FnNamedRef {
         let mut changed = false;
         if self.0.sync && is_outdated {
             if let Some(ca) = current_ca {
-                self.0.set_ref(gantz_core::node::Ref::new(ca));
+                let synced = self.0.ref_().retarget(ca);
+                self.0.set_ref(synced);
                 changed = true;
             }
         }

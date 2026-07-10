@@ -29,7 +29,7 @@ pub fn branch_node<N>(
     ca: gantz_ca::ContentAddr,
     path: &[node::Id],
 ) where
-    N: From<NamedRef>,
+    N: From<NamedRef> + AsNamedRef,
 {
     let commit_ca = CommitAddr::from(ca);
     let Some(commit) = registry.commits().get(&commit_ca) else {
@@ -48,7 +48,13 @@ pub fn branch_node<N>(
         return;
     };
     let node_id = node::graph::NodeIx::new(node_ix);
-    let new_ref = node::Ref::new(new_commit_ca.into());
+    // Carry the old reference's ext data over: the forked content is
+    // identical, so domain flags still apply. `sync` deliberately resets - a
+    // fork pins.
+    let new_ref = match graph.node_weight(node_id).and_then(N::as_named_ref) {
+        Some(old) => old.ref_().retarget(new_commit_ca.into()),
+        None => node::Ref::new(new_commit_ca.into()),
+    };
     let named_ref = NamedRef::new(new_name, new_ref);
     if let Some(node) = graph.node_weight_mut(node_id) {
         *node = N::from(named_ref);

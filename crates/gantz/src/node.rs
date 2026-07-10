@@ -1472,6 +1472,187 @@ mod tests {
         );
     }
 
+    /// The ext-free `NamedRef` address must never change: it is the address
+    /// every existing graph's references already hash to.
+    #[test]
+    fn named_ref_ext_free_content_addr_is_pinned() {
+        use gantz_egui::node::NamedRef;
+        let ca = gantz_ca::ContentAddr::from([0u8; 32]);
+        let named = NamedRef::new("mul".to_string(), gantz_core::node::Ref::new(ca));
+        assert_eq!(
+            gantz_ca::content_addr(&named).to_string(),
+            "c9e7273ea1f962854be2686011ac4f5bfc81bf05fd8e09fd4a9a02ee201ad816",
+            "ext-free NamedRef CA changed - this breaks every existing graph address",
+        );
+    }
+
+    /// Ref ext data participates in the `NamedRef` address, and survives every
+    /// repointing operation: rename cascades, resync, and node forking (which
+    /// deliberately still resets `sync`).
+    #[test]
+    fn named_ref_ext_survives_repointing_and_fork() {
+        use gantz_egui::node::NamedRef;
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct TestExt {
+            inline: bool,
+        }
+        let ext = TestExt { inline: true };
+        let key = "test.ext";
+
+        let ca = gantz_ca::ContentAddr::from([0u8; 32]);
+        let mut named = NamedRef::new("mul".to_string(), gantz_core::node::Ref::new(ca));
+        let plain_ca = gantz_ca::content_addr(&named);
+        named.set_ext(key, &ext).unwrap();
+        assert_ne!(gantz_ca::content_addr(&named), plain_ca);
+
+        // Rename cascade repoints - ext rides.
+        named.rename("mul2".to_string(), gantz_ca::ContentAddr::from([1u8; 32]));
+        assert_eq!(named.ext_as::<TestExt>(key), Some(TestExt { inline: true }));
+
+        // Resync repoints - ext rides.
+        let mut synced = NamedRef::with_sync("mul".to_string(), gantz_core::node::Ref::new(ca));
+        synced.set_ext(key, &ext).unwrap();
+        let latest = gantz_ca::ContentAddr::from([2u8; 32]);
+        assert!(synced.resync(|_| Some(latest)));
+        assert_eq!(synced.content_addr(), latest);
+        assert_eq!(
+            synced.ext_as::<TestExt>(key),
+            Some(TestExt { inline: true })
+        );
+
+        // Forking via branch_node replaces the node but carries ext over.
+        let mut registry = gantz_ca::Registry::<G>::default();
+        let now = std::time::Duration::from_secs(1);
+        let child: G = G::default();
+        let child_addr = gantz_ca::graph_addr(&child);
+        let commit_ca = registry.commit_graph(now, None, child_addr, || child);
+        registry.insert_name("child".to_string(), commit_ca);
+
+        let mut graph: G = G::default();
+        let mut named = NamedRef::with_sync(
+            "child".to_string(),
+            gantz_core::node::Ref::new(commit_ca.into()),
+        );
+        named.set_ext(key, &ext).unwrap();
+        let ix = graph.add_node(Box::new(named) as Box<dyn Node>);
+
+        gantz_egui::ops::branch_node(
+            &mut registry,
+            now,
+            &mut graph,
+            "fork".to_string(),
+            commit_ca.into(),
+            &[ix.index()],
+        );
+        let forked = gantz_egui::sync::AsNamedRef::as_named_ref(&graph[ix]).expect("named ref");
+        assert_eq!(forked.name(), "fork");
+        assert_eq!(
+            forked.ext_as::<TestExt>(key),
+            Some(TestExt { inline: true }),
+            "fork must carry ext over - the forked content is identical",
+        );
+        // Whole-node identity: name, sync reset (a fork pins) and ext all
+        // land as an ext-carrying `NamedRef::new` of the fork's commit.
+        let fork_commit = *registry.names().get("fork").expect("fork name");
+        let mut expected = NamedRef::new(
+            "fork".to_string(),
+            gantz_core::node::Ref::new(fork_commit.into()),
+        );
+        expected.set_ext(key, &ext).unwrap();
+        assert_eq!(
+            gantz_ca::content_addr(forked),
+            gantz_ca::content_addr(&expected),
+        );
+    }
+
+    /// An ext-carrying reference round-trips through the `.gantz` text format:
+    /// the `#:ext` tail survives, and so does the graph's commit address
+    /// (ext is CA-relevant, so a lossy round-trip would heal to a different
+    /// address).
+    #[test]
+    fn ext_text_roundtrip_preserves_addr_and_ext() {
+        use std::time::Duration;
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+
+        let now = Duration::from_secs(1_000_000);
+        let text1 = "\
+(graph mul
+  (m (expr (* $l $r)))
+  (l inlet) (r inlet) (out outlet)
+  (-> l (m 0)) (-> r (m 1)) (-> m out))
+
+(graph use-mul
+  (a inlet) (b inlet) (out outlet)
+  (mref (ref mul #:ext ((\"test.ext\" ((inline #t))))))
+  (-> a (mref 0)) (-> b (mref 1)) (-> mref out))";
+
+        let export1: gantz_egui::export::Export<G> =
+            gantz_egui::format::from_str(text1, now).expect("from_str 1");
+        let text2 = gantz_egui::format::to_string(&export1).expect("to_string");
+        assert!(text2.contains("#:ext"), "ext tail must survive\n{text2}");
+        let export2: gantz_egui::export::Export<G> =
+            gantz_egui::format::from_str(&text2, Duration::from_secs(7)).expect("from_str 2");
+
+        for (name, &head1) in export1.registry.names() {
+            let head2 = *export2.registry.names().get(name).expect("name present");
+            assert_eq!(
+                head1, head2,
+                "commit addr for `{name}` (ext is CA-relevant)\n--- text2 ---\n{text2}"
+            );
+        }
+
+        // The ext data itself survives on the re-parsed node.
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct TestExt {
+            inline: bool,
+        }
+        let head = export2.registry.names().get("use-mul").expect("use-mul");
+        let g = export2.registry.commit_graph_ref(head).expect("graph");
+        let named = g
+            .node_indices()
+            .find_map(|ix| gantz_egui::sync::AsNamedRef::as_named_ref(&g[ix]))
+            .expect("a named ref in use-mul");
+        assert_eq!(
+            named.ext_as::<TestExt>("test.ext"),
+            Some(TestExt { inline: true })
+        );
+    }
+
+    /// An ext-carrying `NamedRef` round-trips through the node set's RON and
+    /// Datum-codec serde with its address intact (the ext-free wire pins in
+    /// `node_serde_wire_format` are unaffected - ext-free output is unchanged).
+    #[test]
+    fn ext_roundtrips_through_node_set_serde() {
+        use gantz_egui::node::NamedRef;
+
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct TestExt {
+            inline: bool,
+        }
+        let ca = gantz_ca::ContentAddr::from([0u8; 32]);
+        let mut named = NamedRef::new("mul".to_string(), gantz_core::node::Ref::new(ca));
+        named
+            .set_ext("test.ext", &TestExt { inline: true })
+            .unwrap();
+        let expected_ca = gantz_ca::content_addr(&named);
+        let node: Box<dyn Node> = Box::new(named);
+
+        let ron = ron::to_string(&node).expect("to ron");
+        let back: Box<dyn Node> = ron::from_str(&ron).expect("from ron");
+        assert_eq!(gantz_ca::content_addr(&back), expected_ca, "ron: {ron}");
+
+        let datum = gantz_format::to_datum(&node).expect("to datum");
+        let back: Box<dyn Node> = gantz_format::from_datum(datum).expect("from datum");
+        assert_eq!(gantz_ca::content_addr(&back), expected_ca);
+        let named = gantz_egui::sync::AsNamedRef::as_named_ref(&back).expect("named");
+        assert_eq!(
+            named.ext_as::<TestExt>("test.ext"),
+            Some(TestExt { inline: true })
+        );
+    }
+
     /// Every base-primitive socket carries a hover doc (type + description), and
     /// those docs resolve through a `ref` to the referenced graph's inlet/outlet
     /// markers - exactly the path the GUI uses for a `NamedRef`'s socket tooltip.

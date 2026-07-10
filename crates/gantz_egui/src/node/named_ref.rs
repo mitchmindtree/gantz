@@ -102,12 +102,34 @@ impl NamedRef {
         self.ref_ = ref_;
     }
 
+    /// Decode the extension value stored under `key` on the underlying
+    /// [`Ref`](gantz_core::node::Ref). See [`gantz_core::node::Ref::ext_as`].
+    pub fn ext_as<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
+        self.ref_.ext_as(key)
+    }
+
+    /// Store `value` as the underlying reference's extension data under `key`.
+    /// See [`gantz_core::node::Ref::set_ext`].
+    pub fn set_ext(
+        &mut self,
+        key: impl Into<String>,
+        value: &impl serde::Serialize,
+    ) -> Result<(), gantz_core::datum::DatumError> {
+        self.ref_.set_ext(key, value)
+    }
+
+    /// Remove and return the underlying reference's extension datum stored
+    /// under `key`, if any. See [`gantz_core::node::Ref::remove_ext`].
+    pub fn remove_ext(&mut self, key: &str) -> Option<gantz_core::datum::Datum> {
+        self.ref_.remove_ext(key)
+    }
+
     /// Re-point this reference at a renamed target: change the stored name and
     /// repoint at the renamed graph's commit. Used by the rename cascade so a
     /// renamed parent keeps referencing its (also-renamed) children.
     pub fn rename(&mut self, name: String, ca: gantz_ca::ContentAddr) {
         self.name = name;
-        self.ref_ = gantz_core::node::Ref::new(ca);
+        self.ref_ = self.ref_.retarget(ca);
     }
 
     /// Bring the reference up to date with the name's current commit.
@@ -122,7 +144,7 @@ impl NamedRef {
         }
         match resolve(&self.name) {
             Some(ca) if ca != self.ref_.content_addr() => {
-                self.ref_ = gantz_core::node::Ref::new(ca);
+                self.ref_ = self.ref_.retarget(ca);
                 true
             }
             _ => false,
@@ -348,6 +370,16 @@ impl NodeUi for NamedRef {
                 });
             });
         }
+
+        // Domain extension rows (see `RefExtUi`). Read out of the ctx first
+        // (the accessor returns the ctx's own lifetime) so the ctx can be
+        // passed down to each extension.
+        let ext_uis = ctx.ref_ext_uis();
+        for ext_ui in ext_uis {
+            let inner = ext_ui.inspector_rows(self, ctx, body);
+            resp.set_changed(inner.changed);
+            resp.payloads.extend(inner.payloads);
+        }
         resp
     }
 
@@ -418,7 +450,7 @@ fn sync_fork_buttons(
 
     let sync_hover = format!("sync reference from {current_short} to {latest_short}");
     if ui.button("sync").on_hover_text(sync_hover).clicked() {
-        named.ref_ = gantz_core::node::Ref::new(latest);
+        named.ref_ = named.ref_.retarget(latest);
         return SyncForkAction::Synced;
     }
 

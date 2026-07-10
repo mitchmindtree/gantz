@@ -480,6 +480,7 @@ pub struct NodeCtx<'a> {
     path: &'a [node::Id],
     inlets: &'a [node::Id],
     outlets: &'a [node::Id],
+    ref_ext_uis: &'a [&'a dyn node::RefExtUi],
     vm: &'a mut Engine,
 }
 
@@ -798,6 +799,7 @@ impl<'a> NodeCtx<'a> {
         path: &'a [node::Id],
         inlets: &'a [node::Id],
         outlets: &'a [node::Id],
+        ref_ext_uis: &'a [&'a dyn node::RefExtUi],
         vm: &'a mut Engine,
     ) -> Self {
         Self {
@@ -805,6 +807,7 @@ impl<'a> NodeCtx<'a> {
             path,
             inlets,
             outlets,
+            ref_ext_uis,
             vm,
         }
     }
@@ -856,6 +859,15 @@ impl<'a> NodeCtx<'a> {
     /// Primarily exposed so that `Outlet` nodes can present their index.
     pub fn outlets(&self) -> &[node::Id] {
         self.outlets
+    }
+
+    /// The domain-provided [`RefExtUi`](node::RefExtUi) inspector extensions.
+    ///
+    /// Returns the slice with the ctx's own lifetime (rather than borrowing
+    /// `self`), so `NamedRef::inspector_rows` can read it out and still pass
+    /// the ctx down to each extension.
+    pub fn ref_ext_uis(&self) -> &'a [&'a dyn node::RefExtUi] {
+        self.ref_ext_uis
     }
 }
 

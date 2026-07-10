@@ -87,6 +87,10 @@ pub struct RefSpec {
     pub addr: Option<Addr>,
     /// Whether the reference should track the latest commit.
     pub sync: bool,
+    /// Optional domain-extension data carried by the reference: a datum map
+    /// keyed by domain (the text form of `gantz_core::node::Ref`'s ext).
+    /// `None` when the reference carries no extension data.
+    pub ext: Option<Datum>,
 }
 
 /// A file-local address token: a concrete content address or a label.

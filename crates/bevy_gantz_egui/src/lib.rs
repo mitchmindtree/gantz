@@ -143,6 +143,7 @@ where
             .init_resource::<Demos>()
             .init_resource::<WindowedPanesRequested>()
             .init_resource::<SettingsTabs>()
+            .init_resource::<RefExtUis>()
             // GUI state observers
             .add_observer(on_head_opened::<N>)
             .add_observer(on_head_changed::<N>)
@@ -193,15 +194,17 @@ where
                     poll_import_task,
                 ),
             )
-            .add_systems(First, clear_settings_tabs)
+            .add_systems(First, clear_ui_providers)
             .add_systems(EguiPrimaryContextPass, update::<N>);
     }
 }
 
-/// Empty [`SettingsTabs`] so domain providers refill it with fresh snapshots
-/// each frame (see the resource docs for the schedule contract).
-fn clear_settings_tabs(mut tabs: ResMut<SettingsTabs>) {
+/// Empty the domain-provided GUI collections ([`SettingsTabs`],
+/// [`RefExtUis`]) so domain providers refill them with fresh snapshots each
+/// frame (see the resource docs for the schedule contract).
+fn clear_ui_providers(mut tabs: ResMut<SettingsTabs>, mut ref_ext_uis: ResMut<RefExtUis>) {
     tabs.0.clear();
+    ref_ext_uis.0.clear();
 }
 
 // ----------------------------------------------------------------------------
@@ -291,6 +294,16 @@ pub struct ImportTask(bevy_tasks::Task<Option<Vec<u8>>>);
 /// payloads its tab emitted on the previous frame.
 #[derive(Default, Resource)]
 pub struct SettingsTabs(pub Vec<Box<dyn gantz_egui::widget::SettingsTab + Send + Sync>>);
+
+/// `NamedRef` inspector extensions contributed by domains (see
+/// [`RefExtUi`][gantz_egui::node::RefExtUi]).
+///
+/// Same provider contract as [`SettingsTabs`]: cleared each frame in `First`,
+/// refilled by domain provider systems in `PreUpdate`, consumed by both GUI
+/// render paths. Extensions take `&self`, so consumers borrow the resource
+/// shared.
+#[derive(Default, Resource)]
+pub struct RefExtUis(pub Vec<Box<dyn gantz_egui::node::RefExtUi + Send + Sync>>);
 
 // ----------------------------------------------------------------------------
 // Events
@@ -838,7 +851,13 @@ pub fn on_branch_node<N>(
     mut cmds: Commands,
     mut heads: Query<head::OpenHeadData<N>, With<head::OpenHead>>,
 ) where
-    N: 'static + Clone + ca::CaHash + From<gantz_egui::node::NamedRef> + Send + Sync,
+    N: 'static
+        + Clone
+        + ca::CaHash
+        + From<gantz_egui::node::NamedRef>
+        + gantz_egui::sync::AsNamedRef
+        + Send
+        + Sync,
 {
     let event = trigger.event();
     let Ok(mut data) = heads.get_mut(event.head) else {
@@ -1701,6 +1720,7 @@ pub fn update<N>(
         mut compile_config,
         mut change_validation,
         mut settings_tabs,
+        ref_ext_uis,
         mut requested,
         host_native,
     ): (
@@ -1709,6 +1729,7 @@ pub fn update<N>(
         ResMut<CompileConfig>,
         ResMut<bevy_gantz::ValidateCommitted>,
         ResMut<SettingsTabs>,
+        Res<RefExtUis>,
         ResMut<WindowedPanesRequested>,
         Option<Res<HostNativePaneWindows>>,
     ),
@@ -1783,6 +1804,11 @@ where
                 .iter_mut()
                 .map(|t| &mut **t as &mut dyn gantz_egui::widget::SettingsTab)
                 .collect();
+            let exts: Vec<&dyn gantz_egui::node::RefExtUi> = ref_ext_uis
+                .0
+                .iter()
+                .map(|e| &**e as &dyn gantz_egui::node::RefExtUi)
+                .collect();
             let widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .demos(&demos.0)
@@ -1791,7 +1817,8 @@ where
                 .trace_capture(trace_capture.0.clone(), level)
                 .perf_captures(&mut perf_vm.0, &mut perf_gui.0)
                 .pane_window_mode(pane_window_mode)
-                .settings_tabs(&mut tabs);
+                .settings_tabs(&mut tabs)
+                .ref_ext_uis(&exts);
             widget.show(&mut *gui_state, focused_ix, &mut access, ui)
         })
         .inner;

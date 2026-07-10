@@ -617,7 +617,8 @@ where
                 // A node at this (root) level has the single-element state path
                 // `[n_ix]`.
                 let node_path = [n_ix];
-                let node_ctx = crate::NodeCtx::new(registry, &node_path, &inlets, &outlets, vm);
+                let node_ctx =
+                    crate::NodeCtx::new(registry, &node_path, &inlets, &outlets, &[], vm);
                 let r = node.ui(node_ctx, nui_ctx);
                 *changed |= r.changed;
                 responses.extend(r.payloads);
@@ -786,7 +787,8 @@ where
             }
             // Node-specific items (e.g. the log node's "open logs").
             let node_path = [n_ix];
-            let mut node_ctx = crate::NodeCtx::new(registry, &node_path, &inlets, &outlets, vm);
+            let mut node_ctx =
+                crate::NodeCtx::new(registry, &node_path, &inlets, &outlets, &[], vm);
             let cm = graph[n_id].context_menu(&mut node_ctx, ui);
             *changed |= cm.changed;
             responses.extend(cm.payloads);

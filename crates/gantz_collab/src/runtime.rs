@@ -105,7 +105,7 @@ pub enum Event {
         from: PeerId,
         msg: GossipMsg,
     },
-    /// Objects fetched from a peer (or heads, via anti-entropy pulls).
+    /// Objects fetched from a peer.
     Objects {
         session: SessionId,
         from: PeerId,
@@ -470,7 +470,11 @@ async fn subscribe(
                 },
                 Ok(TopicEvent::Lagged) => Event::Error {
                     session: Some(session),
-                    message: "gossip lagged; anti-entropy will re-heal".to_string(),
+                    // Dropped tips re-heal on the next `Tips` announcement
+                    // (anti-entropy `Digest`/`Heads` pulls are reserved wire
+                    // slots, not yet implemented).
+                    message: "gossip lagged; dropped messages re-heal on the next announce"
+                        .to_string(),
                 },
                 Err(e) => Event::Error {
                     session: Some(session),

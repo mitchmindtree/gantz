@@ -30,7 +30,13 @@ pub enum GossipMsg {
         changed: Vec<(String, CommitAddr, GraphAddr)>,
     },
     /// Anti-entropy: a digest of the announcing peer's scoped heads (see
-    /// [`heads_digest`]). On mismatch, receivers pull [`SyncRequest::Heads`].
+    /// [`heads_digest`]).
+    ///
+    /// Reserved: nothing broadcasts digests yet, and receivers do not pull
+    /// [`SyncRequest::Heads`] on mismatch (the server already answers it).
+    /// Today a peer that misses a `Tips` broadcast re-heals on the next
+    /// announcement; this variant is the wire slot for the planned
+    /// digest-triggered pull.
     Digest {
         origin: PeerId,
         seq: u64,

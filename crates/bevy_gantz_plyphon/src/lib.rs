@@ -96,11 +96,34 @@ fn osc(secs: f64) -> u64 {
 /// Plugin wiring plyphon DSP into a gantz bevy app.
 ///
 /// Generic over `N`, the graph node type (must expose its DSP nodes via
-/// [`ToNodeDsp`]). Add it *after* [`bevy_gantz::GantzPlugin`].
+/// [`ToNodeDsp`]).
 ///
 /// To use custom UGens, register them with [`with_units`](Self::with_units). A
 /// node's [`NodeDsp::ugens`](gantz_plyphon::NodeDsp::ugens) can then name them in a
 /// [`UnitSpec`](plyphon::UnitSpec).
+///
+/// # The domain plugin shape
+///
+/// This plugin is the reference for wiring a domain into a gantz app: a
+/// plain bevy `Plugin` (deliberately no `GantzDomain` umbrella trait or
+/// plugin group - the plugin IS the domain's bevy-side assembly point),
+/// addable in ANY order relative to the other gantz plugins:
+///
+/// - Cross-plugin resource reads (here the shared [`EvalEpoch`] clock)
+///   happen in [`Plugin::finish`], which bevy runs after every plugin's
+///   `build`, before the schedule first ticks.
+/// - Contributions to shared collections go through
+///   `get_resource_or_init` + push (see
+///   [`bevy_gantz::EntrypointFns`],
+///   [`RegisterResponseExt::register_response_with`]) - never
+///   `insert_resource`, which would clobber earlier contributions.
+/// - GUI surfaces are provided by per-frame systems in `PreUpdate`
+///   (here `sync_dsp_settings` and `provide_dsp_ref_ext`) pushing into the
+///   `First`-cleared collections ([`SettingsTabs`], [`RefExtUis`]), whose
+///   `init_resource` calls are idempotent on purpose so the plugin works
+///   with or without `GantzEguiPlugin`.
+/// - The domain's own extension points (here
+///   [`with_units`](Self::with_units)) hang off the plugin itself.
 pub struct PlyphonPlugin<N> {
     unit_registrars: Vec<UnitRegistrar>,
     _marker: std::marker::PhantomData<N>,
@@ -145,12 +168,35 @@ where
     N: 'static + ToNodeDsp + gantz_core::Node + AsNamedRef + Clone + Send + Sync,
 {
     fn build(&self, app: &mut App) {
-        // The shared monotonic epoch (set by `GantzPlugin`, added before this) is
-        // the dsp clock's time base. The cpal callback anchors the engine clock
-        // to it via `fill_at`, matching the firing times queued into `%args`.
-        let epoch = *app.world().resource::<EvalEpoch>();
-        // DSP settings (the Settings -> DSP tab) + the status it reports.
+        // DSP settings (the Settings -> DSP tab).
         app.init_resource::<DspConfig>();
+        // The Settings -> DSP tab: the tab's emitted `Config` payloads dispatch
+        // into a buffered message, applied (and re-snapshotted into the tab)
+        // by `sync_dsp_settings`. The `NamedRef` inspector's DSP `inline`
+        // toggle is provided per frame by `provide_dsp_ref_ext`. The
+        // `init_resource` calls are idempotent and keep the providers valid
+        // without the egui plugin.
+        app.init_resource::<SettingsTabs>()
+            .init_resource::<RefExtUis>()
+            .add_message::<DspSettingsChanged>()
+            .register_response_with::<Config>(dispatch_dsp_settings)
+            .add_systems(PreUpdate, (sync_dsp_settings, provide_dsp_ref_ext::<N>));
+        // `.after(EntrypointSet)`: run once the `tick!`/`update!` drivers' triggered
+        // evaluations have flushed, so the control values they queue are visible to
+        // the param drain below in the same frame.
+        app.add_systems(Update, drive_synths::<N>.after(VmSet).after(EntrypointSet));
+    }
+
+    // Engine construction lives in `finish` rather than `build`: it reads the
+    // shared `EvalEpoch` clock, which another plugin (`GantzPlugin`) inserts
+    // at build time. `finish` runs after every plugin's `build` and before
+    // the schedule first ticks, so plugin order does not matter and the
+    // systems registered above find their resources on the first frame.
+    fn finish(&self, app: &mut App) {
+        // The shared monotonic epoch is the dsp clock's time base. The cpal
+        // callback anchors the engine clock to it via `fill_at`, matching
+        // the firing times queued into `%args`.
+        let epoch = *app.world().resource::<EvalEpoch>();
         let mut head_synths = HeadSynths::default();
         let status = match build_dsp_engine(epoch, &self.unit_registrars) {
             Some(engine) => {
@@ -171,23 +217,9 @@ where
             }
         };
         app.insert_resource(DspStatus(status));
-        // The Settings -> DSP tab: the tab's emitted `Config` payloads dispatch
-        // into a buffered message, applied (and re-snapshotted into the tab)
-        // by `sync_dsp_settings`. The `NamedRef` inspector's DSP `inline`
-        // toggle is provided per frame by `provide_dsp_ref_ext`. The
-        // `init_resource` calls are idempotent and keep the providers valid
-        // without the egui plugin.
-        app.init_resource::<SettingsTabs>()
-            .init_resource::<RefExtUis>()
-            .add_message::<DspSettingsChanged>()
-            .register_response_with::<Config>(dispatch_dsp_settings)
-            .add_systems(PreUpdate, (sync_dsp_settings, provide_dsp_ref_ext::<N>));
-        // `.after(EntrypointSet)`: run once the `tick!`/`update!` drivers' triggered
-        // evaluations have flushed, so the control values they queue are visible to
-        // the param drain below in the same frame. `HeadSynths` is a NonSend resource:
-        // it holds each `~scopeout`'s scope `StreamConsumer` (a `!Sync` SPSC handle).
-        app.insert_non_send(head_synths)
-            .add_systems(Update, drive_synths::<N>.after(VmSet).after(EntrypointSet));
+        // `HeadSynths` is a NonSend resource: it holds each `~scopeout`'s
+        // scope `StreamConsumer` (a `!Sync` SPSC handle).
+        app.insert_non_send(head_synths);
     }
 }
 

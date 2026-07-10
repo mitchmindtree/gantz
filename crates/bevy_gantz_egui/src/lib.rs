@@ -48,8 +48,6 @@ pub use sugar::BevySugar;
 /// - Registers observers for GUI state management
 /// - Registers node creation/inspection observers
 /// - Runs the main GUI update system
-///
-/// **Note:** This plugin requires `GantzPlugin<N>` to be added first.
 pub struct GantzEguiPlugin<N> {
     base_immutable: bool,
     _marker: PhantomData<N>,
@@ -97,19 +95,17 @@ where
         + 'static,
 {
     fn build(&self, app: &mut App) {
-        // Register update_bang + tick_bang entrypoint providers.
-        app.world_mut()
-            .resource_mut::<bevy_gantz::EntrypointFns<N>>()
-            .0
-            .push(Box::new(|get_node, graph| {
-                node::update_bang::entrypoints(get_node, graph)
-            }));
-        app.world_mut()
-            .resource_mut::<bevy_gantz::EntrypointFns<N>>()
-            .0
-            .push(Box::new(|get_node, graph| {
-                node::tick_bang::entrypoints(get_node, graph)
-            }));
+        // Register update_bang + tick_bang entrypoint providers. Contributed
+        // via `get_resource_or_init` + push so plugin order does not matter.
+        let mut entrypoint_fns = app
+            .world_mut()
+            .get_resource_or_init::<bevy_gantz::EntrypointFns<N>>();
+        entrypoint_fns.0.push(Box::new(|get_node, graph| {
+            node::update_bang::entrypoints(get_node, graph)
+        }));
+        entrypoint_fns.0.push(Box::new(|get_node, graph| {
+            node::tick_bang::entrypoints(get_node, graph)
+        }));
 
         // Builtin GUI response payload dispatchers. Head-scoped payloads
         // arrive at the observers below as `ForHead<T>` events; the rest map

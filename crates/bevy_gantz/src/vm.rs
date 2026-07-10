@@ -51,6 +51,11 @@ pub type EntrypointFn<N> = Box<
 /// Each provider is called during compilation to collect entrypoints.
 /// `GantzPlugin` registers `push_pull_entrypoints` by default.
 /// Downstream plugins (e.g. `GantzEguiPlugin`) push additional providers.
+///
+/// Contribute via `get_resource_or_init` + push (never `insert_resource`,
+/// which would clobber providers pushed by plugins built earlier) - the
+/// convention every shared provider collection follows so that plugin order
+/// does not matter.
 #[derive(Resource)]
 pub struct EntrypointFns<N: 'static>(pub Vec<EntrypointFn<N>>);
 

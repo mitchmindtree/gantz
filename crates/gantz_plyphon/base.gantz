@@ -1,0 +1,12 @@
+(graph demo-sine
+  (~sinosc0 ~sinosc)
+  (~out1 ~out)
+  (-> ~sinosc0 ~out1))
+
+(descriptions
+  (demo-sine "A sine wave into the audio output - the simplest DSP graph."))
+
+(layout demo-sine
+  (~out1 0 80)
+  (~sinosc0 0 0)
+  (camera 0 40 1))

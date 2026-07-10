@@ -181,6 +181,14 @@ where
             .add_message::<DspSettingsChanged>()
             .register_response_with::<Config>(dispatch_dsp_settings)
             .add_systems(PreUpdate, (sync_dsp_settings, provide_dsp_ref_ext::<N>));
+        // The DSP domain's base graphs (see `bevy_gantz_egui::base`).
+        app.world_mut()
+            .get_resource_or_init::<bevy_gantz_egui::base::BaseSources>()
+            .0
+            .push(bevy_gantz_egui::base::BaseSource {
+                name: "plyphon",
+                bytes: gantz_plyphon::BASE_BYTES,
+            });
         // `.after(EntrypointSet)`: run once the `tick!`/`update!` drivers' triggered
         // evaluations have flushed, so the control values they queue are visible to
         // the param drain below in the same frame.

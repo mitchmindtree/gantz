@@ -1844,4 +1844,80 @@ mod tests {
         let n2: BTreeSet<_> = back.registry.names().keys().cloned().collect();
         assert_eq!(n1, n2, "names preserved");
     }
+
+    /// The plyphon base source is exactly the writer's canonical form: the
+    /// file re-exports byte-identically, so `update-base` write-backs never
+    /// churn it.
+    #[test]
+    fn plyphon_base_export_is_stable() {
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+
+        let text1 = std::str::from_utf8(gantz_plyphon::BASE_BYTES).expect("utf8");
+        let base: gantz_egui::export::Export<G> =
+            gantz_egui::export::parse_export(gantz_plyphon::BASE_BYTES).expect("parse base");
+        let text2 = gantz_egui::format::to_string_named(&base).expect("to_string_named");
+        assert_eq!(
+            text1, text2,
+            "the plyphon base file must match the writer's canonical form",
+        );
+    }
+
+    /// Every graph across ALL base sources compiles in the merged registry -
+    /// the registry every app assembles at startup. DSP graphs are
+    /// Steel-inert, so they compile like any other graph.
+    #[test]
+    fn merged_base_sources_all_compile() {
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+
+        let mut merged: gantz_ca::Registry<G> = gantz_ca::Registry::default();
+        for bytes in [gantz_base::BYTES, gantz_plyphon::BASE_BYTES] {
+            let export: gantz_egui::export::Export<G> =
+                gantz_egui::export::parse_export_at(bytes, bevy_gantz_egui::base::BASE_TIMESTAMP)
+                    .expect("parse source");
+            merged.merge(export.registry);
+        }
+        let builtins = super::builtins();
+        let demos = std::collections::HashMap::new();
+        let reg_ref = gantz_egui::RegistryRef::new(&merged, &builtins, &demos);
+        let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
+        let names: Vec<String> = merged.names().keys().cloned().collect();
+        assert!(
+            names.contains(&"demo-sine".to_string()),
+            "plyphon demo loaded",
+        );
+        for name in names {
+            let head = gantz_ca::Head::Branch(name.clone());
+            let graph = merged
+                .head_graph(&head)
+                .unwrap_or_else(|| panic!("`{name}` has no head graph"));
+            let entrypoints = gantz_core::compile::push_pull_entrypoints(&get_node, graph);
+            let config = gantz_core::compile::Config::default();
+            gantz_core::vm::init(&get_node, graph, &entrypoints, &config).unwrap_or_else(|e| {
+                panic!(
+                    "merged base graph `{name}` failed to compile:\n{}",
+                    gantz_core::vm::error_chain(&e),
+                )
+            });
+        }
+    }
+
+    /// The plyphon source parses reproducibly at BASE_TIMESTAMP: startup and
+    /// demo-reset parses agree on the demo's commit address (the invariant
+    /// reset relies on, per source).
+    #[test]
+    fn plyphon_base_parses_reproducibly() {
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+        let parse = || -> gantz_egui::export::Export<G> {
+            gantz_egui::export::parse_export_at(
+                gantz_plyphon::BASE_BYTES,
+                bevy_gantz_egui::base::BASE_TIMESTAMP,
+            )
+            .expect("parse")
+        };
+        let a = parse();
+        let b = parse();
+        let ca_a = a.registry.names().get("demo-sine").expect("demo-sine");
+        let ca_b = b.registry.names().get("demo-sine").expect("demo-sine");
+        assert_eq!(ca_a, ca_b, "reset must resolve the startup commit address");
+    }
 }

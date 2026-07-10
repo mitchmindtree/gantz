@@ -114,6 +114,22 @@ where
     crate::format::from_str(text, now).map_err(ParseExportError::Format)
 }
 
+/// Like [`parse_export_at`], resolving names the document does not define
+/// through `seed` (externally-known name -> head commit associations). Lets a
+/// base source reference graphs another source defines - see
+/// [`gantz_format::from_str_seeded`].
+pub fn parse_export_seeded_at<N>(
+    bytes: &[u8],
+    now: gantz_ca::Timestamp,
+    seed: &std::collections::BTreeMap<String, gantz_ca::CommitAddr>,
+) -> Result<Export<Graph<N>>, ParseExportError>
+where
+    N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
+{
+    let text = std::str::from_utf8(bytes).map_err(ParseExportError::Utf8)?;
+    crate::format::from_str_seeded(text, now, seed).map_err(ParseExportError::Format)
+}
+
 /// The current time as a [`gantz_ca::Timestamp`] (duration since the Unix epoch).
 fn now() -> gantz_ca::Timestamp {
     web_time::SystemTime::now()
@@ -167,6 +183,48 @@ where
     N: Serialize + DeserializeOwned + gantz_core::Node + Clone + gantz_format::NodeSugar,
 {
     let export_registry = gantz_core::reg::export_heads(get_node, registry, heads);
+    let export = export_with(export_registry, all_views, all_demos);
+    crate::format::to_string_named(&export)
+}
+
+/// As [`export_heads_sexpr_named`], but exports EXACTLY the given names with
+/// no transitive dependency closure: references to graphs outside the set are
+/// written by name only, without their `(graph ...)` blocks.
+///
+/// Used for per-source base write-back, where a source's file must contain
+/// only its own graphs - refs into other sources stay by name, and loading
+/// resolves them through the seeded parse (see [`parse_export_seeded_at`]).
+pub fn export_names_sexpr_named<N>(
+    registry: &gantz_ca::Registry<Graph<N>>,
+    all_views: &HashMap<CommitAddr, crate::SceneView>,
+    all_demos: &HashMap<String, String>,
+    names: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<String, crate::format::FormatError>
+where
+    N: Serialize + DeserializeOwned + gantz_core::Node + Clone + gantz_format::NodeSugar,
+{
+    let requested: std::collections::HashSet<String> = names
+        .into_iter()
+        .map(|name| name.as_ref().to_string())
+        .collect();
+    let required: std::collections::HashSet<gantz_ca::CommitAddr> = requested
+        .iter()
+        .filter_map(|name| registry.names().get(name).copied())
+        .collect();
+    let mut export_registry = registry.export(&required);
+    // `export` keeps every name whose commit survives - identical graphs
+    // across sources share commits, so a foreign name could ride along.
+    // Restrict to exactly the requested names (their descriptions follow).
+    let extra: Vec<String> = export_registry
+        .names()
+        .keys()
+        .filter(|name| !requested.contains(*name))
+        .cloned()
+        .collect();
+    for name in extra {
+        export_registry.remove_name(&name);
+        export_registry.set_description(name, String::new());
+    }
     let export = export_with(export_registry, all_views, all_demos);
     crate::format::to_string_named(&export)
 }

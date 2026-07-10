@@ -195,6 +195,9 @@ fn render_windowed_panes<N: PaneNode>(
         ref_ext_uis,
         mut demos,
         dispatchers,
+        export_paths,
+        base_sources,
+        mut base_name_sources,
     ): (
         Res<BaseNames>,
         Res<BaseImmutable>,
@@ -204,6 +207,9 @@ fn render_windowed_panes<N: PaneNode>(
         Res<RefExtUis>,
         ResMut<Demos>,
         Res<ResponseDispatchers>,
+        Option<Res<crate::base::ExportPaths>>,
+        Res<crate::base::BaseSources>,
+        ResMut<crate::base::BaseNameSources>,
     ),
     mut cmds: Commands,
 ) {
@@ -233,6 +239,9 @@ fn render_windowed_panes<N: PaneNode>(
 
     let level = bevy_log::tracing_subscriber::filter::LevelFilter::current();
 
+    // The base source names, for the graph config pane's source dropdown.
+    let source_names: Vec<&str> = base_sources.0.iter().map(|s| s.name).collect();
+
     for (ctx, mut pane) in targets {
         // Render the pane into a `CentralPanel` filling the window, using the
         // regular pane frame. Scoped so the registry / query borrows release
@@ -252,7 +261,7 @@ fn render_windowed_panes<N: PaneNode>(
                 .iter()
                 .map(|e| &**e as &dyn gantz_egui::node::RefExtUi)
                 .collect();
-            let widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
+            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .demos(&demos.0)
                 .compile_config(compile_config.0)
@@ -261,6 +270,14 @@ fn render_windowed_panes<N: PaneNode>(
                 .perf_captures(&mut perf_vm.0, &mut perf_gui.0)
                 .settings_tabs(&mut tabs)
                 .ref_ext_uis(&exts);
+            // Base-source authoring context (mirrors `update`).
+            if let Some(paths) = &export_paths {
+                widget = widget.base_sources(gantz_egui::widget::BaseSourcesCtx {
+                    sources: &source_names,
+                    name_sources: &base_name_sources.0,
+                    default_source: paths.default_source,
+                });
+            }
 
             // A background `Ui` spanning the window (as `update` builds for the
             // primary context).
@@ -297,6 +314,8 @@ fn render_windowed_panes<N: PaneNode>(
             &base_names,
             &mut compile_config,
             &mut change_validation,
+            &base_sources,
+            &mut base_name_sources,
             import_task.as_deref(),
             &head_to_entity,
             &dispatchers,

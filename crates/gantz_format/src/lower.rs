@@ -43,11 +43,33 @@ struct Resolve<'a> {
     commit_ids: &'a HashMap<Addr, CommitAddr>,
     /// every commit built so far, for resolving concrete-address prefixes.
     known: &'a [CommitAddr],
+    /// Externally-known names, consulted as a fallback after the document's
+    /// own names. Lets a document reference graphs defined elsewhere (e.g. a
+    /// domain base source referencing another source's graphs).
+    seed: &'a BTreeMap<String, CommitAddr>,
 }
 
 /// Lower a parsed [`Document`] into a [`Loaded`] registry, synthesising root
 /// commits at `now` for any graph the `(commits ...)` table does not describe.
 pub fn lower<N>(doc: Document, now: Timestamp) -> Result<Loaded<N>, FormatError>
+where
+    N: DeserializeOwned + CaHash + 'static,
+{
+    lower_seeded(doc, now, &BTreeMap::new())
+}
+
+/// [`lower`], resolving names the document does not define through `seed`
+/// (externally-known name -> head commit associations).
+///
+/// The document's own names shadow the seed. A seeded reference embeds the
+/// seeded commit address in the built node, so the referring graph's content
+/// address depends on it - callers wanting reproducible addresses must seed
+/// reproducible ones.
+pub fn lower_seeded<N>(
+    doc: Document,
+    now: Timestamp,
+    seed: &BTreeMap<String, CommitAddr>,
+) -> Result<Loaded<N>, FormatError>
 where
     // `'static` is required by content-addressing (`Registry::add_graph`), whose
     // `for<'a> &'a Graph<N>` bound only holds for all `'a` when `N: 'static`.
@@ -100,6 +122,7 @@ where
             names: &names,
             commit_ids: &commit_ids,
             known: &known,
+            seed,
         };
         let (graph, index_map) = build_graph::<N>(&def.body, &resolve)?;
         let g_addr = registry.add_graph(graph);
@@ -219,26 +242,29 @@ where
 }
 
 fn resolve_ref_value(refspec: &RefSpec, resolve: &Resolve) -> Result<Datum, FormatError> {
-    let commit_ca =
-        match &refspec.addr {
-            None => resolve.names.get(&refspec.name).copied().ok_or_else(|| {
-                FormatError::new(ErrorKind::MissingDependency(refspec.name.clone()))
-            })?,
-            Some(Addr::Label(label)) => resolve
-                .commit_ids
-                .get(&Addr::Label(label.clone()))
-                .copied()
-                .ok_or_else(|| FormatError::new(ErrorKind::MissingDependency(label.clone())))?,
-            // A pinned address is advisory: if it no longer resolves (e.g. the
-            // commit healed because the format keeps only the head commit per
-            // graph, so a parent was dropped and the address recomputed), fall
-            // back to the reference's name. This keeps `NamedRef`s - including
-            // nested-graph refs in a copy/paste payload - resolving across the
-            // address drift (#232).
-            Some(Addr::Concrete(hex)) => resolve_commit(hex, resolve.known)
-                .or_else(|| resolve.names.get(&refspec.name).copied())
-                .ok_or_else(|| FormatError::new(ErrorKind::MissingDependency(hex.clone())))?,
-        };
+    let commit_ca = match &refspec.addr {
+        None => resolve
+            .names
+            .get(&refspec.name)
+            .or_else(|| resolve.seed.get(&refspec.name))
+            .copied()
+            .ok_or_else(|| FormatError::new(ErrorKind::MissingDependency(refspec.name.clone())))?,
+        Some(Addr::Label(label)) => resolve
+            .commit_ids
+            .get(&Addr::Label(label.clone()))
+            .copied()
+            .ok_or_else(|| FormatError::new(ErrorKind::MissingDependency(label.clone())))?,
+        // A pinned address is advisory: if it no longer resolves (e.g. the
+        // commit healed because the format keeps only the head commit per
+        // graph, so a parent was dropped and the address recomputed), fall
+        // back to the reference's name. This keeps `NamedRef`s - including
+        // nested-graph refs in a copy/paste payload - resolving across the
+        // address drift (#232).
+        Some(Addr::Concrete(hex)) => resolve_commit(hex, resolve.known)
+            .or_else(|| resolve.names.get(&refspec.name).copied())
+            .or_else(|| resolve.seed.get(&refspec.name).copied())
+            .ok_or_else(|| FormatError::new(ErrorKind::MissingDependency(hex.clone())))?,
+    };
     let content: ContentAddr = commit_ca.into();
     let hex = content.to_string();
     let tag = if refspec.func {

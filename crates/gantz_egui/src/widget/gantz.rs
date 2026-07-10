@@ -64,7 +64,22 @@ pub struct Gantz<'a> {
     validate_change_tracking: Option<bool>,
     settings_tabs: &'a mut [&'a mut dyn widget::SettingsTab],
     ref_ext_uis: &'a [&'a dyn crate::node::RefExtUi],
+    base_sources: Option<BaseSourcesCtx<'a>>,
     pane_window_mode: PaneWindowMode,
+}
+
+/// Base-source authoring context for the graph config pane's "source"
+/// dropdown (see [`widget::GraphConfig::base_sources`]). Supplied only by
+/// base-authoring hosts like `update-base`, where the per-source write-back
+/// makes an association change durable.
+#[derive(Clone, Copy)]
+pub struct BaseSourcesCtx<'a> {
+    /// The available base source names, in load order.
+    pub sources: &'a [&'a str],
+    /// Each base name's owning source.
+    pub name_sources: &'a HashMap<String, &'static str>,
+    /// The source an unattributed (session-created) name is written to.
+    pub default_source: &'a str,
 }
 
 /// Selects who draws the windows that popped-out panes live in.
@@ -596,6 +611,9 @@ pub struct GantzResponse {
     pub compile_config: Option<gantz_core::compile::Config>,
     /// The change-tracking validation toggle was changed (its new value).
     pub validate_change_tracking: Option<bool>,
+    /// The graph's base source association was changed via the graph config
+    /// pane (see [`Gantz::base_sources`]).
+    pub base_source_changed: Option<(gantz_ca::Head, String)>,
     /// Heads whose graph had a CA-affecting edit this frame (from a node UI, an
     /// inspector edit, or a structural scene edit). Lets the application
     /// commit/recompile only the changed heads instead of re-hashing every open
@@ -695,6 +713,7 @@ impl GantzResponse {
             reset_all_demos: false,
             compile_config: None,
             validate_change_tracking: None,
+            base_source_changed: None,
             changed_heads: Vec::new(),
             responses: Responses::default(),
             windowed_panes: Vec::new(),
@@ -761,6 +780,7 @@ impl<'a> Gantz<'a> {
             validate_change_tracking: None,
             settings_tabs: &mut [],
             ref_ext_uis: &[],
+            base_sources: None,
             pane_window_mode: PaneWindowMode::default(),
         }
     }
@@ -808,6 +828,14 @@ impl<'a> Gantz<'a> {
     /// are appended after the ref's own inspector rows.
     pub fn ref_ext_uis(mut self, uis: &'a [&'a dyn crate::node::RefExtUi]) -> Self {
         self.ref_ext_uis = uis;
+        self
+    }
+
+    /// Provide base-source authoring context so the graph config pane shows
+    /// a "source" dropdown selecting which base file a graph belongs to. A
+    /// change is reported via [`GantzResponse::base_source_changed`].
+    pub fn base_sources(mut self, ctx: BaseSourcesCtx<'a>) -> Self {
+        self.base_sources = Some(ctx);
         self
     }
 
@@ -1325,14 +1353,25 @@ where
                 };
 
                 let res = pane_ui(ui, |ui| {
-                    widget::GraphConfig::new(&head, head_state, names)
+                    let mut config = widget::GraphConfig::new(&head, head_state, names)
                         .is_base(is_base)
                         .immutable(immutable)
                         .demo_names(&demo_names_vec)
                         .current_demo(current_demo)
                         .current_description(current_description)
-                        .merge_env(gantz.env, merge_resolutions)
-                        .show(ui)
+                        .merge_env(gantz.env, merge_resolutions);
+                    // The base source dropdown, when authoring context was
+                    // supplied (see `Gantz::base_sources`).
+                    if let (Some(ctx), gantz_ca::Head::Branch(name)) = (&gantz.base_sources, &head)
+                    {
+                        let current = ctx
+                            .name_sources
+                            .get(name.as_str())
+                            .copied()
+                            .unwrap_or(ctx.default_source);
+                        config = config.base_sources(ctx.sources, Some(current));
+                    }
+                    config.show(ui)
                 });
                 if res.inner.new_branch.is_some() {
                     gantz_response.new_branch = res.inner.new_branch;
@@ -1348,6 +1387,9 @@ where
                 }
                 if res.inner.reset_base_graph {
                     gantz_response.reset_base_graph = Some(head.clone());
+                }
+                if let Some(source) = res.inner.base_source_changed {
+                    gantz_response.base_source_changed = Some((head.clone(), source));
                 }
                 if res.inner.export {
                     gantz_response.responses.push(Some(head), ExportHead);

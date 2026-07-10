@@ -16,6 +16,8 @@ pub struct GraphConfig<'a> {
     immutable: bool,
     demo_names: &'a [&'a str],
     current_demo: Option<&'a str>,
+    base_sources: &'a [&'a str],
+    current_base_source: Option<&'a str>,
     current_description: Option<&'a str>,
     env: Option<(
         &'a dyn crate::Registry,
@@ -38,6 +40,9 @@ pub struct GraphConfigResponse {
     pub description_changed: Option<String>,
     /// A merge candidate was chosen from the merge row.
     pub merge: Option<crate::MergeHead>,
+    /// The graph's base source association changed (see
+    /// [`base_sources`][GraphConfig::base_sources]).
+    pub base_source_changed: Option<String>,
 }
 
 impl<'a> GraphConfig<'a> {
@@ -54,6 +59,8 @@ impl<'a> GraphConfig<'a> {
             immutable: false,
             demo_names: &[],
             current_demo: None,
+            base_sources: &[],
+            current_base_source: None,
             current_description: None,
             env: None,
         }
@@ -89,6 +96,17 @@ impl<'a> GraphConfig<'a> {
     /// The graph's current description, used to seed the description editor.
     pub fn current_description(mut self, current_description: Option<&'a str>) -> Self {
         self.current_description = current_description;
+        self
+    }
+
+    /// The available base sources plus this graph's current one, shown as a
+    /// "source" dropdown selecting which base file the graph belongs to.
+    /// Without these (the default), the row is hidden - only base-authoring
+    /// hosts like `update-base` supply them, since an association change is
+    /// only durable where the per-source write-back runs.
+    pub fn base_sources(mut self, base_sources: &'a [&'a str], current: Option<&'a str>) -> Self {
+        self.base_sources = base_sources;
+        self.current_base_source = current;
         self
     }
 
@@ -128,6 +146,7 @@ impl<'a> GraphConfig<'a> {
         let mut new_branch = None;
         let mut description_changed = None;
         let mut demo_changed = None;
+        let mut base_source_changed = None;
         let mut reset_base_graph = false;
         let mut export = false;
         let mut merge = None;
@@ -194,6 +213,32 @@ impl<'a> GraphConfig<'a> {
                                         .clicked()
                                     {
                                         demo_changed = Some(Some(demo_name.to_string()));
+                                    }
+                                }
+                            });
+                    });
+                    ui.end_row();
+                }
+
+                // source (named graphs, when a base-authoring host supplies
+                // the source list): which base file the graph belongs to.
+                if is_named && !self.base_sources.is_empty() {
+                    ui.label("source");
+                    ui.add_enabled_ui(!self.immutable, |ui| {
+                        let selected_text = self.current_base_source.unwrap_or("none");
+                        egui::ComboBox::from_id_salt("base_source_select")
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                for &source in self.base_sources {
+                                    if ui
+                                        .selectable_label(
+                                            self.current_base_source == Some(source),
+                                            source,
+                                        )
+                                        .clicked()
+                                        && self.current_base_source != Some(source)
+                                    {
+                                        base_source_changed = Some(source.to_string());
                                     }
                                 }
                             });
@@ -307,6 +352,7 @@ impl<'a> GraphConfig<'a> {
             reset_base_graph,
             description_changed,
             merge,
+            base_source_changed,
         }
     }
 }

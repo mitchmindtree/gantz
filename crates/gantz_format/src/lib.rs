@@ -79,6 +79,26 @@ where
     lower::lower(doc, now)
 }
 
+/// [`from_str`], resolving names the document does not define through `seed`
+/// (externally-known name -> head commit associations).
+///
+/// Lets a document reference graphs defined elsewhere, e.g. a domain's base
+/// source referencing another source's graphs. The document's own names
+/// shadow the seed. Note a seeded reference embeds the seeded commit address
+/// in the built node, so the referring graph's content address depends on
+/// it - callers wanting reproducible addresses must seed reproducible ones.
+pub fn from_str_seeded<N>(
+    text: &str,
+    now: Timestamp,
+    seed: &std::collections::BTreeMap<String, gantz_ca::CommitAddr>,
+) -> Result<Loaded<N>, FormatError>
+where
+    N: Serialize + DeserializeOwned + CaHash + NodeSugar + 'static,
+{
+    let doc = parse::parse(text, &N::sugar())?;
+    lower::lower_seeded(doc, now, seed)
+}
+
 /// Serialize a registry to `.gantz` text (with gantz's built-in node keywords),
 /// returning the text along with the per-graph label context an extender needs
 /// to emit its own forms.
@@ -231,5 +251,116 @@ mod tests {
             .find(|c| !c.merge_parents.is_empty())
             .expect("merge commit survives the round-trip");
         assert_eq!(re_merge.merge_parents.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+    use gantz_ca::{CaHash, Hasher};
+    use gantz_nodetag::NodeTag;
+    use serde::{Deserialize, Serialize};
+
+    // A ref-capable node set: one type matching the wire tag the format's
+    // ref lowering produces.
+    trait RefNode: std::any::Any + CaHash {}
+
+    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, NodeTag)]
+    #[tag("NamedRef")]
+    struct TestRef {
+        ref_: gantz_core::node::Ref,
+        name: String,
+        #[serde(default)]
+        sync: bool,
+    }
+
+    impl CaHash for TestRef {
+        fn hash(&self, hasher: &mut Hasher) {
+            CaHash::hash(&self.ref_, hasher);
+            hasher.update(self.name.as_bytes());
+        }
+    }
+
+    impl RefNode for TestRef {}
+
+    crate::impl_node_set_serde! {
+        dyn RefNode {
+            TestRef,
+        }
+    }
+
+    impl NodeSugar for Box<dyn RefNode> {
+        fn sugar() -> Sugars<'static> {
+            Sugars(vec![&CoreSugar])
+        }
+    }
+
+    fn seed_commit() -> gantz_ca::CommitAddr {
+        gantz_ca::CommitAddr::from(gantz_ca::ContentAddr::from([7u8; 32]))
+    }
+
+    fn ref_addr_of(loaded: &Loaded<Box<dyn RefNode>>, name: &str) -> gantz_ca::ContentAddr {
+        let commit = loaded.names[name];
+        let graph = loaded
+            .registry
+            .commit_graph_ref(&commit)
+            .expect("graph for name");
+        let node = graph
+            .node_indices()
+            .find_map(|ix| (&*graph[ix] as &dyn std::any::Any).downcast_ref::<TestRef>())
+            .expect("a ref node");
+        node.ref_.content_addr()
+    }
+
+    /// A reference to a name the document does not define fails with
+    /// `MissingDependency` unseeded, and resolves to the seeded commit
+    /// address when seeded.
+    #[test]
+    fn seed_resolves_foreign_names() {
+        let text = "(graph use-foreign (r (ref foreign)))";
+        let now = std::time::Duration::ZERO;
+
+        let err = match from_str::<Box<dyn RefNode>>(text, now) {
+            Err(e) => e,
+            Ok(_) => panic!("must not resolve"),
+        };
+        assert!(
+            matches!(&err.kind, ErrorKind::MissingDependency(name) if name == "foreign"),
+            "unexpected error: {err:?}",
+        );
+
+        let seed = [("foreign".to_string(), seed_commit())]
+            .into_iter()
+            .collect();
+        let loaded = from_str_seeded::<Box<dyn RefNode>>(text, now, &seed).expect("seeded parse");
+        assert_eq!(
+            ref_addr_of(&loaded, "use-foreign"),
+            gantz_ca::ContentAddr::from(seed_commit()),
+            "the built ref must embed the seeded commit address",
+        );
+    }
+
+    /// The pinned-address arm heals through the seed too: a stale pinned
+    /// address whose name only the seed knows resolves to the seeded commit.
+    #[test]
+    fn seed_heals_stale_pinned_addr() {
+        let stale = "ee".repeat(32);
+        let text = format!("(graph use-foreign (r (ref foreign \"{stale}\")))");
+        let now = std::time::Duration::ZERO;
+
+        let err = match from_str::<Box<dyn RefNode>>(&text, now) {
+            Err(e) => e,
+            Ok(_) => panic!("must not resolve"),
+        };
+        assert!(matches!(&err.kind, ErrorKind::MissingDependency(_)));
+
+        let seed = [("foreign".to_string(), seed_commit())]
+            .into_iter()
+            .collect();
+        let loaded = from_str_seeded::<Box<dyn RefNode>>(&text, now, &seed).expect("seeded parse");
+        assert_eq!(
+            ref_addr_of(&loaded, "use-foreign"),
+            gantz_ca::ContentAddr::from(seed_commit()),
+        );
     }
 }

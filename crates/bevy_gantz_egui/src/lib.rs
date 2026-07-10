@@ -107,6 +107,15 @@ where
             node::tick_bang::entrypoints(get_node, graph)
         }));
 
+        // The core base source. Domain plugins push their own the same way.
+        app.world_mut()
+            .get_resource_or_init::<base::BaseSources>()
+            .0
+            .push(base::BaseSource {
+                name: "gantz",
+                bytes: gantz_base::BYTES,
+            });
+
         // Builtin GUI response payload dispatchers. Head-scoped payloads
         // arrive at the observers below as `ForHead<T>` events; the rest map
         // onto existing event types via custom dispatch fns. Observers that edit
@@ -131,6 +140,7 @@ where
 
         app.insert_resource(BaseImmutable(self.base_immutable))
             .init_resource::<BaseNames>()
+            .init_resource::<base::BaseNameSources>()
             .init_resource::<GuiState>()
             .init_resource::<TraceCapture>()
             .init_resource::<PerfVm>()
@@ -1542,8 +1552,13 @@ pub fn on_import_file<N>(
 }
 
 /// Reset a base graph to its original state by re-merging from the base export.
-pub fn on_reset_base_graph<N>(trigger: On<ResetBaseGraphEvent>, mut registry: ResMut<Registry<N>>)
-where
+pub fn on_reset_base_graph<N>(
+    trigger: On<ResetBaseGraphEvent>,
+    sources: Res<base::BaseSources>,
+    name_sources: Res<base::BaseNameSources>,
+    base_names: Res<BaseNames>,
+    mut registry: ResMut<Registry<N>>,
+) where
     N: 'static
         + Clone
         + serde::Serialize
@@ -1554,16 +1569,33 @@ where
         + Sync,
 {
     let name = &trigger.event().0;
-    let export: gantz_egui::export::Export<Graph<N>> = match gantz_egui::export::parse_export_at::<N>(
-        gantz_base::BYTES,
-        crate::base::BASE_TIMESTAMP,
-    ) {
-        Ok(e) => e,
-        Err(e) => {
-            log::error!("ResetBaseGraph: failed to parse base: {e}");
-            return;
-        }
+    // Re-parse the source that defined the name (recorded at load), seeded
+    // with the loaded base names so the source's cross-source refs resolve.
+    // Its own names shadow the seed via the in-document lookup, and every
+    // source parses at BASE_TIMESTAMP, so addresses match the startup parse.
+    let Some(source) = name_sources
+        .0
+        .get(name.as_str())
+        .and_then(|source_name| sources.0.iter().find(|s| s.name == *source_name))
+    else {
+        log::warn!("ResetBaseGraph: no base source recorded for '{name}'");
+        return;
     };
+    let export: gantz_egui::export::Export<Graph<N>> =
+        match gantz_egui::export::parse_export_seeded_at::<N>(
+            source.bytes,
+            crate::base::BASE_TIMESTAMP,
+            &base_names.0,
+        ) {
+            Ok(e) => e,
+            Err(e) => {
+                log::error!(
+                    "ResetBaseGraph: failed to parse base source `{}`: {e}",
+                    source.name
+                );
+                return;
+            }
+        };
     // Extract just the commits reachable from the target name (all parents,
     // so merge ancestry survives a reset).
     if let Some(&base_commit_ca) = export.registry.names().get(name) {
@@ -1574,7 +1606,10 @@ where
         registry.merge(subset);
         log::info!("Reset base graph '{name}' to original version");
     } else {
-        log::warn!("ResetBaseGraph: name '{name}' not found in base export");
+        log::warn!(
+            "ResetBaseGraph: name '{name}' not found in base source `{}`",
+            source.name,
+        );
     }
 }
 
@@ -1719,6 +1754,9 @@ pub fn update<N>(
         ref_ext_uis,
         mut requested,
         host_native,
+        export_paths,
+        base_sources,
+        mut base_name_sources,
     ): (
         Res<BaseNames>,
         Res<BaseImmutable>,
@@ -1728,6 +1766,9 @@ pub fn update<N>(
         Res<RefExtUis>,
         ResMut<WindowedPanesRequested>,
         Option<Res<HostNativePaneWindows>>,
+        Option<Res<base::ExportPaths>>,
+        Res<base::BaseSources>,
+        ResMut<base::BaseNameSources>,
     ),
     mut demos: ResMut<Demos>,
     dispatchers: Res<ResponseDispatchers>,
@@ -1790,6 +1831,9 @@ where
         None => gantz_egui::widget::PaneWindowMode::EguiWindow,
     };
 
+    // The base source names, for the graph config pane's source dropdown.
+    let source_names: Vec<&str> = base_sources.0.iter().map(|s| s.name).collect();
+
     let mut response = egui::containers::CentralPanel::default()
         .frame(egui::Frame::default())
         .show_inside(&mut panel_ui, |ui| {
@@ -1805,7 +1849,7 @@ where
                 .iter()
                 .map(|e| &**e as &dyn gantz_egui::node::RefExtUi)
                 .collect();
-            let widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
+            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .demos(&demos.0)
                 .compile_config(current_compile_config)
@@ -1815,6 +1859,16 @@ where
                 .pane_window_mode(pane_window_mode)
                 .settings_tabs(&mut tabs)
                 .ref_ext_uis(&exts);
+            // Base-source authoring context, present only where the
+            // per-source write-back runs (`update-base` inserts ExportPaths),
+            // so the main app never shows a non-durable source dropdown.
+            if let Some(paths) = &export_paths {
+                widget = widget.base_sources(gantz_egui::widget::BaseSourcesCtx {
+                    sources: &source_names,
+                    name_sources: &base_name_sources.0,
+                    default_source: paths.default_source,
+                });
+            }
             widget.show(&mut *gui_state, focused_ix, &mut access, ui)
         })
         .inner;
@@ -1837,6 +1891,8 @@ where
         &base_names,
         &mut compile_config,
         &mut change_validation,
+        &base_sources,
+        &mut base_name_sources,
         import_task.as_deref(),
         &head_to_entity,
         &dispatchers,
@@ -1867,6 +1923,8 @@ pub(crate) fn handle_gantz_response<N>(
     base_names: &BaseNames,
     compile_config: &mut CompileConfig,
     change_validation: &mut bevy_gantz::ValidateCommitted,
+    base_sources: &base::BaseSources,
+    base_name_sources: &mut base::BaseNameSources,
     import_task: Option<&ImportTask>,
     head_to_entity: &HashMap<ca::Head, Entity>,
     dispatchers: &ResponseDispatchers,
@@ -1961,6 +2019,18 @@ pub(crate) fn handle_gantz_response<N>(
     // Handle a graph description edit (keyed by the graph's name).
     if let Some((ca::Head::Branch(name), description)) = &response.description_changed {
         registry.set_description(name.clone(), description.clone());
+    }
+
+    // Re-attribute a graph to a different base source. Durable wherever the
+    // per-source write-back runs (`update-base`), which rewrites every
+    // configured file on the next save - moving the graph between files.
+    if let Some((ca::Head::Branch(name), source)) = &response.base_source_changed {
+        match base_sources.0.iter().find(|s| s.name == source.as_str()) {
+            Some(s) => {
+                base_name_sources.0.insert(name.clone(), s.name);
+            }
+            None => log::warn!("base source `{source}` is not registered"),
+        }
     }
 
     // Handle demo reset - re-merge the base version of the demo graph.

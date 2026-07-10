@@ -27,6 +27,26 @@ where
     N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
 {
     let loaded = gantz_format::from_str::<N>(text, now)?;
+    Ok(export_from_loaded(loaded))
+}
+
+/// [`from_str`], resolving names the document does not define through `seed`
+/// (externally-known name -> head commit associations). See
+/// [`gantz_format::from_str_seeded`].
+pub fn from_str_seeded<N>(
+    text: &str,
+    now: Timestamp,
+    seed: &std::collections::BTreeMap<String, CommitAddr>,
+) -> Result<Export<Graph<N>>, FormatError>
+where
+    N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
+{
+    let loaded = gantz_format::from_str_seeded::<N>(text, now, seed)?;
+    Ok(export_from_loaded(loaded))
+}
+
+/// Apply the GUI-layer extra forms (`layout`, `demo`) to a loaded registry.
+fn export_from_loaded<N: 'static>(loaded: Loaded<N>) -> Export<Graph<N>> {
     let mut views: HashMap<CommitAddr, crate::SceneView> = HashMap::new();
     let mut demos: HashMap<String, String> = HashMap::new();
     for form in &loaded.extra {
@@ -36,11 +56,11 @@ where
             other => log::warn!("ignoring unrecognised `.gantz` form `{other}`"),
         }
     }
-    Ok(Export {
+    Export {
         registry: loaded.registry,
         views,
         demos,
-    })
+    }
 }
 
 /// Serialize an [`Export`] to a `.gantz` document.

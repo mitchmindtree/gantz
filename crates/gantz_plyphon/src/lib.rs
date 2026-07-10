@@ -45,3 +45,9 @@ pub mod param;
 pub mod ref_ext;
 pub mod settings;
 pub mod sugar;
+
+/// Raw bytes of the DSP domain's baked-in base `.gantz` export, embedded at
+/// compile time. Contributed as a base source by `bevy_gantz_plyphon`'s
+/// plugin; self-contained (its graphs compose builtin nodes, not refs into
+/// other sources).
+pub const BASE_BYTES: &[u8] = include_bytes!("../base.gantz");

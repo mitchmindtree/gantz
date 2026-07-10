@@ -66,7 +66,7 @@ pub fn first_parent_chain(
 /// common ancestor. More than one candidate indicates criss-cross histories
 /// (each side merged the other); see [`crate::merge::merge_commits`] for how
 /// candidates are recursively merged into a virtual base.
-pub fn merge_bases(commits: &Commits, a: CommitAddr, b: CommitAddr) -> Vec<CommitAddr> {
+pub(crate) fn merge_bases(commits: &Commits, a: CommitAddr, b: CommitAddr) -> Vec<CommitAddr> {
     let a_ancestors: HashSet<CommitAddr> = ancestors(commits, a).collect();
     let mut common: HashSet<CommitAddr> = ancestors(commits, b)
         .filter(|ca| a_ancestors.contains(ca))
@@ -89,7 +89,7 @@ pub fn merge_bases(commits: &Commits, a: CommitAddr, b: CommitAddr) -> Vec<Commi
 /// are unrelated.
 ///
 /// When several best candidates exist (criss-cross histories, see
-/// [`merge_bases`]), one is chosen deterministically by max
+/// `merge_bases`), one is chosen deterministically by max
 /// `(timestamp, addr)`.
 pub fn merge_base(commits: &Commits, a: CommitAddr, b: CommitAddr) -> Option<CommitAddr> {
     merge_bases(commits, a, b).last().copied()

@@ -287,7 +287,7 @@ where
         // commit chain, so node identity and edit times degrade to direct
         // content matching and tip timestamps - deterministic (hence still
         // convergent), just coarser.
-        let virt = virtual_base(reg, &bases, resolutions, depth + 1)?;
+        let virt = base_graph(reg, &bases, resolutions, depth)?;
         let edit_times = EditTimes {
             ours: BTreeMap::new(),
             theirs: BTreeMap::new(),
@@ -411,9 +411,16 @@ where
     }
 }
 
-/// A virtual base graph for criss-cross merge-base `candidates` (canonically
-/// sorted, at least two): the candidates merged left to right.
-fn virtual_base<N, E, Ix>(
+/// The base graph for canonically-sorted merge-base `candidates` at the
+/// given recursion `depth`:
+///
+/// - none (unrelated tips): an empty graph, so everything unions.
+/// - one: that candidate's graph.
+/// - several within [`MAX_BASE_RECURSION`] (criss-cross): the candidates
+///   merged left to right into a *virtual* base.
+/// - several at the recursion cap: the deterministic tie-break candidate's
+///   graph, directly.
+fn base_graph<N, E, Ix>(
     reg: &Registry<Graph<N, E, Ix>>,
     candidates: &[CommitAddr],
     resolutions: Resolutions,
@@ -424,20 +431,22 @@ where
     E: Clone + Ord,
     Ix: IndexType,
 {
-    let mut virt = merged_tip_graph(reg, candidates[0], candidates[1], resolutions, depth)?;
+    match candidates {
+        [] => return Ok(Graph::default()),
+        [only] => return Ok(commit_graph_of(reg, *only)?.clone()),
+        _ if depth >= MAX_BASE_RECURSION => {
+            let last = *candidates.last().expect("non-empty");
+            return Ok(commit_graph_of(reg, last)?.clone());
+        }
+        _ => (),
+    }
+    let mut virt = merged_tip_graph(reg, candidates[0], candidates[1], resolutions, depth + 1)?;
     for &c in &candidates[2..] {
         let c_g = commit_graph_of(reg, c)?;
         // The fold step's base: the (possibly itself criss-cross) base of
         // the first candidate and `c`; an empty graph when unrelated.
         let pair_bases = history::merge_bases(reg.commits(), candidates[0], c);
-        let step_base = match pair_bases.as_slice() {
-            [] => Graph::default(),
-            [only] => commit_graph_of(reg, *only)?.clone(),
-            _ if depth < MAX_BASE_RECURSION => {
-                virtual_base(reg, &pair_bases, resolutions, depth + 1)?
-            }
-            _ => commit_graph_of(reg, *pair_bases.last().expect("non-empty"))?.clone(),
-        };
+        let step_base = base_graph(reg, &pair_bases, resolutions, depth + 1)?;
         let (_, _, outcome) =
             merge_graphs_direct(&step_base, &virt, c_g, resolutions, &EditTimes::default());
         virt = outcome.graph;

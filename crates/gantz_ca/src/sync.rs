@@ -60,7 +60,7 @@ pub enum SyncStep {
     /// do - the remote peer adopts ours.
     Adopt(CommitAddr),
     /// The tips truly diverged: merge `(first, second)` in canonical
-    /// orientation (see [`canonical_tips`]) and commit the outcome via
+    /// orientation (see `canonical_tips`) and commit the outcome via
     /// [`Registry::commit_merge_canonical`].
     Merge {
         first: CommitAddr,
@@ -384,7 +384,11 @@ impl std::error::Error for ApplyError {}
 /// same orientation for the same pair - the prerequisite for identical merge
 /// outcomes, as the merged graph's node order depends on which side plays
 /// "ours" (see [`MergeOutcome::graph`](crate::merge::MergeOutcome::graph)).
-pub fn canonical_tips(commits: &Commits, a: CommitAddr, b: CommitAddr) -> (CommitAddr, CommitAddr) {
+pub(crate) fn canonical_tips(
+    commits: &Commits,
+    a: CommitAddr,
+    b: CommitAddr,
+) -> (CommitAddr, CommitAddr) {
     let key = |ca: CommitAddr| (commits.get(&ca).map(|c| c.timestamp), ca);
     if key(a) <= key(b) { (a, b) } else { (b, a) }
 }
@@ -395,7 +399,11 @@ pub fn canonical_tips(commits: &Commits, a: CommitAddr, b: CommitAddr) -> (Commi
 ///
 /// Being strictly newer also means chain-tracked edit times through the merge
 /// never tie against pre-merge edits.
-pub fn merge_timestamp(commits: &Commits, first: CommitAddr, second: CommitAddr) -> Timestamp {
+pub(crate) fn merge_timestamp(
+    commits: &Commits,
+    first: CommitAddr,
+    second: CommitAddr,
+) -> Timestamp {
     let ts = |ca: CommitAddr| commits.get(&ca).map(|c| c.timestamp).unwrap_or_default();
     ts(first).max(ts(second)).saturating_add(NANO)
 }

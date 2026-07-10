@@ -25,7 +25,7 @@ pub use merge::{
 #[doc(inline)]
 pub use registry::Registry;
 #[doc(inline)]
-pub use sync::{SyncStep, canonical_tips, merge_timestamp, monotonic_timestamp, plan_sync_step};
+pub use sync::{SyncStep, monotonic_timestamp, plan_sync_step};
 
 mod ca;
 mod commit;

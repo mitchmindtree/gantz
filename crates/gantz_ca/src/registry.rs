@@ -195,8 +195,8 @@ impl<G> Registry<G> {
     /// Unlike [`commit_merge_to_head`](Self::commit_merge_to_head), which
     /// keeps the head's tip as the first parent, both the parent order and
     /// the timestamp here are pure functions of the two tips (see
-    /// [`sync::canonical_tips`](crate::sync::canonical_tips) and
-    /// [`sync::merge_timestamp`](crate::sync::merge_timestamp)): peers that
+    /// `sync::canonical_tips` and
+    /// `sync::merge_timestamp`): peers that
     /// merge the same pair independently mint the *identical* merge commit,
     /// which is what lets their DAGs converge rather than re-diverge.
     ///

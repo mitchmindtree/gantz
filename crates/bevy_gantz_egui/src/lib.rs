@@ -107,6 +107,15 @@ where
             node::tick_bang::entrypoints(get_node, graph)
         }));
 
+        // The core base source. Domain plugins push their own the same way.
+        app.world_mut()
+            .get_resource_or_init::<base::BaseSources>()
+            .0
+            .push(base::BaseSource {
+                name: "gantz",
+                bytes: gantz_base::BYTES,
+            });
+
         // Builtin GUI response payload dispatchers. Head-scoped payloads
         // arrive at the observers below as `ForHead<T>` events; the rest map
         // onto existing event types via custom dispatch fns. Observers that edit
@@ -131,6 +140,7 @@ where
 
         app.insert_resource(BaseImmutable(self.base_immutable))
             .init_resource::<BaseNames>()
+            .init_resource::<base::BaseNameSources>()
             .init_resource::<GuiState>()
             .init_resource::<TraceCapture>()
             .init_resource::<PerfVm>()
@@ -1542,8 +1552,12 @@ pub fn on_import_file<N>(
 }
 
 /// Reset a base graph to its original state by re-merging from the base export.
-pub fn on_reset_base_graph<N>(trigger: On<ResetBaseGraphEvent>, mut registry: ResMut<Registry<N>>)
-where
+pub fn on_reset_base_graph<N>(
+    trigger: On<ResetBaseGraphEvent>,
+    sources: Res<base::BaseSources>,
+    name_sources: Res<base::BaseNameSources>,
+    mut registry: ResMut<Registry<N>>,
+) where
     N: 'static
         + Clone
         + serde::Serialize
@@ -1554,16 +1568,26 @@ where
         + Sync,
 {
     let name = &trigger.event().0;
-    let export: gantz_egui::export::Export<Graph<N>> = match gantz_egui::export::parse_export_at::<N>(
-        gantz_base::BYTES,
-        crate::base::BASE_TIMESTAMP,
-    ) {
-        Ok(e) => e,
-        Err(e) => {
-            log::error!("ResetBaseGraph: failed to parse base: {e}");
-            return;
-        }
+    // Re-parse the source that defined the name (recorded at load).
+    let Some(source) = name_sources
+        .0
+        .get(name.as_str())
+        .and_then(|source_name| sources.0.iter().find(|s| s.name == *source_name))
+    else {
+        log::warn!("ResetBaseGraph: no base source recorded for '{name}'");
+        return;
     };
+    let export: gantz_egui::export::Export<Graph<N>> =
+        match gantz_egui::export::parse_export_at::<N>(source.bytes, crate::base::BASE_TIMESTAMP) {
+            Ok(e) => e,
+            Err(e) => {
+                log::error!(
+                    "ResetBaseGraph: failed to parse base source `{}`: {e}",
+                    source.name
+                );
+                return;
+            }
+        };
     // Extract just the commits reachable from the target name (all parents,
     // so merge ancestry survives a reset).
     if let Some(&base_commit_ca) = export.registry.names().get(name) {
@@ -1574,7 +1598,10 @@ where
         registry.merge(subset);
         log::info!("Reset base graph '{name}' to original version");
     } else {
-        log::warn!("ResetBaseGraph: name '{name}' not found in base export");
+        log::warn!(
+            "ResetBaseGraph: name '{name}' not found in base source `{}`",
+            source.name,
+        );
     }
 }
 

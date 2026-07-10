@@ -1556,6 +1556,7 @@ pub fn on_reset_base_graph<N>(
     trigger: On<ResetBaseGraphEvent>,
     sources: Res<base::BaseSources>,
     name_sources: Res<base::BaseNameSources>,
+    base_names: Res<BaseNames>,
     mut registry: ResMut<Registry<N>>,
 ) where
     N: 'static
@@ -1568,7 +1569,10 @@ pub fn on_reset_base_graph<N>(
         + Sync,
 {
     let name = &trigger.event().0;
-    // Re-parse the source that defined the name (recorded at load).
+    // Re-parse the source that defined the name (recorded at load), seeded
+    // with the loaded base names so the source's cross-source refs resolve.
+    // Its own names shadow the seed via the in-document lookup, and every
+    // source parses at BASE_TIMESTAMP, so addresses match the startup parse.
     let Some(source) = name_sources
         .0
         .get(name.as_str())
@@ -1578,7 +1582,11 @@ pub fn on_reset_base_graph<N>(
         return;
     };
     let export: gantz_egui::export::Export<Graph<N>> =
-        match gantz_egui::export::parse_export_at::<N>(source.bytes, crate::base::BASE_TIMESTAMP) {
+        match gantz_egui::export::parse_export_seeded_at::<N>(
+            source.bytes,
+            crate::base::BASE_TIMESTAMP,
+            &base_names.0,
+        ) {
             Ok(e) => e,
             Err(e) => {
                 log::error!(

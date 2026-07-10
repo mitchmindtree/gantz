@@ -1920,4 +1920,74 @@ mod tests {
         let ca_b = b.registry.names().get("demo-sine").expect("demo-sine");
         assert_eq!(ca_a, ca_b, "reset must resolve the startup commit address");
     }
+
+    /// A domain base source can reference another source's graphs: the parse
+    /// fails unseeded, resolves when seeded with the other source's names,
+    /// the merged registry compiles, and the source's own export keeps the
+    /// foreign ref by name WITHOUT embedding the foreign graph.
+    #[test]
+    fn cross_source_base_refs_resolve_via_seed() {
+        use std::collections::HashMap;
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+        let ts = bevy_gantz_egui::base::BASE_TIMESTAMP;
+
+        let core: gantz_egui::export::Export<G> =
+            gantz_egui::export::parse_export_at(gantz_base::BYTES, ts).expect("parse core");
+        let seed = core.registry.names().clone();
+
+        // A synthetic domain source wrapping the core `add` graph.
+        let text = "\
+(graph wrap-add
+  (a inlet) (b inlet) (out outlet)
+  (add0 (ref add #:sync))
+  (-> a (add0 0)) (-> b (add0 1)) (-> add0 out))";
+
+        // Unseeded: the foreign name cannot resolve.
+        match gantz_egui::export::parse_export_at::<Box<dyn Node>>(text.as_bytes(), ts) {
+            Err(gantz_egui::export::ParseExportError::Format(e)) => assert!(
+                matches!(&e.kind, gantz_format::ErrorKind::MissingDependency(n) if n == "add"),
+                "unexpected error kind: {e:?}",
+            ),
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("must not resolve unseeded"),
+        }
+
+        // Seeded with the core source's names: resolves to the core commit.
+        let domain: gantz_egui::export::Export<G> =
+            gantz_egui::export::parse_export_seeded_at(text.as_bytes(), ts, &seed)
+                .expect("seeded parse");
+        let mut merged = core.registry;
+        merged.merge(domain.registry);
+
+        // The merged registry compiles the wrapper.
+        let builtins = super::builtins();
+        let demos = HashMap::new();
+        let reg_ref = gantz_egui::RegistryRef::new(&merged, &builtins, &demos);
+        let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
+        let head = gantz_ca::Head::Branch("wrap-add".to_string());
+        let graph = merged.head_graph(&head).expect("wrap-add graph");
+        let entrypoints = gantz_core::compile::push_pull_entrypoints(&get_node, graph);
+        let config = gantz_core::compile::Config::default();
+        gantz_core::vm::init(&get_node, graph, &entrypoints, &config).unwrap_or_else(|e| {
+            panic!(
+                "wrap-add failed to compile:\n{}",
+                gantz_core::vm::error_chain(&e),
+            )
+        });
+
+        // The domain source's own export keeps `add` by name only.
+        let out = gantz_egui::export::export_names_sexpr_named(
+            &merged,
+            &HashMap::new(),
+            &HashMap::new(),
+            ["wrap-add"],
+        )
+        .expect("per-source export");
+        assert!(out.contains("(graph wrap-add"), "own graph present:\n{out}");
+        assert!(out.contains("(ref add"), "foreign ref by name:\n{out}");
+        assert!(
+            !out.contains("(graph add"),
+            "foreign graph must not be embedded:\n{out}",
+        );
+    }
 }

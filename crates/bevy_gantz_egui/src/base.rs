@@ -10,10 +10,11 @@
 //! their original form on each launch. Users who want to customize a base
 //! node should duplicate it under a new name.
 //!
-//! Each source must currently be self-contained: a source's refs resolve
-//! within its own file only (parsing does not yet thread earlier sources'
-//! names into later parses). Cross-domain refs work freely at runtime once
-//! everything is merged into the one registry.
+//! A source may reference names another source defines: loading runs to a
+//! fixpoint, parsing each source seeded with the names loaded so far (see
+//! [`load`]), so e.g. a domain's base graph can compose the core source's
+//! graphs. Its file writes those refs by name without embedding the foreign
+//! graphs (see [`export_to_file`]).
 //!
 //! The set of base node names is tracked in [`BaseNames`] so the UI can
 //! distinguish them (e.g. `[base]` prefix, no delete button), and each
@@ -64,9 +65,15 @@ pub struct BaseSources(pub Vec<BaseSource>);
 #[derive(Default, Resource)]
 pub struct BaseNameSources(pub HashMap<String, &'static str>);
 
-/// Startup system that deserializes each embedded base source in order and
-/// merges it into the registry, populating [`BaseNames`] and
-/// [`BaseNameSources`].
+/// Startup system that deserializes each embedded base source and merges it
+/// into the registry, populating [`BaseNames`] and [`BaseNameSources`].
+///
+/// A source may reference names another source defines, so loading runs to a
+/// fixpoint: each round parses every still-pending source seeded with the
+/// names loaded so far, deferring sources whose references do not resolve
+/// yet. Push order therefore does not matter - sources load in dependency
+/// order. A source whose references never resolve (or that fails to parse
+/// outright) is logged and dropped.
 pub fn load<N>(
     sources: Res<BaseSources>,
     mut registry: ResMut<Registry<N>>,
@@ -83,33 +90,70 @@ pub fn load<N>(
         + Send
         + Sync,
 {
-    for source in &sources.0 {
-        let export: gantz_egui::export::Export<Graph<N>> =
-            match gantz_egui::export::parse_export_at(source.bytes, BASE_TIMESTAMP) {
-                Ok(e) => e,
-                Err(e) => {
-                    log::error!("base source `{}`: {e}", source.name);
-                    continue;
+    let mut pending: Vec<&BaseSource> = sources.0.iter().collect();
+    loop {
+        let mut deferred: Vec<&BaseSource> = Vec::new();
+        for source in pending.iter().copied() {
+            let export: gantz_egui::export::Export<Graph<N>> =
+                match gantz_egui::export::parse_export_seeded_at(
+                    source.bytes,
+                    BASE_TIMESTAMP,
+                    &base_names.0,
+                ) {
+                    Ok(e) => e,
+                    // An unresolved reference may resolve once another
+                    // source loads - retry next round.
+                    Err(gantz_egui::export::ParseExportError::Format(e))
+                        if matches!(e.kind, gantz_format::ErrorKind::MissingDependency(_)) =>
+                    {
+                        deferred.push(source);
+                        continue;
+                    }
+                    Err(e) => {
+                        log::error!("base source `{}`: {e}", source.name);
+                        continue;
+                    }
+                };
+            for name in export.registry.names().keys() {
+                if let Some(prev) = name_sources.0.get(name.as_str()) {
+                    log::warn!(
+                        "base source `{}` redefines `{name}` from source `{prev}` \
+                         (last source wins)",
+                        source.name,
+                    );
                 }
-            };
-        for name in export.registry.names().keys() {
-            if let Some(prev) = name_sources.0.get(name.as_str()) {
-                log::warn!(
-                    "base source `{}` redefines `{name}` from source `{prev}` \
-                     (last source wins)",
-                    source.name,
-                );
+                name_sources.0.insert(name.clone(), source.name);
             }
-            name_sources.0.insert(name.clone(), source.name);
+            base_names.0.extend(export.registry.names().clone());
+            // NOTE: the merge's `names_replaced` is deliberately not logged -
+            // base names replacing a user's persisted edits on launch is the
+            // by-design authoritative reset, not a collision. Source-vs-source
+            // collisions are the ones worth warning about, caught above.
+            registry.merge(export.registry);
+            views.0.extend(export.views);
+            demos.0.extend(export.demos);
         }
-        base_names.0.extend(export.registry.names().clone());
-        // NOTE: the merge's `names_replaced` is deliberately not logged -
-        // base names replacing a user's persisted edits on launch is the
-        // by-design authoritative reset, not a collision. Source-vs-source
-        // collisions are the ones worth warning about, caught above.
-        registry.merge(export.registry);
-        views.0.extend(export.views);
-        demos.0.extend(export.demos);
+        // Done, or stuck: no deferred source can make progress once a full
+        // round loads nothing new.
+        if deferred.is_empty() {
+            break;
+        }
+        if deferred.len() == pending.len() {
+            for source in deferred {
+                if let Err(err) = gantz_egui::export::parse_export_seeded_at::<N>(
+                    source.bytes,
+                    BASE_TIMESTAMP,
+                    &base_names.0,
+                ) {
+                    log::error!(
+                        "base source `{}` has unresolvable references: {err}",
+                        source.name,
+                    );
+                }
+            }
+            break;
+        }
+        pending = deferred;
     }
 }
 
@@ -138,7 +182,6 @@ pub fn export_to_file<N>(
     paths: Res<ExportPaths>,
     name_sources: Res<BaseNameSources>,
     registry: Res<Registry<N>>,
-    builtins: Res<bevy_gantz::BuiltinNodes<N>>,
     views: Res<crate::Views>,
     demos: Res<crate::Demos>,
 ) where
@@ -151,8 +194,6 @@ pub fn export_to_file<N>(
         + Send
         + Sync,
 {
-    let node_reg = crate::registry_ref(&registry, &builtins, &demos);
-    let get_node = |ca: &gantz_ca::ContentAddr| node_reg.node(ca);
     let partitioned = partition_names(registry.names().keys(), &name_sources, paths.default_source);
     for (source, names) in &partitioned {
         let Some(path) = paths.paths.get(source) else {
@@ -163,17 +204,10 @@ pub fn export_to_file<N>(
             );
             continue;
         };
-        let heads: Vec<gantz_ca::Head> = names
-            .iter()
-            .map(|name| gantz_ca::Head::Branch(name.clone()))
-            .collect();
-        match gantz_egui::export::export_heads_sexpr_named(
-            &get_node,
-            &registry,
-            &views,
-            &demos.0,
-            heads.iter(),
-        ) {
+        // Exactly this source's names, with refs into other sources written
+        // by name only (no transitive closure) - loading resolves them via
+        // the seeded parse.
+        match gantz_egui::export::export_names_sexpr_named(&registry, &views, &demos.0, names) {
             Ok(text) => {
                 if let Err(e) = std::fs::write(path, text) {
                     log::error!("export_to_file: failed to write {path}: {e}");
@@ -228,20 +262,32 @@ where
 
 /// Partition base names by their owning source for per-source write-back.
 ///
-/// Names with no recorded source (e.g. graphs created during an
-/// `update-base` session) are attributed to `default_source`.
+/// A nested name (`parent:child`) with no recorded source follows its
+/// parent's attribution, recursing to the outermost prefix - a nested graph
+/// belongs in the same file as the graph that nests it. Other unrecorded
+/// names (e.g. graphs created during an `update-base` session) are attributed
+/// to `default_source`.
 pub fn partition_names<'a>(
     names: impl IntoIterator<Item = &'a String>,
     name_sources: &BaseNameSources,
     default_source: &'static str,
 ) -> std::collections::BTreeMap<&'static str, Vec<String>> {
+    fn source_of(
+        name: &str,
+        name_sources: &BaseNameSources,
+        default_source: &'static str,
+    ) -> &'static str {
+        if let Some(&source) = name_sources.0.get(name) {
+            return source;
+        }
+        match name.rsplit_once(gantz_egui::node::NESTED_SEP) {
+            Some((parent, _)) => source_of(parent, name_sources, default_source),
+            None => default_source,
+        }
+    }
     let mut partitioned = std::collections::BTreeMap::<&'static str, Vec<String>>::new();
     for name in names {
-        let source = name_sources
-            .0
-            .get(name.as_str())
-            .copied()
-            .unwrap_or(default_source);
+        let source = source_of(name, name_sources, default_source);
         partitioned.entry(source).or_default().push(name.clone());
     }
     partitioned
@@ -271,6 +317,31 @@ mod tests {
         assert_eq!(
             partitioned.get("plyphon"),
             Some(&vec!["demo-sine".to_string()])
+        );
+    }
+
+    /// An unrecorded nested name follows its parent's attribution, however
+    /// deep, before falling back to the default.
+    #[test]
+    fn partition_names_nested_follow_their_parent() {
+        let mut name_sources = BaseNameSources::default();
+        name_sources.0.insert("demo-sine".to_string(), "plyphon");
+        let names = [
+            "demo-sine:child".to_string(),
+            "demo-sine:child:grandchild".to_string(),
+            "orphan:child".to_string(),
+        ];
+        let partitioned = partition_names(names.iter(), &name_sources, "gantz");
+        assert_eq!(
+            partitioned.get("plyphon"),
+            Some(&vec![
+                "demo-sine:child".to_string(),
+                "demo-sine:child:grandchild".to_string(),
+            ]),
+        );
+        assert_eq!(
+            partitioned.get("gantz"),
+            Some(&vec!["orphan:child".to_string()]),
         );
     }
 }

@@ -26,23 +26,80 @@
 /// leave a stale entry - the mismatch then reads as an external change,
 /// which self-heals (push, no commit).
 #[derive(Clone, Copy)]
-pub(crate) struct SizeSync {
-    pub last_seen: [u16; 2],
-    pub was_resizing: bool,
+struct SizeSync {
+    last_seen: [u16; 2],
+    was_resizing: bool,
 }
 
-/// The size-sync decisions for one frame: `(push_external, drag_released)`.
+/// The per-frame size-sync decisions (see [`begin`]).
 ///
+/// - `resizing`: the resize corner is actively dragged this frame.
 /// - `push_external`: the committed size must be pushed into the displayed
 ///   resize state (first frame under this id, or the node value changed
 ///   externally). An external change also wins over an in-flight drag.
 /// - `drag_released`: the resize corner was released since the last frame -
 ///   the interaction allowed to write the committed size.
-pub(crate) fn size_sync_frame(
-    prev: Option<SizeSync>,
+#[derive(Clone, Copy)]
+pub(crate) struct Decisions {
+    pub resizing: bool,
+    pub push_external: bool,
+    pub drag_released: bool,
+}
+
+/// Begin a frame: read whether the resize corner is dragged (requesting
+/// repaints while it is, so the post-release snap frame draws), load the
+/// stored sync state and derive this frame's [`Decisions`] against the
+/// committed `size`.
+///
+/// `resize_id` is the id of the node's `egui::containers::Resize`; the
+/// corner interaction registers under its `"__resize_corner"` salt (egui
+/// 0.34.x internal, see `containers/resize.rs`).
+pub(crate) fn begin(
+    ui: &egui::Ui,
+    sync_id: egui::Id,
+    resize_id: egui::Id,
     size: [u16; 2],
+) -> Decisions {
+    let corner_id = resize_id.with("__resize_corner");
+    let resizing = ui
+        .ctx()
+        .read_response(corner_id)
+        .is_some_and(|r| r.dragged());
+    if resizing {
+        ui.ctx().request_repaint();
+    }
+    let prev: Option<SizeSync> = ui.memory_mut(|m| m.data.get_temp(sync_id));
+    let (push_external, drag_released) = size_sync_frame(prev, size, resizing);
+    Decisions {
+        resizing,
+        push_external,
+        drag_released,
+    }
+}
+
+/// Persist the sync state at the end of the frame, *after* any local write,
+/// so a local commit never masquerades as an external change next frame.
+pub(crate) fn store(
+    ui: &egui::Ui,
+    sync_id: egui::Id,
+    size: [u16; 2],
+    push_external: bool,
     resizing: bool,
-) -> (bool, bool) {
+) {
+    ui.memory_mut(|m| {
+        m.data.insert_temp(
+            sync_id,
+            SizeSync {
+                last_seen: size,
+                was_resizing: if push_external { false } else { resizing },
+            },
+        )
+    });
+}
+
+/// The pure size-sync decisions for one frame: `(push_external,
+/// drag_released)` (see [`Decisions`]).
+fn size_sync_frame(prev: Option<SizeSync>, size: [u16; 2], resizing: bool) -> (bool, bool) {
     match prev {
         None => (true, false),
         Some(prev) => {

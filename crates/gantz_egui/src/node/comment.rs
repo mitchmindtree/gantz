@@ -1,6 +1,6 @@
 //! A Comment node for documenting patches.
 
-use super::size_sync::{SizeSync, fitted_size, size_sync_frame};
+use super::size_sync::{self, fitted_size};
 use crate::widget::node_inspector;
 use crate::{InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse};
 use gantz_ca::CaHash;
@@ -118,23 +118,11 @@ impl NodeUi for Comment {
         let min_resize = egui::Vec2::splat(style.interaction.interact_radius);
         let default_size = egui::vec2(self.size[0] as f32, self.size[1] as f32);
         let framed = uictx.framed_with(frame, |ui, _sockets| {
-            // `Resize` registers its corner interaction under this salt (egui
-            // 0.34.x internal, see `containers/resize.rs`). Reading the previous
-            // frame's response tells us whether the corner is being dragged.
-            let corner_id = resize_id.with("__resize_corner");
-            let resizing = ui
-                .ctx()
-                .read_response(corner_id)
-                .is_some_and(|r| r.dragged());
-
-            // While dragging, keep requesting repaints so the frame *after*
-            // release - when the height snaps back to fit the text - is drawn.
-            if resizing {
-                ui.ctx().request_repaint();
-            }
-
-            let sync: Option<SizeSync> = ui.memory_mut(|m| m.data.get_temp(size_sync_id));
-            let (push_external, drag_released) = size_sync_frame(sync, self.size, resizing);
+            let size_sync::Decisions {
+                resizing,
+                push_external,
+                drag_released,
+            } = size_sync::begin(ui, size_sync_id, resize_id, self.size);
 
             let resize = egui::containers::Resize::default()
                 .id(resize_id)
@@ -256,17 +244,7 @@ impl NodeUi for Comment {
                 response
             });
 
-            // Persist the sync state *after* any local write, so a local
-            // commit never masquerades as an external change next frame.
-            ui.memory_mut(|m| {
-                m.data.insert_temp(
-                    size_sync_id,
-                    SizeSync {
-                        last_seen: self.size,
-                        was_resizing: if push_external { false } else { resizing },
-                    },
-                )
-            });
+            size_sync::store(ui, size_sync_id, self.size, push_external, resizing);
 
             inner
         });

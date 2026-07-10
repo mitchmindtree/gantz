@@ -21,7 +21,7 @@
 //! value unchanged (like [`super::Inspect`]), so a value can be observed without
 //! breaking the chain it flows through.
 
-use super::size_sync::{SizeSync, fitted_size, size_sync_frame};
+use super::size_sync::{self, fitted_size};
 use crate::widget::node_inspector;
 use crate::widget::node_inspector::radio_option;
 use crate::{
@@ -507,20 +507,11 @@ impl NodeUi for Plot {
 
         let size_sync_id = node_egui_id.with("size_sync");
         let framed = uictx.framed_with(frame, |ui, _sockets| {
-            // `Resize` registers its corner under this salt; reading last frame's
-            // response tells us whether it is being actively dragged.
-            let corner_id = resize_id.with("__resize_corner");
-            let resizing = ui
-                .ctx()
-                .read_response(corner_id)
-                .is_some_and(|r| r.dragged());
-            if resizing {
-                ui.ctx().request_repaint();
-            }
-
-            let sync: Option<SizeSync> = ui.memory_mut(|m| m.data.get_temp(size_sync_id));
-            let (push_external, drag_released) =
-                size_sync_frame(sync, [self.width, self.height], resizing);
+            let size_sync::Decisions {
+                resizing,
+                push_external,
+                drag_released,
+            } = size_sync::begin(ui, size_sync_id, resize_id, [self.width, self.height]);
 
             let resize = egui::containers::Resize::default()
                 .id(resize_id)
@@ -558,17 +549,13 @@ impl NodeUi for Plot {
                 self.plot_body(&ys, plot_id, avail, ui)
             });
 
-            // Persist the sync state *after* any local write, so a local
-            // commit never masquerades as an external change next frame.
-            ui.memory_mut(|m| {
-                m.data.insert_temp(
-                    size_sync_id,
-                    SizeSync {
-                        last_seen: [self.width, self.height],
-                        was_resizing: if push_external { false } else { resizing },
-                    },
-                )
-            });
+            size_sync::store(
+                ui,
+                size_sync_id,
+                [self.width, self.height],
+                push_external,
+                resizing,
+            );
 
             inner
         });

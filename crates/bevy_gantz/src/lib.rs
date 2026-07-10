@@ -90,6 +90,14 @@ impl EvalEpoch {
 /// Apps should also:
 /// - Insert a `BuiltinNodes<N>` resource with their builtin nodes
 /// - Add `GantzEguiPlugin` for egui integration (Views, GraphViews, etc.)
+///
+/// # Assembly
+///
+/// Plugin order does not matter: the gantz plugins contribute to shared
+/// collections via `get_resource_or_init` (see [`EntrypointFns`]) and
+/// perform cross-plugin resource reads in `Plugin::finish` (see
+/// `bevy_gantz_plyphon::PlyphonPlugin`, the reference domain plugin), so
+/// they may be added in any order relative to each other.
 pub struct GantzPlugin<N>(std::marker::PhantomData<N>);
 
 impl<N> Default for GantzPlugin<N> {

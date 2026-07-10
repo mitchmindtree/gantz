@@ -113,20 +113,30 @@ pub fn load<N>(
     }
 }
 
-/// Path to write the base `.gantz` export to.
+/// Paths to write each base source back to (a [`BaseSource::name`] to file
+/// path map), plus the source that receives names with no recorded
+/// attribution (graphs created during the session).
 ///
-/// Used by [`export_to_file`] to know where to write. Typically set to
-/// point at the `gantz_base` crate's `base.gantz` file so that edits
-/// land back in the repo.
+/// Used by [`export_to_file`]. The paths typically point at each source
+/// crate's `base.gantz` file so that edits land back in the repo. This lives
+/// in the developer tool's configuration, not on [`BaseSource`]: shipped
+/// binaries must not bake dev-tree write paths.
 #[derive(Resource)]
-pub struct ExportPath(pub &'static str);
+pub struct ExportPaths {
+    /// Where each source's names are written ([`BaseSource::name`] to path).
+    pub paths: HashMap<&'static str, &'static str>,
+    /// The source that receives unattributed (session-created) names.
+    pub default_source: &'static str,
+}
 
-/// System that exports all named graphs to the file at [`ExportPath`].
+/// System that exports every named graph back to its owning source's file
+/// (see [`ExportPaths`] and [`BaseNameSources`]).
 ///
 /// Intended for the `update-base` developer binary. Pair with
 /// `DebouncedInputEvent` so it runs on save.
 pub fn export_to_file<N>(
-    path: Res<ExportPath>,
+    paths: Res<ExportPaths>,
+    name_sources: Res<BaseNameSources>,
     registry: Res<Registry<N>>,
     builtins: Res<bevy_gantz::BuiltinNodes<N>>,
     views: Res<crate::Views>,
@@ -141,12 +151,36 @@ pub fn export_to_file<N>(
         + Send
         + Sync,
 {
-    let Some(text) = export_all_named(&registry, &builtins, &views, &demos) else {
-        log::error!("export_to_file: failed to serialize");
-        return;
-    };
-    if let Err(e) = std::fs::write(path.0, text) {
-        log::error!("export_to_file: failed to write {}: {e}", path.0);
+    let node_reg = crate::registry_ref(&registry, &builtins, &demos);
+    let get_node = |ca: &gantz_ca::ContentAddr| node_reg.node(ca);
+    let partitioned = partition_names(registry.names().keys(), &name_sources, paths.default_source);
+    for (source, names) in &partitioned {
+        let Some(path) = paths.paths.get(source) else {
+            log::warn!(
+                "export_to_file: no path configured for base source `{source}` \
+                 ({} names skipped)",
+                names.len(),
+            );
+            continue;
+        };
+        let heads: Vec<gantz_ca::Head> = names
+            .iter()
+            .map(|name| gantz_ca::Head::Branch(name.clone()))
+            .collect();
+        match gantz_egui::export::export_heads_sexpr_named(
+            &get_node,
+            &registry,
+            &views,
+            &demos.0,
+            heads.iter(),
+        ) {
+            Ok(text) => {
+                if let Err(e) = std::fs::write(path, text) {
+                    log::error!("export_to_file: failed to write {path}: {e}");
+                }
+            }
+            Err(e) => log::error!("export_to_file: failed to serialize `{source}`: {e}"),
+        }
     }
 }
 

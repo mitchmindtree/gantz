@@ -27,6 +27,9 @@ fn main() {
     App::new()
         .add_plugins(GantzPlugin::<Box<dyn node::Node>>::default())
         .add_plugins(GantzEguiPlugin::<Box<dyn node::Node>>::default().base_immutable(false))
+        // The DSP plugin contributes the plyphon base source, and lets DSP
+        // demos be heard while they are edited.
+        .add_plugins(bevy_gantz_plyphon::PlyphonPlugin::<Box<dyn node::Node>>::default())
         .insert_resource(BuiltinNodes::<Box<dyn node::Node>>(Box::new(
             node::builtins(),
         )))
@@ -34,10 +37,23 @@ fn main() {
         .add_plugins(EguiPlugin::default())
         .add_plugins(DebouncedInputPlugin::<DebouncedInputEvent>::new(0.25))
         .insert_resource(Pkv::new(PkvStore::new("nannou-org", "gantz-update-base")))
-        .insert_resource(bevy_gantz_egui::base::ExportPath(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../gantz_base/base.gantz"
-        )))
+        // Each base source writes back to its own crate's file. Graphs
+        // created in this session (no recorded source) land in the core file.
+        .insert_resource(bevy_gantz_egui::base::ExportPaths {
+            paths: [
+                (
+                    "gantz",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/../gantz_base/base.gantz"),
+                ),
+                (
+                    "plyphon",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/../gantz_plyphon/base.gantz"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            default_source: "gantz",
+        })
         .add_systems(
             Startup,
             (

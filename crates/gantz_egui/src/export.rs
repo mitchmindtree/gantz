@@ -114,6 +114,22 @@ where
     crate::format::from_str(text, now).map_err(ParseExportError::Format)
 }
 
+/// Like [`parse_export_at`], resolving names the document does not define
+/// through `seed` (externally-known name -> head commit associations). Lets a
+/// base source reference graphs another source defines - see
+/// [`gantz_format::from_str_seeded`].
+pub fn parse_export_seeded_at<N>(
+    bytes: &[u8],
+    now: gantz_ca::Timestamp,
+    seed: &std::collections::BTreeMap<String, gantz_ca::CommitAddr>,
+) -> Result<Export<Graph<N>>, ParseExportError>
+where
+    N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
+{
+    let text = std::str::from_utf8(bytes).map_err(ParseExportError::Utf8)?;
+    crate::format::from_str_seeded(text, now, seed).map_err(ParseExportError::Format)
+}
+
 /// The current time as a [`gantz_ca::Timestamp`] (duration since the Unix epoch).
 fn now() -> gantz_ca::Timestamp {
     web_time::SystemTime::now()

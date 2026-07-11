@@ -282,11 +282,16 @@ struct HeadSynths {
     def_cache: DefCache,
 }
 
-/// One open head's running synths: one per boundary-cut region, in region-DAG
+/// One open head's running synths: one per resolved part, in part-DAG
 /// topological order (bus writers before their readers - also their node-tree
 /// order). Empty when the head's graph has no dsp sink.
 struct HeadParts {
     graph: ca::GraphAddr,
+    /// Re-run the structural sync next frame even though `graph` is current:
+    /// a spawn failed transiently (command ring full). The ring drains within
+    /// a block and the re-run is convergent - already-spawned parts match by
+    /// key + sig + wiring and are kept.
+    retry: bool,
     parts: Vec<PartSynth>,
 }
 
@@ -618,7 +623,11 @@ fn drive_synths<N>(
         // flatten error (a ref cycle or an unresolvable ref, both forbidden
         // upstream): keep the previous synths, parking the head at this graph
         // address so the error logs once per commit rather than every frame.
-        if state.heads.get(&entity).map(|h| h.graph) != Some(graph_ca) {
+        let stale = state
+            .heads
+            .get(&entity)
+            .is_none_or(|h| h.graph != graph_ca || h.retry);
+        if stale {
             let flat_children = flatten_from_registry(&wg.0, &registry).and_then(|flat| {
                 let children = flatten_instance_children(&flat, &registry)?;
                 Ok((flat, children))
@@ -778,6 +787,7 @@ fn park_head(state: &mut HeadSynths, entity: Entity, graph_ca: ca::GraphAddr) {
                 entity,
                 HeadParts {
                     graph: graph_ca,
+                    retry: false,
                     parts: Vec::new(),
                 },
             );
@@ -829,6 +839,7 @@ fn structural_sync<N>(
                 entity,
                 HeadParts {
                     graph: graph_ca,
+                    retry: false,
                     parts: Vec::new(),
                 },
             );
@@ -933,12 +944,13 @@ fn structural_sync<N>(
         .collect();
 
     let mut parts: Vec<PartSynth> = Vec::with_capacity(plans.len());
+    let mut transient_failure = false;
     for (plan, anchor) in plans.into_iter().zip(anchors) {
         match plan {
             Plan::Keep(k) => parts.push(k),
             Plan::Spawn(r, wiring, old) => {
                 match spawn_part(controller, state, entity, r, wiring, sample_rate, anchor) {
-                    Some(synth) => {
+                    Ok(synth) => {
                         // The replacement is live: fade the old out (the gain
                         // overlap is the crossfade) and release its def
                         // refcount. If the new synth shares the name (stable
@@ -956,7 +968,12 @@ fn structural_sync<N>(
                     }
                     // Keep the old synth playing untouched on failure -
                     // strictly better than the silence a teardown would leave.
-                    None => parts.extend(old),
+                    // A transient failure (full command ring) marks the head
+                    // for a convergent re-sync next frame.
+                    Err(e) => {
+                        transient_failure |= matches!(e, SpawnError::Transient);
+                        parts.extend(old);
+                    }
                 }
             }
         }
@@ -965,9 +982,20 @@ fn structural_sync<N>(
         entity,
         HeadParts {
             graph: graph_ca,
+            retry: transient_failure,
             parts,
         },
     );
+}
+
+/// Why a part failed to spawn.
+#[derive(Debug)]
+enum SpawnError {
+    /// The command ring was momentarily full; retrying next frame converges.
+    Transient,
+    /// Anything else (bus exhaustion, install or build failure) - retrying
+    /// without an edit would fail identically, so the head parks as usual.
+    Permanent,
 }
 
 /// Hash of a part's bus wiring - every read/write's key, width and param.
@@ -992,8 +1020,8 @@ fn wiring_hash(part: &ResolvedPart) -> u64 {
 /// gains' baked `0.0` defaults; bus indices, scope bufnums and unbound
 /// fade-to-unity are then set via `set_control` in one command-ring drain
 /// (landing before the first audible block). Bound params re-send from node
-/// state via the same-frame param sync. Returns `None` on failure, having
-/// cleaned up after itself.
+/// state via the same-frame param sync. On failure, cleans up after itself
+/// and reports whether retrying next frame can converge ([`SpawnError`]).
 fn spawn_part(
     controller: &mut Controller,
     state: &mut HeadSynths,
@@ -1002,7 +1030,7 @@ fn spawn_part(
     wiring: u64,
     sample_rate: f64,
     anchor: Option<i32>,
-) -> Option<PartSynth> {
+) -> Result<PartSynth, SpawnError> {
     let now = Instant::now();
     let ResolvedPart {
         key,
@@ -1026,7 +1054,7 @@ fn spawn_part(
         let bus_key = (entity, binding.key.clone());
         let Some(run) = state.bus_alloc.get_or_alloc(bus_key, binding.channels, now) else {
             log::error!("bevy_gantz_plyphon: private audio buses exhausted; part not spawned");
-            return None;
+            return Err(SpawnError::Permanent);
         };
         set_after_spawn.push((binding.param, run.start as f32));
     }
@@ -1068,7 +1096,7 @@ fn spawn_part(
             log::error!("bevy_gantz_plyphon: synthdef install failed: {e:?}");
             drop(backend);
             free_scopes(controller, &mut state.scope_alloc, scopes);
-            return None;
+            return Err(SpawnError::Permanent);
         }
     }
     state
@@ -1109,7 +1137,7 @@ fn spawn_part(
                     last: None,
                 })
                 .collect();
-            Some(PartSynth {
+            Ok(PartSynth {
                 key,
                 def_name,
                 node_id,
@@ -1122,10 +1150,14 @@ fn spawn_part(
         }
         Err(e) => {
             log::error!("bevy_gantz_plyphon: synth spawn failed: {e:?}");
+            let spawn_err = match e {
+                gantz_plyphon::BackendError::QueueFull => SpawnError::Transient,
+                _ => SpawnError::Permanent,
+            };
             drop(backend);
             release_def(controller, &mut state.shared_defs, &def_name);
             free_scopes(controller, &mut state.scope_alloc, scopes);
-            None
+            Err(spawn_err)
         }
     }
 }

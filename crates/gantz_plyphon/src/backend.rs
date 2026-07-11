@@ -94,7 +94,12 @@ impl Backend for Embedded<'_> {
     ) -> Result<i32, BackendError> {
         self.controller
             .synth_new(def_name, target, action)
-            .map_err(|e| BackendError::Spawn(format!("{e:?}")))
+            .map_err(|e| match e {
+                // Transient: the ring drains within a block, so the caller can
+                // retry next frame rather than treating the spawn as broken.
+                plyphon::SynthNewError::QueueFull => BackendError::QueueFull,
+                e => BackendError::Spawn(format!("{e:?}")),
+            })
     }
 
     fn free_node(&mut self, node: i32) -> Result<(), BackendError> {

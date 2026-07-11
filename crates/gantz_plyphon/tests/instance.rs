@@ -23,7 +23,6 @@ enum N {
     /// A ref standing in for an instanced graph: child CA + its arity
     /// (the reference reports the child's inlet/outlet counts).
     Ref(gantz_ca::ContentAddr, usize, usize),
-    Other,
 }
 
 impl ToNodeDsp for N {
@@ -33,7 +32,7 @@ impl ToNodeDsp for N {
             N::Lag(l) => Some(l),
             N::Out(o) => Some(o),
             N::Pack(p) => Some(p),
-            N::Inlet | N::Outlet | N::Ref(..) | N::Other => None,
+            N::Inlet | N::Outlet | N::Ref(..) => None,
         }
     }
 }

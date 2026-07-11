@@ -56,14 +56,6 @@ pub struct Session {
     pub role: Role,
 }
 
-/// A connected collaborator, as shown in session UIs.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PeerInfo {
-    pub id: PeerId,
-    /// The peer's self-reported username, if any (via presence gossip).
-    pub name: Option<String>,
-}
-
 /// A session's connection lifecycle, for the GUI indicator.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ConnState {

@@ -29,7 +29,7 @@ pub use proto::{GossipMsg, Objects, SyncRequest, SyncResponse, Want, WireCommit,
 #[doc(inline)]
 pub use runtime::{Command, Event, Handle, PROTO_VERSION, SYNC_ALPN, spawn};
 #[doc(inline)]
-pub use session::{Access, ConnState, PeerId, PeerInfo, Role, Session, SessionId};
+pub use session::{Access, ConnState, PeerId, Role, Session, SessionId};
 #[doc(inline)]
 pub use store::{SessionEntry, SessionStore, Shared, SharedState};
 #[doc(inline)]

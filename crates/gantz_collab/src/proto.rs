@@ -139,13 +139,6 @@ pub enum SyncResponse {
     },
 }
 
-impl Objects {
-    /// Whether no objects are carried.
-    pub fn is_empty(&self) -> bool {
-        self.commits.is_empty() && self.graphs.is_empty()
-    }
-}
-
 impl Want {
     /// Whether nothing is wanted.
     pub fn is_empty(&self) -> bool {

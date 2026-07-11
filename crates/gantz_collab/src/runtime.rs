@@ -140,6 +140,16 @@ struct SyncServer {
     shared: Shared,
 }
 
+/// Cached peer connections for the request plane, keyed by peer.
+///
+/// iroh does not pool connections, and a fresh QUIC handshake per request -
+/// typically relay-routed until holepunching completes - dominated sync
+/// latency. `Connection` is a cheap clonable handle, and holding one here
+/// also keeps the connection alive between requests (the server side already
+/// serves any number of streams per connection). Shared because request
+/// tasks are spawned off the driver.
+type ConnCache = Arc<Mutex<HashMap<EndpointId, Connection>>>;
+
 impl SyncServer {
     /// Answer one request. Runs under the shared lock: lookups only.
     fn respond(&self, remote: PeerId, req: SyncRequest) -> SyncResponse {
@@ -488,16 +498,6 @@ async fn subscribe(
     });
     Ok(sender)
 }
-
-/// Cached peer connections for the request plane, keyed by peer.
-///
-/// iroh does not pool connections, and a fresh QUIC handshake per request -
-/// typically relay-routed until holepunching completes - dominated sync
-/// latency. `Connection` is a cheap clonable handle, and holding one here
-/// also keeps the connection alive between requests (the server side already
-/// serves any number of streams per connection). Shared because request
-/// tasks are spawned off the driver.
-type ConnCache = Arc<Mutex<HashMap<EndpointId, Connection>>>;
 
 /// Lock the connection cache; a poisoned lock still yields the map (entries
 /// are validated before use anyway).

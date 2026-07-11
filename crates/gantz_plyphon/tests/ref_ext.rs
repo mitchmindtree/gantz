@@ -3,9 +3,7 @@
 
 use gantz_ca::{CaHash, ContentAddr};
 use gantz_core::node::graph::Graph;
-use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, parse_expr};
-use gantz_egui::node::NamedRef;
-use gantz_egui::sync::AsNamedRef;
+use gantz_core::node::{AsRefNode, ExprCtx, ExprResult, MetaCtx, Ref, parse_expr};
 use gantz_plyphon::{NodeDsp, SinOsc, ToNodeDsp, dsp_commits};
 
 /// A minimal node standing in for the app's node set: one DSP node, the
@@ -13,7 +11,7 @@ use gantz_plyphon::{NodeDsp, SinOsc, ToNodeDsp, dsp_commits};
 #[derive(Clone)]
 enum N {
     SinOsc(SinOsc),
-    Named(NamedRef),
+    Ref(Ref),
     Other,
 }
 
@@ -21,15 +19,15 @@ impl ToNodeDsp for N {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         match self {
             N::SinOsc(s) => Some(s),
-            N::Named(_) | N::Other => None,
+            N::Ref(_) | N::Other => None,
         }
     }
 }
 
-impl AsNamedRef for N {
-    fn as_named_ref(&self) -> Option<&NamedRef> {
+impl AsRefNode for N {
+    fn as_ref_node(&self) -> Option<&Ref> {
         match self {
-            N::Named(nr) => Some(nr),
+            N::Ref(r) => Some(r),
             _ => None,
         }
     }
@@ -49,7 +47,7 @@ impl CaHash for N {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
         match self {
             N::SinOsc(s) => CaHash::hash(s, hasher),
-            N::Named(nr) => CaHash::hash(nr, hasher),
+            N::Ref(r) => CaHash::hash(r, hasher),
             N::Other => {
                 hasher.update(b"test.other");
             }
@@ -58,7 +56,7 @@ impl CaHash for N {
 }
 
 /// Commit `graph` under `name`, returning its commit address as a
-/// `ContentAddr` (the form `NamedRef::content_addr` reports).
+/// `ContentAddr` (the form `Ref::content_addr` reports).
 fn commit(registry: &mut gantz_ca::Registry<Graph<N>>, name: &str, graph: Graph<N>) -> ContentAddr {
     let now = std::time::Duration::from_secs(1);
     let addr = gantz_ca::graph_addr(&graph);
@@ -67,11 +65,8 @@ fn commit(registry: &mut gantz_ca::Registry<Graph<N>>, name: &str, graph: Graph<
     ca.into()
 }
 
-fn named(name: &str, ca: ContentAddr) -> N {
-    N::Named(NamedRef::new(
-        name.to_string(),
-        gantz_core::node::Ref::new(ca),
-    ))
+fn ref_node(ca: ContentAddr) -> N {
+    N::Ref(Ref::new(ca))
 }
 
 /// `dsp_commits` finds directly-DSP graphs and graphs that only reach DSP
@@ -88,12 +83,12 @@ fn dsp_commits_discovers_direct_and_transitive() {
 
     // A wrapper that only references the DSP graph.
     let mut wrapper: Graph<N> = Graph::default();
-    wrapper.add_node(named("dsp", dsp_ca));
+    wrapper.add_node(ref_node(dsp_ca));
     let wrapper_ca = commit(&mut registry, "wrapper", wrapper);
 
     // A second wrapper, two hops from the DSP node.
     let mut wrapper2: Graph<N> = Graph::default();
-    wrapper2.add_node(named("wrapper", wrapper_ca));
+    wrapper2.add_node(ref_node(wrapper_ca));
     let wrapper2_ca = commit(&mut registry, "wrapper2", wrapper2);
 
     // A plain control graph.
@@ -103,7 +98,7 @@ fn dsp_commits_discovers_direct_and_transitive() {
 
     // A graph referencing a missing address (defensive: must not panic).
     let mut dangling: Graph<N> = Graph::default();
-    dangling.add_node(named("gone", ContentAddr::from([9u8; 32])));
+    dangling.add_node(ref_node(ContentAddr::from([9u8; 32])));
     let dangling_ca = commit(&mut registry, "dangling", dangling);
 
     let set = dsp_commits(&registry);

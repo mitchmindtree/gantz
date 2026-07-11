@@ -13,7 +13,7 @@ use gantz_ca::CaHash;
 pub use id::{IDENTITY_NAME, Identity};
 pub use pull::{Pull, WithPullEval};
 pub use push::{Push, WithPushEval};
-pub use ref_::Ref;
+pub use ref_::{AsRefNode, Ref};
 use serde::{Deserialize, Serialize};
 pub use state::{NodeState, State, WithStateType};
 use steel::{parser::ast::ExprKind, steel_vm::engine::Engine};

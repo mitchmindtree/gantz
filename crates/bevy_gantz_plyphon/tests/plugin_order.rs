@@ -6,8 +6,7 @@ use bevy::MinimalPlugins;
 use bevy::app::App;
 use bevy_gantz::GantzPlugin;
 use bevy_gantz_plyphon::{DspConfig, DspStatus, PlyphonPlugin};
-use gantz_egui::node::NamedRef;
-use gantz_egui::sync::AsNamedRef;
+use gantz_core::node::{AsRefNode, Ref};
 use gantz_plyphon::{NodeDsp, ToNodeDsp};
 
 #[derive(Clone)]
@@ -25,8 +24,8 @@ impl ToNodeDsp for TestNode {
     }
 }
 
-impl AsNamedRef for TestNode {
-    fn as_named_ref(&self) -> Option<&NamedRef> {
+impl AsRefNode for TestNode {
+    fn as_ref_node(&self) -> Option<&Ref> {
         None
     }
 }

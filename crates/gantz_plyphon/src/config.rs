@@ -6,8 +6,8 @@ use std::time::Duration;
 /// Editable DSP settings (the Settings -> DSP tab).
 ///
 /// This is both the domain's runtime configuration and the settings-change
-/// payload emitted by [`DspSettingsTab`](crate::DspSettingsTab). Runtime-only
-/// for now - not persisted, so it resets to the defaults each session.
+/// payload emitted by `DspSettingsTab` (`egui` feature). Runtime-only for
+/// now - not persisted, so it resets to the defaults each session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// How far ahead of the dsp clock a timestamped control update is scheduled -

@@ -2,14 +2,10 @@
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
-use gantz_egui::{
-    InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
-};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
-use crate::param::value_row;
 
 /// Split a channel group into `count` mono outputs (like Max's `mc.unpack~` or
 /// a VCV split): output `i` carries the input's channel `i`, or silence past
@@ -108,50 +104,6 @@ impl NodeDsp for Unpack {
 impl ToNodeDsp for Unpack {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         Some(self)
-    }
-}
-
-impl NodeUi for Unpack {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~unpack"
-    }
-
-    fn description(&self) -> Option<&'static str> {
-        Some("Split a multichannel signal into mono outputs")
-    }
-
-    fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
-        let framed =
-            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~unpack").selectable(false)));
-        NodeUiResponse::new(framed)
-    }
-
-    fn inspector_rows(
-        &mut self,
-        _ctx: &mut NodeCtx,
-        body: &mut egui_extras::TableBody,
-    ) -> InspectorRowsResponse {
-        let mut resp = InspectorRowsResponse::default();
-        // Output count (structural: it changes the node's sockets -> respawn).
-        let mut count = self.count;
-        let dv = egui::DragValue::new(&mut count).range(1..=64).speed(1.0);
-        if value_row(body, "count", dv) {
-            self.count = count.max(1);
-            resp.mark_changed();
-        }
-        resp
-    }
-
-    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, ix: usize) -> Option<SocketDoc> {
-        match kind {
-            SocketKind::Input => Some(
-                SocketDoc::ty("signal")
-                    .with_description("signal to split into mono channels (any channel width)"),
-            ),
-            SocketKind::Output => Some(SocketDoc::ty("signal").with_description(format!(
-                "channel {ix} of the input (silence past its width)"
-            ))),
-        }
     }
 }
 

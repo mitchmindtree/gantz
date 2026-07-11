@@ -15,7 +15,7 @@ cpal.workspace = true
 gantz_ca.workspace = true
 gantz_core.workspace = true
 gantz_egui.workspace = true
-gantz_plyphon.workspace = true
+gantz_plyphon = { workspace = true, features = ["egui"] }
 log.workspace = true
 plyphon.workspace = true
 web-time.workspace = true

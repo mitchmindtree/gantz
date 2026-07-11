@@ -32,6 +32,10 @@ jobs:
           - command: develop -c cargo fmt --all -- --check
           - command: develop -c cargo test --locked --all
           - command: develop -c cargo test --no-default-features --locked --all
+          # Feature unification via the app re-enables gantz_plyphon's `egui`
+          # feature in the --all run above, so headless gantz_plyphon needs its
+          # own entry to stay verified.
+          - command: develop -c cargo test -p gantz_plyphon --no-default-features --locked
           - command: develop -c cargo test --all-features --locked --all
           - command: fmt -- --ci
           - command: flake check --no-update-lock-file

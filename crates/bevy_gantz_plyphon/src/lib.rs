@@ -1682,7 +1682,8 @@ mod tests {
     }
 
     /// A minimal node enum for driver tests: DSP sinks/sources plus the nesting
-    /// markers (`Inlet`/`Outlet`).
+    /// markers (`Inlet`/`Outlet`) and a graph ref carrying its child's content
+    /// address, arity and `inline` flag.
     #[derive(Clone)]
     enum TestN {
         SinOsc(gantz_plyphon::SinOsc),
@@ -1691,6 +1692,7 @@ mod tests {
         Unpack(gantz_plyphon::Unpack),
         Inlet,
         Outlet,
+        Ref(gantz_ca::ContentAddr, usize, usize, bool),
     }
 
     impl gantz_ca::CaHash for TestN {
@@ -1706,6 +1708,13 @@ mod tests {
                 TestN::Outlet => {
                     hasher.update(b"outlet");
                 }
+                TestN::Ref(ca, n_in, n_out, inline) => {
+                    hasher.update(b"ref");
+                    hasher.update(&ca.0);
+                    hasher.update(&n_in.to_le_bytes());
+                    hasher.update(&n_out.to_le_bytes());
+                    hasher.update(&[u8::from(*inline)]);
+                }
             }
         }
     }
@@ -1717,7 +1726,7 @@ mod tests {
                 TestN::Out(o) => Some(o),
                 TestN::Pack(p) => Some(p),
                 TestN::Unpack(u) => Some(u),
-                TestN::Inlet | TestN::Outlet => None,
+                TestN::Inlet | TestN::Outlet | TestN::Ref(..) => None,
             }
         }
     }
@@ -1732,5 +1741,364 @@ mod tests {
         fn outlet(&self, _ctx: gantz_core::node::MetaCtx) -> bool {
             matches!(self, TestN::Outlet)
         }
+        fn n_inputs(&self, _ctx: gantz_core::node::MetaCtx) -> usize {
+            match self {
+                TestN::Ref(_, n_in, _, _) => *n_in,
+                _ => 0,
+            }
+        }
+        fn n_outputs(&self, _ctx: gantz_core::node::MetaCtx) -> usize {
+            match self {
+                TestN::Ref(_, _, n_out, _) => *n_out,
+                _ => 0,
+            }
+        }
+    }
+
+    /// Flatten a head graph over `map`'s children (refs lower per their
+    /// `inline` flag) and pre-flatten every child for the derivation resolver.
+    #[allow(clippy::type_complexity)]
+    fn flatten_head(
+        g: &gantz_core::node::graph::Graph<TestN>,
+        map: &HashMap<gantz_ca::ContentAddr, gantz_core::node::graph::Graph<TestN>>,
+    ) -> (
+        gantz_core::node::graph::Graph<gantz_plyphon::Flat<TestN>>,
+        HashMap<gantz_ca::ContentAddr, gantz_core::node::graph::Graph<gantz_plyphon::Flat<TestN>>>,
+    ) {
+        use gantz_core::node::graph::Graph;
+        use gantz_plyphon::flatten::{RefKind, flatten};
+        fn resolver<'g>(
+            map: &'g HashMap<gantz_ca::ContentAddr, Graph<TestN>>,
+        ) -> impl Fn(&TestN) -> Option<(gantz_ca::ContentAddr, RefKind, Option<&'g Graph<TestN>>)> + 'g
+        {
+            move |n| match n {
+                TestN::Ref(ca, _, _, inline) => {
+                    let kind = if *inline {
+                        RefKind::Inline
+                    } else {
+                        RefKind::Instance
+                    };
+                    Some((*ca, kind, map.get(ca)))
+                }
+                _ => None,
+            }
+        }
+        let resolve = resolver(map);
+        let flat = flatten(&|_| None, g, &resolve).expect("flatten head");
+        let children = map
+            .iter()
+            .map(|(ca, child)| {
+                let resolve = resolver(map);
+                (
+                    *ca,
+                    flatten(&|_| None, child, &resolve).expect("flatten child"),
+                )
+            })
+            .collect();
+        (flat, children)
+    }
+
+    /// Render `frames` mono frames and return their RMS.
+    fn render_rms(world: &mut plyphon::World, frames: usize) -> f32 {
+        let mut out = vec![0.0f32; frames];
+        for block in out.chunks_mut(64) {
+            world.fill(block, 1);
+        }
+        (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt()
+    }
+
+    /// A self-contained child: `~sinosc -> ~out`.
+    fn sine_out_child() -> gantz_core::node::graph::Graph<TestN> {
+        use gantz_core::edge::Edge;
+        let mut g = gantz_core::node::graph::Graph::<TestN>::default();
+        let s = g.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+        let o = g.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+        g
+    }
+
+    fn test_engine() -> (Controller, Nrt, plyphon::World) {
+        plyphon::engine(plyphon::Options {
+            sample_rate: 48_000.0,
+            output_channels: 1,
+            ..plyphon::Options::default()
+        })
+    }
+
+    /// Two instances of one self-contained child both sound (louder than one),
+    /// sharing ONE installed def with refcount 2.
+    #[test]
+    fn two_instances_of_one_child_both_sound() {
+        use gantz_core::node::graph::Graph;
+
+        let ca = gantz_ca::ContentAddr([7u8; 32]);
+        let map = HashMap::from([(ca, sine_out_child())]);
+
+        // One instance, for the loudness baseline.
+        let mut g1 = Graph::<TestN>::default();
+        g1.add_node(TestN::Ref(ca, 0, 0, false));
+        let (flat1, children) = flatten_head(&g1, &map);
+        let (mut controller, _nrt, mut world) = test_engine();
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g1),
+            &flat1,
+            &children,
+            1,
+            48_000.0,
+        );
+        let rms_one = render_rms(&mut world, 48_000 / 2);
+        assert!(rms_one > 0.05, "one instance must sound: rms={rms_one}");
+
+        // Two instances in a fresh engine.
+        let mut g2 = Graph::<TestN>::default();
+        g2.add_node(TestN::Ref(ca, 0, 0, false));
+        g2.add_node(TestN::Ref(ca, 0, 0, false));
+        let (flat2, children) = flatten_head(&g2, &map);
+        let (mut controller, _nrt, mut world) = test_engine();
+        let mut state = HeadSynths::default();
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g2),
+            &flat2,
+            &children,
+            1,
+            48_000.0,
+        );
+        assert_eq!(state.heads[&entity].parts.len(), 2, "two instance spawns");
+        assert_eq!(
+            state.shared_defs.len(),
+            1,
+            "one shared def: {:?}",
+            state.shared_defs.keys().collect::<Vec<_>>(),
+        );
+        let (rc, _) = state.shared_defs.values().next().unwrap();
+        assert_eq!(*rc, 2, "both instances hold the def");
+        let rms_two = render_rms(&mut world, 48_000 / 2);
+        assert!(
+            rms_two > rms_one * 1.5,
+            "two in-phase instances sum louder: one={rms_one} two={rms_two}",
+        );
+    }
+
+    /// Editing the child respawns exactly its instances: the head's own region
+    /// keeps its synth (node id unchanged) while both instance spawns are
+    /// replaced and the old pair fade out.
+    #[test]
+    fn child_edit_respawns_only_its_instances() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+
+        let ca1 = gantz_ca::ContentAddr([1u8; 32]);
+        // The edited child: structurally different (an extra `~pack` stage).
+        let ca2 = gantz_ca::ContentAddr([2u8; 32]);
+        let mut child2 = Graph::<TestN>::default();
+        let s = child2.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+        let pk = child2.add_node(TestN::Pack(gantz_plyphon::Pack::default()));
+        let o = child2.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        child2.add_edge(s, pk, Edge::new(0.into(), 0.into()));
+        child2.add_edge(pk, o, Edge::new(0.into(), 0.into()));
+        let map = HashMap::from([(ca1, sine_out_child()), (ca2, child2)]);
+
+        // Head: its own region (sin -> out) + two instances of the child.
+        let head = |ca: gantz_ca::ContentAddr| {
+            let mut g = Graph::<TestN>::default();
+            let s = g.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+            let o = g.add_node(TestN::Out(gantz_plyphon::Out::default()));
+            g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+            g.add_node(TestN::Ref(ca, 0, 0, false));
+            g.add_node(TestN::Ref(ca, 0, 0, false));
+            g
+        };
+
+        let (mut controller, _nrt, _world) = test_engine();
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+        let g1 = head(ca1);
+        let (flat1, children) = flatten_head(&g1, &map);
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g1),
+            &flat1,
+            &children,
+            1,
+            48_000.0,
+        );
+        let before: HashMap<u64, i32> = state.heads[&entity]
+            .parts
+            .iter()
+            .map(|p| (p.key, p.node_id))
+            .collect();
+        assert_eq!(before.len(), 3, "own region + two instances");
+
+        let g2 = head(ca2);
+        let (flat2, children) = flatten_head(&g2, &map);
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g2),
+            &flat2,
+            &children,
+            1,
+            48_000.0,
+        );
+        let after: HashMap<u64, i32> = state.heads[&entity]
+            .parts
+            .iter()
+            .map(|p| (p.key, p.node_id))
+            .collect();
+        assert_eq!(after.len(), 3);
+
+        // Exactly one part survives by key - the head's own region - with its
+        // synth untouched. The instance parts (child CA in their key) are new,
+        // and the two retired spawns are fading.
+        let kept: Vec<_> = after
+            .iter()
+            .filter(|(k, _)| before.contains_key(k))
+            .collect();
+        assert_eq!(kept.len(), 1, "only the head's own region matches by key");
+        let (kept_key, kept_id) = kept[0];
+        assert_eq!(
+            before[kept_key], *kept_id,
+            "the kept region never respawned"
+        );
+        assert_eq!(state.fading.len(), 2, "both old instance spawns fade out");
+    }
+
+    /// Toggling `inline` on the ref switches the lowering live: the instanced
+    /// spawn crossfades to the spliced one, audibly on both sides.
+    #[test]
+    fn inline_toggle_switches_lowering_live() {
+        use gantz_core::node::graph::Graph;
+
+        let ca = gantz_ca::ContentAddr([3u8; 32]);
+        let map = HashMap::from([(ca, sine_out_child())]);
+        let head = |inline: bool| {
+            let mut g = Graph::<TestN>::default();
+            g.add_node(TestN::Ref(ca, 0, 0, inline));
+            g
+        };
+
+        let (mut controller, _nrt, mut world) = test_engine();
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+
+        let g1 = head(false);
+        let (flat1, children) = flatten_head(&g1, &map);
+        assert!(
+            flat1
+                .node_indices()
+                .any(|n| matches!(flat1[n], gantz_plyphon::Flat::Instance { .. })),
+            "instanced by default",
+        );
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g1),
+            &flat1,
+            &children,
+            1,
+            48_000.0,
+        );
+        let rms1 = render_rms(&mut world, 48_000 / 4);
+        assert!(rms1 > 0.05, "instanced lowering sounds: rms={rms1}");
+
+        let g2 = head(true);
+        let (flat2, children) = flatten_head(&g2, &map);
+        assert!(
+            flat2
+                .node_indices()
+                .all(|n| !matches!(flat2[n], gantz_plyphon::Flat::Instance { .. })),
+            "inline splices",
+        );
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g2),
+            &flat2,
+            &children,
+            1,
+            48_000.0,
+        );
+        // Render across the crossfade: the tone stays audible throughout.
+        let rms2 = render_rms(&mut world, 48_000 / 2);
+        assert!(
+            rms2 > 0.05,
+            "inline lowering sounds after the switch: rms={rms2}"
+        );
+        assert_eq!(state.heads[&entity].parts.len(), 1);
+    }
+
+    /// A param edit lands on ONE instance's synth: setting one spawn's freq to
+    /// zero leaves its sibling sounding (the shared def's param index is per
+    /// synth), and the sibling's slot state is untouched.
+    #[test]
+    fn param_edit_on_one_instance_leaves_sibling() {
+        use gantz_core::node::graph::Graph;
+
+        let ca = gantz_ca::ContentAddr([5u8; 32]);
+        let map = HashMap::from([(ca, sine_out_child())]);
+        let mut g = Graph::<TestN>::default();
+        g.add_node(TestN::Ref(ca, 0, 0, false));
+        g.add_node(TestN::Ref(ca, 0, 0, false));
+        let (flat, children) = flatten_head(&g, &map);
+
+        let (mut controller, _nrt, mut world) = test_engine();
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g),
+            &flat,
+            &children,
+            1,
+            48_000.0,
+        );
+        let rms_both = render_rms(&mut world, 48_000 / 2);
+
+        // Silence the FIRST instance's sine via its own synth's freq param
+        // (the same set_control the driver's param sync issues). The slots
+        // pair absolute node paths with def-local indices: both instances
+        // share the index, but each has its own node id.
+        let parts = &state.heads[&entity].parts;
+        assert_eq!(parts.len(), 2);
+        let (a, b) = (&parts[0], &parts[1]);
+        assert_ne!(a.node_id, b.node_id);
+        assert_ne!(a.params[0].node_path, b.params[0].node_path);
+        assert_eq!(a.params[0].index, b.params[0].index, "shared def index");
+        let freq = a
+            .params
+            .iter()
+            .find(|s| s.node_path.len() == 2)
+            .expect("the nested sine's param slot");
+        Embedded::new(&mut controller)
+            .set_control(a.node_id, freq.index, 0.0)
+            .expect("set_control");
+        let rms_one = render_rms(&mut world, 48_000 / 2);
+        assert!(
+            rms_one > 0.05,
+            "the sibling instance still sounds: rms={rms_one}",
+        );
+        assert!(
+            rms_one < rms_both * 0.75,
+            "one silenced instance is quieter: both={rms_both} one={rms_one}",
+        );
+        assert!(
+            b.params[0].last.is_none(),
+            "the sibling's slot is untouched"
+        );
     }
 }

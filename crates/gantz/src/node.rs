@@ -639,6 +639,45 @@ mod tests {
         assert!(pending.is_empty());
     }
 
+    /// Two references to one DSP child share a single derived variant: one
+    /// `DefCache` entry, both resolved parts naming the same content-hashed
+    /// def, with per-instance absolute binding paths. Guards the install-once
+    /// spawn-many contract end to end with the app's real node type.
+    #[test]
+    fn instanced_refs_share_one_variant() {
+        use std::time::Duration;
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+
+        let text = "\
+(graph voice
+  (s ~sinosc) (out ~out)
+  (-> s (out 0)))
+
+(graph env
+  (a (ref voice)) (b (ref voice)))";
+        let export: gantz_egui::export::Export<G> =
+            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("from_str");
+        let head = gantz_ca::Head::Branch("env".into());
+        let parent = export.registry.head_graph(&head).expect("env graph");
+
+        let flat = gantz_plyphon::flatten_from_registry(parent, &export.registry).expect("flatten");
+        let children =
+            gantz_plyphon::flatten_instance_children(&flat, &export.registry).expect("children");
+        let resolve = |ca: &gantz_ca::ContentAddr| children.get(ca);
+        let mut cache = gantz_plyphon::DefCache::new();
+        let template =
+            gantz_plyphon::derive_template(&flat, 1, &resolve, &mut cache).expect("derive");
+        assert_eq!(cache.len(), 1, "both refs share one variant");
+        let parts = gantz_plyphon::instantiate(&template, &cache);
+        assert_eq!(parts.len(), 2, "one spawn per instance");
+        assert_eq!(parts[0].def.name, parts[1].def.name, "one shared def");
+        assert_ne!(parts[0].key, parts[1].key, "distinct identities");
+        let mut prefixes: Vec<usize> = parts.iter().map(|p| p.params[0].node_path[0]).collect();
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        assert_eq!(prefixes.len(), 2, "bindings carry per-instance prefixes");
+    }
+
     /// `~unpack`'s placeholder expr honours the multi-output contract for any
     /// `count`: a single value for one output, a list of values otherwise. A
     /// wrong shape (e.g. `(list 0)` for count 1) fails `vm::init`'s compile.

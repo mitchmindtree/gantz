@@ -4,11 +4,14 @@
 //! stream (its own audio thread, running [`plyphon::World::fill_at`] so the engine
 //! clock is anchored to the host) and keeps the [`plyphon::Controller`] +
 //! [`plyphon::Nrt`] handles. Each update, after [`bevy_gantz::VmSet`], it derives
-//! one synthdef per `~bus`-cut *region* of each open head's DSP subgraph (rooted
-//! at its `~out` outputs and `~scopeout` monitors) and reconciles them with the
-//! running synths via the [`gantz_plyphon::Backend`] seam whenever the head's
-//! committed graph changes: unchanged regions keep their synths (and their unit
-//! state - oscillator phase, delay lines), changed ones are crossfade-replaced.
+//! one synthdef per *part* of each open head's DSP subgraph (rooted at its
+//! `~out` outputs and `~scopeout` monitors): the `~bus`-and-stage-cut regions,
+//! plus one spawn per *instanced* nested-graph ref of its child's shared,
+//! content-named defs (installed once, spawned per instance - see
+//! [`gantz_plyphon::instance`]). Parts reconcile with the running synths via
+//! the [`gantz_plyphon::Backend`] seam whenever the head's committed graph
+//! changes: unchanged parts keep their synths (and their unit state -
+//! oscillator phase, delay lines), changed ones are crossfade-replaced.
 //!
 //! The bridge runs both ways: control values drive dsp params via `set_control`,
 //! and each `~scopeout` monitor's scope stream is drained here into the node's

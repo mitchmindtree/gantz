@@ -557,12 +557,14 @@ mod tests {
         );
     }
 
-    /// A nested graph of DSP nodes sounds through the flattening pass: the
-    /// child's `~lag` splices into the parent's synthdef carrying its nested
-    /// path, and that path reaches the node's live param state in the VM -
-    /// exactly the contract the audio driver's param sync relies on. Guards
-    /// the whole nested-DSP pipeline (registry ref resolution, flattening,
-    /// derivation, VM state bridge) end to end with the app's real node type.
+    /// A nested graph of DSP nodes lowers through the instancing pass: the
+    /// ref stays an instance marker, the child's `~lag` derives into the
+    /// shared child def, and the resolved part's binding carries the lag's
+    /// ABSOLUTE nested path - which reaches the node's live param state in
+    /// the VM, exactly the contract the audio driver's param sync relies on.
+    /// Guards the whole nested-DSP pipeline (registry ref resolution,
+    /// flattening, template derivation, VM state bridge) end to end with the
+    /// app's real node type.
     #[test]
     fn nested_dsp_graph_flattens_derives_and_bridges_state() {
         use gantz_egui::sync::AsNamedRef;
@@ -604,10 +606,22 @@ mod tests {
             .index();
 
         let flat = gantz_plyphon::flatten_from_registry(parent, &export.registry).expect("flatten");
-        let derived = gantz_plyphon::derive_synthdef(&flat, 1, "test").expect("derive");
-        let binding = derived
-            .params
+        // The DSP-bearing child lowers as an instance marker by default.
+        let markers = flat
+            .node_indices()
+            .filter(|&n| matches!(flat[n], gantz_plyphon::Flat::Instance { .. }))
+            .count();
+        assert_eq!(markers, 1, "the ref stays an instance marker");
+        let children =
+            gantz_plyphon::flatten_instance_children(&flat, &export.registry).expect("children");
+        let resolve = |ca: &gantz_ca::ContentAddr| children.get(ca);
+        let mut cache = gantz_plyphon::DefCache::new();
+        let template =
+            gantz_plyphon::derive_template(&flat, 1, &resolve, &mut cache).expect("derive");
+        let parts = gantz_plyphon::instantiate(&template, &cache);
+        let binding = parts
             .iter()
+            .flat_map(|p| p.params.iter())
             .find(|b| b.node_path == [ref_ix, lag_ix])
             .expect("a param binding keyed by the lag's nested path");
 

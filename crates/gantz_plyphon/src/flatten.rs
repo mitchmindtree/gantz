@@ -4,10 +4,13 @@
 //! it as a single ref node) is gantz's primary abstraction. The control (Steel)
 //! compiler supports it call-based: each nested level becomes a function the
 //! parent calls. A synthdef is a flat unit list with no notion of calling a
-//! sub-synthdef, so the DSP compiler instead *inlines*: [`flatten`] resolves
-//! each graph ref, splices the referenced graph's nodes into one flat graph and
-//! dissolves the `Inlet`/`Outlet` boundary nodes into the surrounding edges.
-//! The result derives via [`derive_synthdef`](crate::derive_synthdef) or
+//! sub-synthdef, so the DSP compiler lowers a ref one of two ways: *instance*
+//! it (the default for DSP-bearing children) - keep an opaque marker that
+//! `derive_template` (crate::instance) turns into a shared synthdef spawned
+//! per instance - or *inline* it: splice the referenced graph's nodes into
+//! one flat graph, dissolving the `Inlet`/`Outlet` boundary nodes into the
+//! surrounding edges. The spliced result derives via
+//! [`derive_synthdef`](crate::derive_synthdef) or
 //! [`derive_synthdefs`](crate::derive_synthdefs) unchanged.
 //!
 //! Every spliced node carries its original path within the nested structure
@@ -227,17 +230,37 @@ where
 /// [`flatten`] resolving [`AsRefNode`] nodes through the content-addressed
 /// registry (a reference's content address is the referenced graph's commit
 /// address).
+///
+/// How each ref lowers is decided here: a ref whose child (transitively)
+/// contains DSP nodes lowers as [`RefKind::Instance`] by default - its child
+/// derives once into shared synthdefs spawned per instance - unless its
+/// [`DspRefExt`](crate::ref_ext::DspRefExt) ext datum sets `inline`, which
+/// opts back into splicing. Refs to non-DSP children (including pure
+/// `inlet -> outlet` wires) always splice: they carry structure, not sound,
+/// and must dissolve.
 pub fn flatten_from_registry<'g, N>(
     graph: &'g Graph<N>,
     registry: &'g gantz_ca::Registry<Graph<N>>,
 ) -> Result<Graph<Flat<N>>, FlattenError>
 where
-    N: gantz_core::Node + AsRefNode + Clone,
+    N: gantz_core::Node + AsRefNode + ToNodeDsp + Clone,
 {
+    let dsp_memo = std::cell::RefCell::new(HashMap::new());
     let resolve = |n: &N| {
         n.as_ref_node().map(|r| {
             let ca = r.content_addr();
-            (ca, RefKind::Inline, registry.commit_graph_ref(&ca.into()))
+            let inline = r
+                .ext_as::<crate::ref_ext::DspRefExt>(crate::ref_ext::DSP_REF_EXT_KEY)
+                .unwrap_or_default()
+                .inline;
+            let kind = if !inline
+                && crate::ref_ext::is_dsp_commit(registry, ca.into(), &mut dsp_memo.borrow_mut())
+            {
+                RefKind::Instance
+            } else {
+                RefKind::Inline
+            };
+            (ca, kind, registry.commit_graph_ref(&ca.into()))
         })
     };
     let get_node = |ca: &ContentAddr| {
@@ -257,7 +280,7 @@ pub fn flatten_instance_children<N>(
     registry: &gantz_ca::Registry<Graph<N>>,
 ) -> Result<HashMap<ContentAddr, Graph<Flat<N>>>, FlattenError>
 where
-    N: gantz_core::Node + AsRefNode + Clone,
+    N: gantz_core::Node + AsRefNode + ToNodeDsp + Clone,
 {
     fn marker_cas<N>(g: &Graph<Flat<N>>) -> Vec<ContentAddr> {
         g.node_indices()

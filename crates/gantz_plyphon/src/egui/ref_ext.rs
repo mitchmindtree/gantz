@@ -42,9 +42,10 @@ impl RefExtUi for DspRefExtUi {
                 if ui
                     .checkbox(&mut inline, "")
                     .on_hover_text(
-                        "Inline this reference's DSP nodes into the parent synthdef. \
-                         Currently always the behaviour - the flag records intent \
-                         until shared-synthdef instancing lands.",
+                        "Inline this reference's DSP nodes into the parent synthdef \
+                         instead of spawning them from the shared per-variant \
+                         definition (the default). Inlined copies compile their own \
+                         units; instanced copies share one definition.",
                     )
                     .changed()
                 {

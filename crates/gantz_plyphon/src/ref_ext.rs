@@ -23,8 +23,11 @@ pub struct DspRefExt {
     /// Inline the referenced graph's DSP nodes into the parent synthdef,
     /// rather than instancing a shared definition.
     ///
-    /// Inlining is currently the only lowering, so the flag records intent
-    /// until shared-synthdef instancing lands.
+    /// Instancing is the default lowering: the child derives once into shared
+    /// content-named synthdefs, installed once and spawned per instance with
+    /// bus wiring set per synth. Inlining splices the child's units into the
+    /// parent's def instead - each copy compiles its own units, buying full
+    /// cross-boundary fusion at N-times the unit count.
     pub inline: bool,
 }
 

@@ -2,16 +2,10 @@
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
-#[cfg(feature = "egui")]
-use gantz_egui::{
-    InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
-};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
-#[cfg(feature = "egui")]
-use crate::param::value_row;
 
 /// Concatenate `count` input signals into one channel group (like Max's
 /// `mc.pack~` or a VCV merge): the output's width is the sum of the input
@@ -93,50 +87,6 @@ impl NodeDsp for Pack {
 impl ToNodeDsp for Pack {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         Some(self)
-    }
-}
-
-#[cfg(feature = "egui")]
-impl NodeUi for Pack {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~pack"
-    }
-
-    fn description(&self) -> Option<&'static str> {
-        Some("Concatenate signals into one multichannel signal (packed, not mixed)")
-    }
-
-    fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
-        let framed =
-            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~pack").selectable(false)));
-        NodeUiResponse::new(framed)
-    }
-
-    fn inspector_rows(
-        &mut self,
-        _ctx: &mut NodeCtx,
-        body: &mut egui_extras::TableBody,
-    ) -> InspectorRowsResponse {
-        let mut resp = InspectorRowsResponse::default();
-        // Input count (structural: it changes the node's sockets -> respawn).
-        let mut count = self.count;
-        let dv = egui::DragValue::new(&mut count).range(1..=64).speed(1.0);
-        if value_row(body, "count", dv) {
-            self.count = count.max(1);
-            resp.mark_changed();
-        }
-        resp
-    }
-
-    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, ix: usize) -> Option<SocketDoc> {
-        match kind {
-            SocketKind::Input => Some(SocketDoc::ty("signal").with_description(format!(
-                "signal {ix} to pack (any channel width; silence when unconnected)"
-            ))),
-            SocketKind::Output => Some(SocketDoc::ty("signal").with_description(
-                "every input's channels concatenated (width = the sum of input widths)",
-            )),
-        }
     }
 }
 

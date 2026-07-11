@@ -4,18 +4,12 @@ use std::hash::{Hash, Hasher};
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, RegCtx};
-#[cfg(feature = "egui")]
-use gantz_egui::{
-    InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
-};
 use gantz_nodetag::NodeTag;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, NodeRate, Signal, ToNodeDsp, cahash_rate};
 use crate::param::{cahash_lag, control_input_expr, param_name, param_state, plyphon_param};
-#[cfg(feature = "egui")]
-use crate::param::{param_row, param_state_row, param_value, rate_row, with_value};
 
 /// A sine oscillator. Emits a single `SinOsc` UGen at the configured `rate`
 /// (audio by default; control rate for modulator duty).
@@ -139,76 +133,5 @@ impl NodeDsp for SinOsc {
 impl ToNodeDsp for SinOsc {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         Some(self)
-    }
-}
-
-#[cfg(feature = "egui")]
-impl NodeUi for SinOsc {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~sinosc"
-    }
-
-    fn description(&self) -> Option<&'static str> {
-        Some("Sine oscillator (audio or control rate)")
-    }
-
-    fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
-        // The body shows just the node name; params are edited in the inspector.
-        let framed =
-            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~sinosc").selectable(false)));
-        NodeUiResponse::new(framed)
-    }
-
-    fn show_state(&self) -> bool {
-        // A summarised "N queued" state row (in `inspector_rows`) replaces the raw
-        // `{value, pending}` dump.
-        false
-    }
-
-    fn inspector_rows(
-        &mut self,
-        ctx: &mut NodeCtx,
-        body: &mut egui_extras::TableBody,
-    ) -> InspectorRowsResponse {
-        let mut resp = InspectorRowsResponse::default();
-        // The value lives in VM state (a value edit must NOT change the content
-        // address); the lag lives in the weight (a lag edit is structural).
-        let state = ctx.extract_value().ok().flatten();
-        param_state_row(body, state.as_ref());
-        let mut value = state
-            .as_ref()
-            .and_then(param_value)
-            .unwrap_or(Self::DEFAULT_FREQ as f64) as f32;
-        let mut lag = self.freq_lag;
-        let dv = egui::DragValue::new(&mut value)
-            .range(0.0..=20_000.0)
-            .speed(1.0)
-            .suffix(" Hz");
-        let (value_changed, lag_changed) = param_row(body, "freq", dv, &mut lag);
-        if value_changed {
-            // Preserve any queued `pending` updates; only the value changes.
-            let prev = state.unwrap_or_else(|| param_state(Self::DEFAULT_FREQ as f64));
-            let _ = ctx.update_value(with_value(prev, value as f64));
-        }
-        if lag_changed {
-            self.freq_lag = lag;
-            resp.mark_changed();
-        }
-        if rate_row(body, &mut self.rate) {
-            resp.mark_changed();
-        }
-        resp
-    }
-
-    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, ix: usize) -> Option<SocketDoc> {
-        match (kind, ix) {
-            (SocketKind::Input, 0) => Some(SocketDoc::ty("number").with_description(
-                "frequency (Hz) control; overrides the inspector value while connected",
-            )),
-            (SocketKind::Output, _) => Some(SocketDoc::ty("signal").with_description(
-                "sine signal at the configured frequency (and the configured ar/kr rate)",
-            )),
-            _ => None,
-        }
     }
 }

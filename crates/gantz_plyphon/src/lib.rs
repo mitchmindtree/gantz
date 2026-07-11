@@ -29,12 +29,10 @@ pub use dsp::{
 };
 pub use flatten::{AsRefNode, Flat, FlattenError, flatten, flatten_from_registry};
 pub use node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Unpack};
-#[cfg(feature = "egui")]
-pub use ref_ext::DspRefExtUi;
 pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, dsp_commits};
-#[cfg(feature = "egui")]
-pub use settings::DspSettingsTab;
 pub use sugar::PlyphonSugar;
+#[cfg(feature = "egui")]
+pub use ui::{DspRefExtUi, DspSettingsTab};
 
 pub mod backend;
 pub mod builtin;
@@ -46,9 +44,9 @@ pub mod monitor;
 pub mod node;
 pub mod param;
 pub mod ref_ext;
-#[cfg(feature = "egui")]
-pub mod settings;
 pub mod sugar;
+#[cfg(feature = "egui")]
+pub mod ui;
 
 /// Raw bytes of the DSP domain's baked-in base `.gantz` export, embedded at
 /// compile time. Contributed as a base source by `bevy_gantz_plyphon`'s

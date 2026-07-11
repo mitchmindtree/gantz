@@ -2,18 +2,12 @@
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, RegCtx};
-#[cfg(feature = "egui")]
-use gantz_egui::{
-    InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
-};
 use gantz_nodetag::NodeTag;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, NodeRate, Signal, ToNodeDsp, cahash_rate};
 use crate::param::{param_name, param_state, plyphon_param};
-#[cfg(feature = "egui")]
-use crate::param::{param_state_row, param_value, rate_row, value_row, with_value};
 
 /// A one-pole lag (smoother). Emits a `Lag` UGen per input channel at the
 /// configured `rate`, smoothing the whole signal group over the shared `lag`
@@ -120,64 +114,5 @@ impl NodeDsp for Lag {
 impl ToNodeDsp for Lag {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         Some(self)
-    }
-}
-
-#[cfg(feature = "egui")]
-impl NodeUi for Lag {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~lag"
-    }
-
-    fn description(&self) -> Option<&'static str> {
-        Some("One-pole lag: smooth a signal over a duration")
-    }
-
-    fn ui(&mut self, _ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
-        let framed =
-            uictx.framed(|ui, _sockets| ui.add(egui::Label::new("~lag").selectable(false)));
-        NodeUiResponse::new(framed)
-    }
-
-    fn show_state(&self) -> bool {
-        // A summarised "N queued" state row (in `inspector_rows`) replaces the raw
-        // `{value, pending}` dump.
-        false
-    }
-
-    fn inspector_rows(
-        &mut self,
-        ctx: &mut NodeCtx,
-        body: &mut egui_extras::TableBody,
-    ) -> InspectorRowsResponse {
-        // The lag duration lives in VM state (a value edit must NOT change the
-        // content address), shown as a single duration row.
-        let state = ctx.extract_value().ok().flatten();
-        param_state_row(body, state.as_ref());
-        let mut value = state
-            .as_ref()
-            .and_then(param_value)
-            .unwrap_or(Self::DEFAULT_DUR as f64) as f32;
-        let dv = egui::DragValue::new(&mut value)
-            .range(0.0..=10.0)
-            .speed(0.001)
-            .fixed_decimals(3)
-            .suffix(" s");
-        if value_row(body, "lag", dv) {
-            let prev = state.unwrap_or_else(|| param_state(Self::DEFAULT_DUR as f64));
-            let _ = ctx.update_value(with_value(prev, value as f64));
-        }
-        let mut resp = InspectorRowsResponse::default();
-        if rate_row(body, &mut self.rate) {
-            resp.mark_changed();
-        }
-        resp
-    }
-
-    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {
-        match kind {
-            SocketKind::Input => Some(SocketDoc::ty("signal").with_description("signal to smooth")),
-            SocketKind::Output => Some(SocketDoc::ty("signal").with_description("smoothed signal")),
-        }
     }
 }

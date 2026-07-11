@@ -3,23 +3,16 @@
 //! [`DspRefExt`] is stored in the referenced node's ext slot (see
 //! [`Ref::set_ext`](gantz_core::node::Ref::set_ext)) under
 //! [`DSP_REF_EXT_KEY`], only when non-default so a default-configured
-//! reference keeps its address. `DspRefExtUi` (`egui` feature) renders the
-//! inspector toggle for references whose graph contains DSP nodes.
+//! reference keeps its address. `crate::ui`'s `DspRefExtUi` (`egui` feature)
+//! renders the inspector toggle for references whose graph contains DSP
+//! nodes.
 
 use crate::ToNodeDsp;
 use gantz_ca::{CommitAddr, ContentAddr};
 use gantz_core::node::AsRefNode;
 use gantz_core::node::graph::Graph;
-#[cfg(feature = "egui")]
-use gantz_egui::node::{NamedRef, RefExtUi};
-#[cfg(feature = "egui")]
-use gantz_egui::widget::node_inspector;
-#[cfg(feature = "egui")]
-use gantz_egui::{InspectorRowsResponse, NodeCtx};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-#[cfg(feature = "egui")]
-use std::sync::Arc;
 
 /// The ext key under which [`DspRefExt`] is stored.
 pub const DSP_REF_EXT_KEY: &str = "plyphon.dsp-ref";
@@ -33,64 +26,6 @@ pub struct DspRefExt {
     /// Inlining is currently the only lowering, so the flag records intent
     /// until shared-synthdef instancing lands.
     pub inline: bool,
-}
-
-/// The DSP domain's [`NamedRef`] inspector extension: an `inline` toggle for
-/// references whose graph contains DSP nodes (directly or transitively).
-#[cfg(feature = "egui")]
-#[derive(Debug, Default)]
-pub struct DspRefExtUi {
-    /// The commit addresses of DSP graphs, precomputed where the concrete
-    /// node type is known (see [`dsp_commits`]).
-    pub dsp_graphs: Arc<HashSet<ContentAddr>>,
-}
-
-#[cfg(feature = "egui")]
-impl RefExtUi for DspRefExtUi {
-    fn inspector_rows(
-        &self,
-        named: &mut NamedRef,
-        _ctx: &mut NodeCtx,
-        body: &mut egui_extras::TableBody,
-    ) -> InspectorRowsResponse {
-        let mut resp = InspectorRowsResponse::default();
-        if !self.dsp_graphs.contains(&named.content_addr()) {
-            return resp;
-        }
-        let row_h = node_inspector::table_row_h(body.ui_mut());
-        let mut inline = named
-            .ext_as::<DspRefExt>(DSP_REF_EXT_KEY)
-            .unwrap_or_default()
-            .inline;
-        body.row(row_h, |mut row| {
-            row.col(|ui| {
-                ui.label("inline");
-            });
-            row.col(|ui| {
-                if ui
-                    .checkbox(&mut inline, "")
-                    .on_hover_text(
-                        "Inline this reference's DSP nodes into the parent synthdef. \
-                         Currently always the behaviour - the flag records intent \
-                         until shared-synthdef instancing lands.",
-                    )
-                    .changed()
-                {
-                    // Stored only when non-default so a default-configured
-                    // reference keeps its address.
-                    if inline {
-                        named
-                            .set_ext(DSP_REF_EXT_KEY, &DspRefExt { inline })
-                            .expect("`DspRefExt` is datum-representable");
-                    } else {
-                        named.remove_ext(DSP_REF_EXT_KEY);
-                    }
-                    resp.mark_changed();
-                }
-            });
-        });
-        resp
-    }
 }
 
 /// The commit addresses (as [`ContentAddr`]s, the form

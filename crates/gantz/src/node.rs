@@ -501,6 +501,51 @@ mod tests {
         );
     }
 
+    /// A head graph with `~sinosc -> ~out` plus unconnected `inlet`/`outlet`
+    /// nodes flattens correctly (the inlets/outlets dissolve) and derives a
+    /// sounding synthdef. Regression guard for the GUI's `flatten_from_registry`
+    /// path with `Box<dyn Node>`.
+    #[test]
+    fn head_graph_with_unconnected_inlets_derives_sound() {
+        use gantz_plyphon::ToNodeDsp;
+        use std::time::Duration;
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+
+        let text = "\
+(graph head
+  (s ~sinosc) (out ~out) (i inlet) (o outlet)
+  (-> s (out 0)))";
+        let export: gantz_egui::export::Export<G> =
+            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("from_str");
+        let head = gantz_ca::Head::Branch("head".into());
+        let graph = export.registry.head_graph(&head).expect("head graph");
+
+        let flat = gantz_plyphon::flatten_from_registry(graph, &export.registry).expect("flatten");
+        // The inlet/outlet dissolve: only sin + out survive.
+        assert_eq!(
+            flat.node_count(),
+            2,
+            "inlet/outlet dissolve in the head graph"
+        );
+        assert_eq!(flat.edge_count(), 1, "the sin -> out edge survives");
+
+        let regions = gantz_plyphon::derive_synthdefs(&flat, 1, "head").expect("derive");
+        assert_eq!(regions.len(), 1, "one region");
+        let names: Vec<&str> = regions[0]
+            .derived
+            .def
+            .units
+            .iter()
+            .map(|u| u.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["SinOsc", "BinaryOpUGen", "BinaryOpUGen", "Out"]);
+        assert_eq!(
+            regions[0].derived.gains.len(),
+            1,
+            "the out carries a fade gain"
+        );
+    }
+
     /// A nested graph of DSP nodes sounds through the flattening pass: the
     /// child's `~lag` splices into the parent's synthdef carrying its nested
     /// path, and that path reaches the node's live param state in the VM -

@@ -3,7 +3,7 @@
 //! [`DspRefExt`] is stored in the referenced node's ext slot (see
 //! [`Ref::set_ext`](gantz_core::node::Ref::set_ext)) under
 //! [`DSP_REF_EXT_KEY`], only when non-default so a default-configured
-//! reference keeps its address. `crate::ui`'s `DspRefExtUi` (`egui` feature)
+//! reference keeps its address. `crate::egui`'s `DspRefExtUi` (`egui` feature)
 //! renders the inspector toggle for references whose graph contains DSP
 //! nodes.
 

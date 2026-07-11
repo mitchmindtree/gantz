@@ -1,6 +1,6 @@
 //! Reusable helpers for DSP node parameters: building a plyphon control param,
 //! naming it uniquely within a synthdef and folding its smoothing lag into a
-//! content address. The inspector rows over this state live in `crate::ui`
+//! content address. The inspector rows over this state live in `crate::egui`
 //! (`egui` feature).
 //!
 //! A DSP param's *value* lives in the node's VM state (path-keyed, like `number`),

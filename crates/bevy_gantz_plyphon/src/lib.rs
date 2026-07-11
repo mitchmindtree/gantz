@@ -29,8 +29,8 @@ use cpal::{FromSample, SizedSample};
 use gantz_ca as ca;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    AddAction, AsRefNode, Backend, Embedded, GainRef, ROOT_GROUP_ID, RegionDerived, ToNodeDsp,
-    derive_synthdefs, flatten_from_registry, structural_sig,
+    AddAction, AsRefNode, Backend, BusKey, Embedded, GainRef, ROOT_GROUP_ID, RegionDerived,
+    ToNodeDsp, derive_synthdefs, flatten_from_registry, structural_sig,
 };
 use plyphon::{Controller, Nrt, Options, StreamConsumer, World, engine};
 // `std::time::Instant` panics ("time not implemented") on `wasm32-unknown-unknown`;
@@ -257,7 +257,7 @@ struct DspEngine {
 /// `~scopeout`'s scope `StreamConsumer` is `Send` but not `Sync`.
 #[derive(Default)]
 struct HeadSynths {
-    heads: HashMap<Entity, HeadRegions>,
+    heads: HashMap<Entity, HeadParts>,
     scope_alloc: ScopeAlloc,
     bus_alloc: BusAlloc,
     /// Installed synthdef names -> `(refcount, structural_sig)`. A def is
@@ -278,9 +278,9 @@ struct HeadSynths {
 /// One open head's running synths: one per boundary-cut region, in region-DAG
 /// topological order (bus writers before their readers - also their node-tree
 /// order). Empty when the head's graph has no dsp sink.
-struct HeadRegions {
+struct HeadParts {
     graph: ca::GraphAddr,
-    regions: Vec<RegionSynth>,
+    parts: Vec<PartSynth>,
 }
 
 /// A run of consecutive private audio-bus channels.
@@ -301,7 +301,7 @@ struct BusAlloc {
     /// Free runs, sorted by start and coalesced.
     free: Vec<Run>,
     /// Live allocations.
-    allocated: HashMap<(Entity, Vec<usize>), Run>,
+    allocated: HashMap<(Entity, BusKey), Run>,
     /// Quarantined runs, returned to `free` once their deadline passes.
     graveyard: Vec<(Run, Instant)>,
 }
@@ -322,7 +322,7 @@ impl BusAlloc {
     /// width change (the old run is quarantined). `None` = range exhausted.
     fn get_or_alloc(
         &mut self,
-        key: (Entity, Vec<usize>),
+        key: (Entity, BusKey),
         channels: usize,
         now: Instant,
     ) -> Option<Run> {
@@ -348,7 +348,7 @@ impl BusAlloc {
     }
 
     /// Quarantine `key`'s run (if any).
-    fn release(&mut self, key: &(Entity, Vec<usize>), now: Instant) {
+    fn release(&mut self, key: &(Entity, BusKey), now: Instant) {
         if let Some(run) = self.allocated.remove(key) {
             self.graveyard.push((run, now + FADE_GRACE * 2));
         }
@@ -437,7 +437,7 @@ impl ScopeAlloc {
 }
 
 /// The installed synthdef + running synth for one region of a head.
-struct RegionSynth {
+struct PartSynth {
     /// The region's identity across re-derives (`RegionDerived::key`), the
     /// driver's match for the keep/replace decision.
     key: u64,
@@ -632,7 +632,7 @@ fn drive_synths<N>(
         let (Some(head), Some(vm)) = (state.heads.get_mut(&entity), vms.get_mut(&entity)) else {
             continue;
         };
-        for synth in &mut head.regions {
+        for synth in &mut head.parts {
             let node_id = synth.node_id;
             let mut backend = Embedded::new(&mut dsp.controller);
             for slot in &mut synth.params {
@@ -699,7 +699,7 @@ fn drive_synths<N>(
         .collect();
     for e in stale {
         if let Some(head) = state.heads.remove(&e) {
-            for synth in head.regions {
+            for synth in head.parts {
                 let def_name = synth.def_name.clone();
                 fade_out(&mut dsp.controller, state, e, synth);
                 release_def(&mut dsp.controller, &mut state.shared_defs, &def_name);
@@ -758,9 +758,9 @@ fn park_head(state: &mut HeadSynths, entity: Entity, graph_ca: ca::GraphAddr) {
         None => {
             state.heads.insert(
                 entity,
-                HeadRegions {
+                HeadParts {
                     graph: graph_ca,
-                    regions: Vec::new(),
+                    parts: Vec::new(),
                 },
             );
         }
@@ -797,7 +797,7 @@ fn structural_sync<N>(
         // the defs now is safe - a fading synth holds its own compiled copy.
         Err(gantz_plyphon::DeriveError::NoSink) => {
             if let Some(head) = state.heads.remove(&entity) {
-                for synth in head.regions {
+                for synth in head.parts {
                     let def_name = synth.def_name.clone();
                     fade_out(controller, state, entity, synth);
                     release_def(controller, &mut state.shared_defs, &def_name);
@@ -808,9 +808,9 @@ fn structural_sync<N>(
             // graphs don't re-derive every frame.
             state.heads.insert(
                 entity,
-                HeadRegions {
+                HeadParts {
                     graph: graph_ca,
-                    regions: Vec::new(),
+                    parts: Vec::new(),
                 },
             );
             return;
@@ -836,16 +836,16 @@ fn structural_sync<N>(
     };
 
     // Release bus runs whose boundary nodes are gone from the derivation.
-    let live_buses: HashSet<Vec<usize>> = derived
+    let live_buses: HashSet<BusKey> = derived
         .iter()
         .flat_map(|r| r.bus_writes.iter().chain(&r.bus_reads))
-        .map(|b| b.node_path.clone())
+        .map(|b| BusKey::Bus(b.node_path.clone()))
         .collect();
     let dead_buses: Vec<_> = state
         .bus_alloc
         .allocated
         .keys()
-        .filter(|(e, path)| *e == entity && !live_buses.contains(path))
+        .filter(|(e, key)| *e == entity && !live_buses.contains(key))
         .cloned()
         .collect();
     for key in dead_buses {
@@ -855,13 +855,13 @@ fn structural_sync<N>(
     // Plan each region: keep the running synth when key + sig match, else spawn
     // a replacement (fading any predecessor once the replacement is up).
     enum Plan {
-        Keep(RegionSynth),
-        Spawn(RegionDerived, u64, Option<RegionSynth>),
+        Keep(PartSynth),
+        Spawn(RegionDerived, u64, Option<PartSynth>),
     }
     let mut prev = state
         .heads
         .remove(&entity)
-        .map(|h| h.regions)
+        .map(|h| h.parts)
         .unwrap_or_default();
     let mut plans: Vec<Plan> = Vec::with_capacity(derived.len());
     for r in derived {
@@ -913,10 +913,10 @@ fn structural_sync<N>(
         })
         .collect();
 
-    let mut regions: Vec<RegionSynth> = Vec::with_capacity(plans.len());
+    let mut parts: Vec<PartSynth> = Vec::with_capacity(plans.len());
     for (plan, anchor) in plans.into_iter().zip(anchors) {
         match plan {
-            Plan::Keep(k) => regions.push(k),
+            Plan::Keep(k) => parts.push(k),
             Plan::Spawn(r, sig, old) => {
                 match spawn_region(controller, state, entity, r, sig, sample_rate, anchor) {
                     Some(synth) => {
@@ -933,20 +933,20 @@ fn structural_sync<N>(
                             fade_out(controller, state, entity, old);
                             release_def(controller, &mut state.shared_defs, &old_def_name);
                         }
-                        regions.push(synth);
+                        parts.push(synth);
                     }
                     // Keep the old synth playing untouched on failure -
                     // strictly better than the silence a teardown would leave.
-                    None => regions.extend(old),
+                    None => parts.extend(old),
                 }
             }
         }
     }
     state.heads.insert(
         entity,
-        HeadRegions {
+        HeadParts {
             graph: graph_ca,
-            regions,
+            parts,
         },
     );
 }
@@ -967,7 +967,7 @@ fn spawn_region(
     sig: u64,
     sample_rate: f64,
     anchor: Option<i32>,
-) -> Option<RegionSynth> {
+) -> Option<PartSynth> {
     let now = Instant::now();
     let RegionDerived {
         key,
@@ -987,7 +987,7 @@ fn spawn_region(
     // indices and bufnums are no-lag control params, set live per block).
     let mut set_after_spawn: Vec<(usize, f32)> = Vec::new();
     for binding in bus_writes.iter().chain(&bus_reads) {
-        let bus_key = (entity, binding.node_path.clone());
+        let bus_key = (entity, BusKey::Bus(binding.node_path.clone()));
         let Some(run) = state.bus_alloc.get_or_alloc(bus_key, binding.channels, now) else {
             log::error!("bevy_gantz_plyphon: private audio buses exhausted; region not spawned");
             return None;
@@ -1073,7 +1073,7 @@ fn spawn_region(
                     last: None,
                 })
                 .collect();
-            Some(RegionSynth {
+            Some(PartSynth {
                 key,
                 def_name,
                 node_id,
@@ -1097,12 +1097,7 @@ fn spawn_region(
 /// and queue the synth - with its cued scope streams - for a deferred free once
 /// the slowest ramp has died away. A synth with no gains (e.g. monitor-only) has
 /// no audible output to de-click and is freed immediately.
-fn fade_out(
-    controller: &mut Controller,
-    state: &mut HeadSynths,
-    entity: Entity,
-    synth: RegionSynth,
-) {
+fn fade_out(controller: &mut Controller, state: &mut HeadSynths, entity: Entity, synth: PartSynth) {
     if synth.gains.is_empty() {
         let _ = Embedded::new(controller).free_node(synth.node_id);
         free_scopes(controller, &mut state.scope_alloc, synth.scopes);
@@ -1379,19 +1374,22 @@ mod tests {
         let base = Instant::now();
         let mut alloc = BusAlloc::new(4, 12);
         let a = alloc
-            .get_or_alloc((e[0], vec![1]), 2, base)
+            .get_or_alloc((e[0], BusKey::Bus(vec![1])), 2, base)
             .expect("2 channels");
         assert_eq!(a, Run { start: 4, len: 2 });
         let b = alloc
-            .get_or_alloc((e[0], vec![2]), 3, base)
+            .get_or_alloc((e[0], BusKey::Bus(vec![2])), 3, base)
             .expect("3 channels");
         assert_eq!(b, Run { start: 6, len: 3 });
         // Same key + width: the same run (an unchanged region's baked channel
         // stays valid).
-        assert_eq!(alloc.get_or_alloc((e[0], vec![1]), 2, base), Some(a));
+        assert_eq!(
+            alloc.get_or_alloc((e[0], BusKey::Bus(vec![1])), 2, base),
+            Some(a)
+        );
         // A width change re-allocates; the old run is quarantined, not reused.
         let a2 = alloc
-            .get_or_alloc((e[0], vec![1]), 4, base)
+            .get_or_alloc((e[0], BusKey::Bus(vec![1])), 4, base)
             .expect("4 channels");
         assert_eq!(a2, Run { start: 9, len: 4 });
         assert!(alloc.graveyard.iter().any(|(run, _)| *run == a));
@@ -1404,19 +1402,29 @@ mod tests {
         let e = entities(1);
         let base = Instant::now();
         let mut alloc = BusAlloc::new(0, 4);
-        let a = alloc.get_or_alloc((e[0], vec![1]), 2, base).expect("a");
-        let b = alloc.get_or_alloc((e[0], vec![2]), 2, base).expect("b");
+        let a = alloc
+            .get_or_alloc((e[0], BusKey::Bus(vec![1])), 2, base)
+            .expect("a");
+        let b = alloc
+            .get_or_alloc((e[0], BusKey::Bus(vec![2])), 2, base)
+            .expect("b");
         assert_eq!((a.start, b.start), (0, 2));
         // Exhausted while both are live.
-        assert_eq!(alloc.get_or_alloc((e[0], vec![3]), 1, base), None);
+        assert_eq!(
+            alloc.get_or_alloc((e[0], BusKey::Bus(vec![3])), 1, base),
+            None
+        );
         // Released runs stay quarantined until the deadline passes...
         alloc.release_head(e[0], base);
         alloc.sweep(base);
-        assert_eq!(alloc.get_or_alloc((e[0], vec![3]), 1, base), None);
+        assert_eq!(
+            alloc.get_or_alloc((e[0], BusKey::Bus(vec![3])), 1, base),
+            None
+        );
         // ...then coalesce back into one allocatable 4-wide run.
         alloc.sweep(base + FADE_GRACE * 2);
         assert_eq!(
-            alloc.get_or_alloc((e[0], vec![3]), 4, base),
+            alloc.get_or_alloc((e[0], BusKey::Bus(vec![3])), 4, base),
             Some(Run { start: 0, len: 4 }),
         );
     }

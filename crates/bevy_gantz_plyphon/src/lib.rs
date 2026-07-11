@@ -825,6 +825,14 @@ fn structural_sync<N>(
             park_head(state, entity, graph_ca);
             return;
         }
+        // Instanced-reference failures: keep the previous synths, parking the
+        // head so the error logs once per commit rather than every frame.
+        Err(e @ gantz_plyphon::DeriveError::Unresolved(_))
+        | Err(e @ gantz_plyphon::DeriveError::RefCycle(_)) => {
+            log::error!("bevy_gantz_plyphon: {e:?}, keeping the previous synths");
+            park_head(state, entity, graph_ca);
+            return;
+        }
     };
 
     // Release bus runs whose boundary nodes are gone from the derivation.

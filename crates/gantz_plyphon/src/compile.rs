@@ -25,6 +25,11 @@ pub enum DeriveError {
     /// writer-before-reader order to derive (or run) them in. Deliberate
     /// cross-region feedback (an `InFeedback`-based bus) is a planned follow-up.
     BusCycle,
+    /// An instanced reference's target graph could not be resolved.
+    Unresolved(gantz_ca::ContentAddr),
+    /// Instanced references form a cycle (a graph transitively instancing
+    /// itself), so there is no finite template to derive.
+    RefCycle(gantz_ca::ContentAddr),
 }
 
 /// One side of a `~bus` boundary within a region's def: the bus unit whose
@@ -173,7 +178,7 @@ where
 }
 
 /// Every dsp sink of `graph`: an audio output (`~out`) or a monitor (`~scopeout`).
-fn dsp_sinks<N: ToNodeDsp>(graph: &Graph<N>) -> Vec<NodeIx> {
+pub(crate) fn dsp_sinks<N: ToNodeDsp>(graph: &Graph<N>) -> Vec<NodeIx> {
     graph
         .node_indices()
         .filter(|&n| {
@@ -240,7 +245,7 @@ fn resolved_sources<N: ToNodeDsp>(
 /// Merge each sink's dsp-only pull-eval order into one topological order over
 /// the nodes selected by `keep`, first occurrence wins (a filtered subsequence
 /// of a topological order remains topological for the kept subgraph).
-fn merged_pull_order<N: ToNodeDsp>(
+pub(crate) fn merged_pull_order<N: ToNodeDsp>(
     graph: &Graph<N>,
     seeds: &[NodeIx],
     keep: impl Fn(NodeIx) -> bool,
@@ -585,6 +590,17 @@ where
         });
     }
     Ok(regions)
+}
+
+/// The content-addressed name for a def with the given [`structural_sig`].
+///
+/// Purely a function of the def's structure - no head or region prefix - so
+/// structurally identical defs derived from different heads (or from many
+/// instances of one referenced child graph) collide by design, and the audio
+/// driver's per-name install refcounting shares one installed def between
+/// them. Names change exactly when the structure does.
+pub fn content_def_name(sig: u64) -> String {
+    format!("gantz-def-{sig:016x}")
 }
 
 /// A hash of a synthdef's *structure* - everything except parameter values.

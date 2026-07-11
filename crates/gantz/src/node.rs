@@ -502,9 +502,9 @@ mod tests {
     }
 
     /// A head graph with `~sinosc -> ~out` plus unconnected `inlet`/`outlet`
-    /// nodes flattens correctly (the inlets/outlets dissolve) and derives a
-    /// sounding synthdef. Regression guard for the GUI's `flatten_from_registry`
-    /// path with `Box<dyn Node>`.
+    /// nodes flattens correctly (root-level boundaries stay as inert non-DSP
+    /// markers) and derives a sounding synthdef. Regression guard for the
+    /// GUI's `flatten_from_registry` path with `Box<dyn Node>`.
     #[test]
     fn head_graph_with_unconnected_inlets_derives_sound() {
         use gantz_plyphon::ToNodeDsp;
@@ -521,13 +521,24 @@ mod tests {
         let graph = export.registry.head_graph(&head).expect("head graph");
 
         let flat = gantz_plyphon::flatten_from_registry(graph, &export.registry).expect("flatten");
-        // The inlet/outlet dissolve: only sin + out survive.
+        // Root inlet/outlet survive as markers (the head graph's interface);
+        // they are non-DSP, so derivation ignores them.
         assert_eq!(
             flat.node_count(),
-            2,
-            "inlet/outlet dissolve in the head graph"
+            4,
+            "sin + out + the two root boundary markers"
         );
         assert_eq!(flat.edge_count(), 1, "the sin -> out edge survives");
+        let markers = flat
+            .node_indices()
+            .filter(|&n| {
+                matches!(
+                    flat[n],
+                    gantz_plyphon::Flat::Inlet { .. } | gantz_plyphon::Flat::Outlet { .. }
+                )
+            })
+            .count();
+        assert_eq!(markers, 2, "the boundaries are kept as markers");
 
         let regions = gantz_plyphon::derive_synthdefs(&flat, 1, "head").expect("derive");
         assert_eq!(regions.len(), 1, "one region");

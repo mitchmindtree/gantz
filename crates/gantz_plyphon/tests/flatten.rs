@@ -8,7 +8,7 @@ use gantz_ca::ContentAddr;
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::{Graph, NodeIx};
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, parse_expr};
-use gantz_plyphon::flatten::{Flat, FlattenError, flatten};
+use gantz_plyphon::flatten::{Flat, FlattenError, RefKind, flatten};
 use gantz_plyphon::{
     AddAction, Bus, Lag, NodeDsp, Out, ROOT_GROUP_ID, ScopeOut, SinOsc, ToNodeDsp, derive_synthdef,
     derive_synthdefs, structural_sig,
@@ -32,6 +32,8 @@ enum N {
     Inlet,
     Outlet,
     Ref(ContentAddr),
+    /// A DSP-aware ref: the child CA + the `inline` flag.
+    DspRef(ContentAddr, bool),
     Other,
 }
 
@@ -43,7 +45,7 @@ impl ToNodeDsp for N {
             N::Out(o) => Some(o),
             N::ScopeOut(t) => Some(t),
             N::Bus(b) => Some(b),
-            N::Inlet | N::Outlet | N::Ref(_) | N::Other => None,
+            N::Inlet | N::Outlet | N::Ref(_) | N::DspRef(_, _) | N::Other => None,
         }
     }
 }
@@ -70,9 +72,17 @@ fn ca(byte: u8) -> ContentAddr {
 /// (missing entries surface as `Unresolved`), everything else is concrete.
 fn resolver<'g>(
     map: &'g HashMap<ContentAddr, Graph<N>>,
-) -> impl Fn(&N) -> Option<(ContentAddr, Option<&'g Graph<N>>)> + 'g {
+) -> impl Fn(&N) -> Option<(ContentAddr, RefKind, Option<&'g Graph<N>>)> + 'g {
     move |n| match n {
-        N::Ref(ca) => Some((*ca, map.get(ca))),
+        N::Ref(ca) => Some((*ca, RefKind::Inline, map.get(ca))),
+        N::DspRef(ca, inline) => {
+            let kind = if *inline {
+                RefKind::Inline
+            } else {
+                RefKind::Instance
+            };
+            Some((*ca, kind, map.get(ca)))
+        }
         _ => None,
     }
 }
@@ -92,7 +102,7 @@ fn try_flatten<'g>(
 /// The flat node with the given original path.
 fn at<'a>(flat: &'a Graph<Flat<N>>, path: &[usize]) -> NodeIx {
     flat.node_indices()
-        .find(|&n| flat[n].path == path)
+        .find(|&n| flat[n].path() == path)
         .unwrap_or_else(|| panic!("no flat node at path {path:?}"))
 }
 
@@ -103,7 +113,7 @@ fn edges_into(flat: &Graph<Flat<N>>, path: &[usize]) -> Vec<(Vec<usize>, u16, u1
         .edges_directed(n, Direction::Incoming)
         .map(|e| {
             let w = e.weight();
-            (flat[e.source()].path.clone(), w.output.0, w.input.0)
+            (flat[e.source()].path().to_vec(), w.output.0, w.input.0)
         })
         .collect();
     edges.reverse();
@@ -145,7 +155,7 @@ fn flat_graph_flattens_to_identity() {
     assert_eq!(flat.node_count(), 3);
     assert_eq!(flat.edge_count(), 2);
     for n in flat.node_indices() {
-        assert_eq!(flat[n].path, vec![n.index()], "flat paths are [ix]");
+        assert_eq!(flat[n].path(), vec![n.index()], "flat paths are [ix]");
     }
 
     let raw = derive_synthdef(&g, 1, "t").expect("derive raw");
@@ -493,4 +503,128 @@ fn render(world: &mut World, frames: usize) -> Vec<f32> {
     }
     out.truncate(frames);
     out
+}
+
+/// The flat vertex at `path`.
+fn flat_kind<'a>(flat: &'a Graph<Flat<N>>, path: &[usize]) -> &'a Flat<N> {
+    &flat[at(flat, path)]
+}
+
+#[test]
+fn instanced_ref_stays_an_opaque_marker() {
+    // parent: sin -> dsp-ref(child, inline=false) -> out. The ref is NOT
+    // spliced: it survives as a single `Flat::Instance` marker carrying the
+    // child's CA, with parent edges into/out of it preserved (the child's
+    // nodes do not appear in the flat graph).
+    let map = HashMap::from([(ca(1), lag_child())]);
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let r = g.add_node(N::DspRef(ca(1), false));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, r, Edge::new(0.into(), 0.into()));
+    g.add_edge(r, o, Edge::new(0.into(), 0.into()));
+
+    let flat = flatten_with(&g, &map);
+    // sin + the instance marker + out. The child's lag is NOT spliced.
+    assert_eq!(flat.node_count(), 3, "the instanced ref is not spliced");
+    assert_eq!(edges_into(&flat, &[2]), vec![(vec![1], 0, 0)]);
+    assert!(
+        matches!(flat_kind(&flat, &[1]), Flat::Instance { child_ca, .. } if *child_ca == ca(1)),
+        "the ref lowers as an Instance marker carrying the child CA",
+    );
+}
+
+#[test]
+fn inlined_dsp_ref_splices_as_a_plain_ref() {
+    // The same topology with `inline: true` splices the child's lag, matching
+    // the plain `Ref` behaviour: the marker is gone and the lag carries its
+    // nested path.
+    let map = HashMap::from([(ca(1), lag_child())]);
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let r = g.add_node(N::DspRef(ca(1), true));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, r, Edge::new(0.into(), 0.into()));
+    g.add_edge(r, o, Edge::new(0.into(), 0.into()));
+
+    let flat = flatten_with(&g, &map);
+    assert_eq!(flat.node_count(), 3, "sin + spliced lag + out");
+    assert!(
+        matches!(flat_kind(&flat, &[1, 1]), Flat::Node { .. }),
+        "the inlined ref splices the child's nodes",
+    );
+    assert_eq!(edges_into(&flat, &[2]), vec![(vec![1, 1], 0, 0)]);
+}
+
+#[test]
+fn instance_marker_preserves_multiport_edges() {
+    // An instanced ref with two inlets and two outlets: parent edges into each
+    // input and out of each output are kept on the marker (input i / output j
+    // positional), so `derive_template` sees a node with the ref's arity.
+    let mut child = Graph::<N>::default();
+    let i0 = child.add_node(N::Inlet);
+    let i1 = child.add_node(N::Inlet);
+    let o0 = child.add_node(N::Outlet);
+    let o1 = child.add_node(N::Outlet);
+    child.add_edge(i0, o0, Edge::new(0.into(), 0.into()));
+    child.add_edge(i1, o1, Edge::new(0.into(), 0.into()));
+    let map = HashMap::from([(ca(2), child)]);
+
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let r = g.add_node(N::DspRef(ca(2), false));
+    let pk = g.add_node(N::Out(Out::default()));
+    // Two inputs into the ref (input 0 and 1), two outputs out (0 and 1 - the
+    // second into the out's gain input to keep it distinct).
+    g.add_edge(s0, r, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, r, Edge::new(0.into(), 1.into()));
+    g.add_edge(r, pk, Edge::new(0.into(), 0.into()));
+    g.add_edge(r, pk, Edge::new(1.into(), 1.into()));
+
+    let flat = flatten_with(&g, &map);
+    // The marker is at path [2]; both input edges and both output edges survive.
+    let mut ins = edges_into(&flat, &[2]);
+    ins.sort();
+    assert_eq!(ins, vec![(vec![0], 0, 0), (vec![1], 0, 1)]);
+    // Output 0 -> out input 0; output 1 -> out input 1.
+    let mut outs: Vec<_> = flat
+        .edges_directed(at(&flat, &[2]), Direction::Outgoing)
+        .map(|e| (e.weight().output.0, e.weight().input.0))
+        .collect();
+    outs.sort();
+    assert_eq!(outs, vec![(0, 0), (1, 1)]);
+}
+
+#[test]
+fn root_boundaries_kept_as_markers() {
+    // Root-level inlets/outlets are the flat graph's own interface: they stay
+    // as `Flat::Inlet`/`Flat::Outlet` markers with positional indices, and
+    // their edges survive (inlet feeding a consumer, source feeding an
+    // outlet). Nested boundaries keep dissolving (covered elsewhere).
+    let mut g = Graph::<N>::default();
+    let i0 = g.add_node(N::Inlet);
+    let l = g.add_node(N::Lag(Lag::default()));
+    let i1 = g.add_node(N::Inlet);
+    let o0 = g.add_node(N::Outlet);
+    g.add_edge(i0, l, Edge::new(0.into(), 0.into()));
+    g.add_edge(l, o0, Edge::new(0.into(), 0.into()));
+    let _ = i1;
+
+    let flat = flatten_with(&g, &HashMap::new());
+    assert_eq!(flat.node_count(), 4, "lag + three root boundary markers");
+    assert!(
+        matches!(flat_kind(&flat, &[0]), Flat::Inlet { index: 0, .. }),
+        "first inlet is marker 0",
+    );
+    assert!(
+        matches!(flat_kind(&flat, &[2]), Flat::Inlet { index: 1, .. }),
+        "second inlet is marker 1 (ascending node index order)",
+    );
+    assert!(
+        matches!(flat_kind(&flat, &[3]), Flat::Outlet { index: 0, .. }),
+        "outlet is marker 0",
+    );
+    assert_eq!(edges_into(&flat, &[1]), vec![(vec![0], 0, 0)]);
+    assert_eq!(edges_into(&flat, &[3]), vec![(vec![1], 0, 0)]);
 }

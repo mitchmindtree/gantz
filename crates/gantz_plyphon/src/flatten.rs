@@ -17,6 +17,16 @@
 //! hash paths. Keeping original paths means a node's identity survives
 //! re-derivation regardless of where it lands in the flat graph.
 //!
+//! Not every ref splices. A ref resolved as [`RefKind::Instance`] stays an
+//! opaque [`Flat::Instance`] marker for
+//! `derive_template` (crate::instance) to lower into a
+//! shared synthdef spawned per instance. Root-level `Inlet`/`Outlet` nodes are
+//! likewise kept as markers ([`Flat::Inlet`]/[`Flat::Outlet`]): they are the
+//! flattened graph's own interface, which template derivation lowers to the
+//! shared def's bus reads and writes. All markers are non-DSP
+//! (`to_node_dsp()` is `None`), so [`derive_synthdef`](crate::derive_synthdef)
+//! and [`derive_synthdefs`](crate::derive_synthdefs) ignore them.
+//!
 //! # Edge bridging
 //!
 //! An edge into a ref's input `i` belongs to every consumer of the referenced
@@ -45,15 +55,62 @@ use crate::dsp::{NodeDsp, ToNodeDsp};
 
 pub use gantz_core::node::AsRefNode;
 
-/// A node spliced out of a nested structure into a flat graph, carrying its
-/// original path (e.g. `[3, 2]` for the node at index 2 within the graph
-/// referenced by the root node at index 3).
+/// A vertex of the flattened graph: a node spliced out of the nested
+/// structure, an opaque instanced-reference marker, or a root-level boundary
+/// marker. Every variant carries its original path (e.g. `[3, 2]` for the
+/// node at index 2 within the graph referenced by the root node at index 3).
 #[derive(Clone, Debug)]
-pub struct Flat<N> {
-    /// The node's original path within the nested structure.
-    pub path: Vec<usize>,
-    /// The node itself.
-    pub node: N,
+pub enum Flat<N> {
+    /// A concrete node spliced into the flat graph.
+    Node {
+        /// The node's original path within the nested structure.
+        path: Vec<usize>,
+        /// The node itself.
+        node: N,
+    },
+    /// An instanced nested-graph ref: opaque to derivation, resolved by
+    /// `derive_template` (crate::instance) into a shared
+    /// synthdef variant wired per instance.
+    Instance {
+        /// The ref node's original path within the nested structure.
+        path: Vec<usize>,
+        /// The referenced child graph's content address.
+        child_ca: ContentAddr,
+        /// The ref's inlet count (the child graph's `Inlet` count), for
+        /// instance-aware reachability and edge bridging.
+        n_inlets: usize,
+        /// The ref's outlet count (the child graph's `Outlet` count).
+        n_outlets: usize,
+    },
+    /// A root-level `Inlet`, kept as a marker: it is the flattened graph's own
+    /// interface, which template derivation lowers to a shared-def bus read.
+    /// (Nested inlets dissolve into the surrounding edges as before.)
+    Inlet {
+        /// The inlet node's path (`[ix]` - root markers are never nested).
+        path: Vec<usize>,
+        /// The inlet's position among the root's inlets in ascending node
+        /// index order (the "input i to inlet i" contract).
+        index: usize,
+    },
+    /// A root-level `Outlet` marker (see [`Flat::Inlet`]).
+    Outlet {
+        /// The outlet node's path.
+        path: Vec<usize>,
+        /// The outlet's position among the root's outlets.
+        index: usize,
+    },
+}
+
+impl<N> Flat<N> {
+    /// The vertex's original path within the nested structure.
+    pub fn path(&self) -> &[usize] {
+        match self {
+            Flat::Node { path, .. }
+            | Flat::Instance { path, .. }
+            | Flat::Inlet { path, .. }
+            | Flat::Outlet { path, .. } => path,
+        }
+    }
 }
 
 /// An error flattening a nested graph.
@@ -69,14 +126,34 @@ pub enum FlattenError {
     Unresolved(ContentAddr),
 }
 
-/// Resolves a node to the committed graph it references, if any.
+/// How a nested-graph ref lowers during flattening.
+///
+/// `Inline` splices the referenced graph's nodes into the flat graph (the
+/// classic behaviour). `Instance` leaves an opaque [`Flat::Instance`] marker,
+/// deferring the child's DSP to a shared synthdef derived once and wired per
+/// instance (see `derive_template` (crate::instance)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefKind {
+    /// Splice the referenced graph's nodes into the flat graph.
+    Inline,
+    /// Leave an opaque instance marker; the child's DSP is derived once into a
+    /// shared synthdef and wired per instance.
+    Instance,
+}
+
+/// Resolves a node to the committed graph it references, if any, and how it
+/// lowers.
 ///
 /// - `None`: not a graph ref. The node is copied into the flat graph as-is.
-/// - `Some((ca, Some(graph)))`: a graph ref. The referenced graph is spliced
-///   in place of the node, with `ca` keying the ref-cycle guard.
-/// - `Some((ca, None))`: a graph ref whose target is missing, an
-///   [`FlattenError::Unresolved`] error.
-pub type Resolve<'g, N> = dyn Fn(&N) -> Option<(ContentAddr, Option<&'g Graph<N>>)> + 'g;
+/// - `Some((ca, RefKind::Inline, Some(graph)))`: an inlined graph ref. The
+///   referenced graph is spliced in place of the node, with `ca` keying the
+///   ref-cycle guard.
+/// - `Some((ca, RefKind::Instance, _))`: an instanced graph ref. An opaque
+///   [`Flat::Instance`] marker carrying `ca` is emitted in place of the node;
+///   the child graph is not resolved at flatten time (it may be `None`).
+/// - `Some((_, RefKind::Inline, None))`: a graph ref whose target is missing,
+///   an [`FlattenError::Unresolved`] error.
+pub type Resolve<'g, N> = dyn Fn(&N) -> Option<(ContentAddr, RefKind, Option<&'g Graph<N>>)> + 'g;
 
 /// One level of the nested structure: a graph, where it hangs off its parent,
 /// and where each of its nodes went during splicing. Bridging resolves edge
@@ -101,11 +178,14 @@ type SrcKey = (usize, NodeIx, usize);
 
 impl<N: ToNodeDsp> ToNodeDsp for Flat<N> {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
-        self.node.to_node_dsp()
+        match self {
+            Flat::Node { node, .. } => node.to_node_dsp(),
+            Flat::Instance { .. } | Flat::Inlet { .. } | Flat::Outlet { .. } => None,
+        }
     }
 
     fn node_path(&self, _ix: usize) -> Vec<usize> {
-        self.path.clone()
+        self.path().to_vec()
     }
 }
 
@@ -157,7 +237,7 @@ where
     let resolve = |n: &N| {
         n.as_ref_node().map(|r| {
             let ca = r.content_addr();
-            (ca, registry.commit_graph_ref(&ca.into()))
+            (ca, RefKind::Inline, registry.commit_graph_ref(&ca.into()))
         })
     };
     let get_node = |ca: &ContentAddr| {
@@ -202,30 +282,67 @@ where
             p.push(ix.index());
             p
         };
-        if let Some((ca, child_graph)) = resolve(node) {
-            if ca_stack.contains(&ca) {
-                return Err(FlattenError::RefCycle(ca));
+        if let Some((ca, kind, child_graph)) = resolve(node) {
+            match kind {
+                // An instanced ref: emit an opaque marker carrying the child
+                // CA and do NOT splice (no recursion, no cycle check - an
+                // instance never resolves its child at flatten time). The
+                // marker behaves as a kept node with the ref's inputs/outputs.
+                RefKind::Instance => {
+                    let n_inlets = node.n_inputs(ctx);
+                    let n_outlets = node.n_outputs(ctx);
+                    let flat = out.add_node(Flat::Instance {
+                        path: path(),
+                        child_ca: ca,
+                        n_inlets,
+                        n_outlets,
+                    });
+                    levels[id].kept.insert(ix, flat);
+                }
+                RefKind::Inline => {
+                    if ca_stack.contains(&ca) {
+                        return Err(FlattenError::RefCycle(ca));
+                    }
+                    let child_graph = child_graph.ok_or(FlattenError::Unresolved(ca))?;
+                    ca_stack.push(ca);
+                    let child = splice(
+                        ctx,
+                        resolve,
+                        child_graph,
+                        Some((id, ix)),
+                        path(),
+                        levels,
+                        out,
+                        ca_stack,
+                    )?;
+                    ca_stack.pop();
+                    levels[id].child.insert(ix, child);
+                }
             }
-            let child_graph = child_graph.ok_or(FlattenError::Unresolved(ca))?;
-            ca_stack.push(ca);
-            let child = splice(
-                ctx,
-                resolve,
-                child_graph,
-                Some((id, ix)),
-                path(),
-                levels,
-                out,
-                ca_stack,
-            )?;
-            ca_stack.pop();
-            levels[id].child.insert(ix, child);
         } else if node.inlet(ctx) {
             levels[id].inlets.push(ix);
+            // A root-level inlet is the flat graph's own interface: keep it
+            // as a marker for template derivation. Nested inlets dissolve.
+            if parent.is_none() {
+                let index = levels[id].inlets.len() - 1;
+                let flat = out.add_node(Flat::Inlet {
+                    path: path(),
+                    index,
+                });
+                levels[id].kept.insert(ix, flat);
+            }
         } else if node.outlet(ctx) {
             levels[id].outlets.push(ix);
+            if parent.is_none() {
+                let index = levels[id].outlets.len() - 1;
+                let flat = out.add_node(Flat::Outlet {
+                    path: path(),
+                    index,
+                });
+                levels[id].kept.insert(ix, flat);
+            }
         } else {
-            let flat = out.add_node(Flat {
+            let flat = out.add_node(Flat::Node {
                 path: path(),
                 node: node.clone(),
             });

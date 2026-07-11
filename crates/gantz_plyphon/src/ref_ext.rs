@@ -42,16 +42,30 @@ where
     N: ToNodeDsp + AsRefNode,
 {
     let mut memo: HashMap<CommitAddr, bool> = HashMap::new();
-    let mut stack: Vec<CommitAddr> = Vec::new();
     registry
         .commits()
         .keys()
         .copied()
         .collect::<Vec<_>>()
         .into_iter()
-        .filter(|&ca| is_dsp(registry, ca, &mut memo, &mut stack))
+        .filter(|&ca| is_dsp_commit(registry, ca, &mut memo))
         .map(ContentAddr::from)
         .collect()
+}
+
+/// Whether the graph committed at `ca` contains a DSP node, directly or
+/// transitively through references. Memoized in `memo` so repeated probes over
+/// one registry (e.g. per ref during a flatten) stay linear overall.
+pub(crate) fn is_dsp_commit<N>(
+    registry: &gantz_ca::Registry<Graph<N>>,
+    ca: CommitAddr,
+    memo: &mut HashMap<CommitAddr, bool>,
+) -> bool
+where
+    N: ToNodeDsp + AsRefNode,
+{
+    let mut stack: Vec<CommitAddr> = Vec::new();
+    is_dsp(registry, ca, memo, &mut stack)
 }
 
 /// Whether the graph at `ca` contains a DSP node, directly or transitively

@@ -1479,11 +1479,13 @@ mod tests {
     fn structural_sync_keeps_sound_with_inlets() {
         use gantz_core::edge::Edge;
         use gantz_core::node::graph::Graph;
-        use gantz_plyphon::flatten::{Flat, flatten};
+        use gantz_plyphon::flatten::{Flat, RefKind, flatten};
 
         let flatten_no_refs = |g: &Graph<TestN>| -> Graph<Flat<TestN>> {
             let resolve =
-                |_: &TestN| -> Option<(gantz_ca::ContentAddr, Option<&Graph<TestN>>)> { None };
+                |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> {
+                    None
+                };
             flatten(&|_| None, g, &resolve).expect("flatten")
         };
 
@@ -1555,11 +1557,13 @@ mod tests {
     fn structural_edit_in_stable_region_reinstalls_def() {
         use gantz_core::edge::Edge;
         use gantz_core::node::graph::Graph;
-        use gantz_plyphon::flatten::{Flat, flatten};
+        use gantz_plyphon::flatten::{Flat, RefKind, flatten};
 
         let flatten_no_refs = |g: &Graph<TestN>| -> Graph<Flat<TestN>> {
             let resolve =
-                |_: &TestN| -> Option<(gantz_ca::ContentAddr, Option<&Graph<TestN>>)> { None };
+                |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> {
+                    None
+                };
             flatten(&|_| None, g, &resolve).expect("flatten")
         };
 

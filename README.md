@@ -40,8 +40,8 @@ its own license file(s).
 | **`gantz_egui`** | [![Crates.io](https://img.shields.io/crates/v/gantz_egui.svg)](https://crates.io/crates/gantz_egui) | ![MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg) | UI traits and widgets that make up the gantz GUI. |
 | **`bevy_gantz`** | [![Crates.io](https://img.shields.io/crates/v/bevy_gantz.svg)](https://crates.io/crates/bevy_gantz) | ![MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg) | A bevy plugin for gantz. |
 | **`bevy_gantz_egui`** | [![Crates.io](https://img.shields.io/crates/v/bevy_gantz_egui.svg)](https://crates.io/crates/bevy_gantz_egui) | ![MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg) | Bevy and egui integration for gantz. |
-| **`gantz_plyphon`** | _unreleased_ | ![GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blueviolet.svg) | DSP nodes + synthdef compiler deriving [plyphon](https://github.com/mitchmindtree/plyphon) synthdefs from gantz graphs. |
-| **`bevy_gantz_plyphon`** | _unreleased_ | ![GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blueviolet.svg) | Bevy + plyphon audio runtime for gantz (cpal stream, synth driver). |
+| **`gantz_plyphon`** | [![Crates.io](https://img.shields.io/crates/v/gantz_plyphon.svg)](https://crates.io/crates/gantz_plyphon) | ![GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blueviolet.svg) | DSP nodes + synthdef compiler deriving [plyphon](https://github.com/mitchmindtree/plyphon) synthdefs from gantz graphs. |
+| **`bevy_gantz_plyphon`** | [![Crates.io](https://img.shields.io/crates/v/bevy_gantz_plyphon.svg)](https://crates.io/crates/bevy_gantz_plyphon) | ![GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blueviolet.svg) | Bevy + plyphon audio runtime for gantz (cpal stream, synth driver). |
 | **`gantz`** | [![Crates.io](https://img.shields.io/crates/v/gantz.svg)](https://crates.io/crates/gantz) | ![GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blueviolet.svg) | The top-level gantz app. |
 
 ## Design Overview

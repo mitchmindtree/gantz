@@ -19,8 +19,8 @@
 pub use backend::{AddAction, Backend, BackendError, Embedded, ROOT_GROUP_ID};
 pub use builtin::builtins;
 pub use compile::{
-    BusBinding, DeriveError, Derived, RegionDerived, derive_synthdef, derive_synthdefs,
-    structural_sig,
+    BusBinding, DeriveError, Derived, RegionDerived, content_def_name, derive_synthdef,
+    derive_synthdefs, structural_sig,
 };
 pub use config::{Config, Status};
 pub use dsp::{
@@ -28,6 +28,10 @@ pub use dsp::{
     ToNodeDsp, node_dsp_of,
 };
 pub use flatten::{AsRefNode, Flat, FlattenError, RefKind, flatten, flatten_from_registry};
+pub use instance::{
+    BusKey, DefCache, GraphTemplate, InstancePart, Part, ResolvedBus, ResolvedPart, TemplateBus,
+    TemplateRegion, VariantKey, derive_template, instantiate,
+};
 pub use node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Unpack};
 pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, dsp_commits};
 pub use sugar::PlyphonSugar;
@@ -43,6 +47,7 @@ pub mod dsp;
 #[cfg(feature = "egui")]
 pub mod egui;
 pub mod flatten;
+pub mod instance;
 pub mod monitor;
 pub mod node;
 pub mod param;

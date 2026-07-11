@@ -25,7 +25,7 @@ gantz_ca.workspace = true
 gantz_core.workspace = true
 gantz_egui.workspace = true
 gantz_format.workspace = true
-gantz_plyphon.workspace = true
+gantz_plyphon = { workspace = true, features = ["egui"] }
 gantz_std.workspace = true
 petgraph.workspace = true
 serde.workspace = true

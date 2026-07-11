@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, RegCtx};
+#[cfg(feature = "egui")]
 use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
@@ -13,10 +14,9 @@ use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
-use crate::param::{
-    cahash_lag, control_input_expr, param_name, param_row, param_state, param_state_row,
-    param_value, plyphon_param, with_value,
-};
+use crate::param::{cahash_lag, control_input_expr, param_name, param_state, plyphon_param};
+#[cfg(feature = "egui")]
+use crate::param::{param_row, param_state_row, param_value, with_value};
 
 /// The audio output sink. Applies a master `gain` to its input signal and writes
 /// it to the output buses. A mono input is fanned across every device channel; a
@@ -183,6 +183,7 @@ impl ToNodeDsp for Out {
     }
 }
 
+#[cfg(feature = "egui")]
 impl NodeUi for Out {
     fn name(&self, _: &dyn Registry) -> &str {
         "~out"

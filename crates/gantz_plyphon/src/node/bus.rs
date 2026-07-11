@@ -2,6 +2,7 @@
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
+#[cfg(feature = "egui")]
 use gantz_egui::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,7 @@ impl ToNodeDsp for Bus {
     }
 }
 
+#[cfg(feature = "egui")]
 impl NodeUi for Bus {
     fn name(&self, _: &dyn Registry) -> &str {
         "~bus"

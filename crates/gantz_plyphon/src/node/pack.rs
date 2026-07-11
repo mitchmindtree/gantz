@@ -2,6 +2,7 @@
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
+#[cfg(feature = "egui")]
 use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
@@ -9,6 +10,7 @@ use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+#[cfg(feature = "egui")]
 use crate::param::value_row;
 
 /// Concatenate `count` input signals into one channel group (like Max's
@@ -94,6 +96,7 @@ impl ToNodeDsp for Pack {
     }
 }
 
+#[cfg(feature = "egui")]
 impl NodeUi for Pack {
     fn name(&self, _: &dyn Registry) -> &str {
         "~pack"

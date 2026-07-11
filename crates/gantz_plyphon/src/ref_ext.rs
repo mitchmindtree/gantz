@@ -3,18 +3,22 @@
 //! [`DspRefExt`] is stored in the referenced node's ext slot (see
 //! [`Ref::set_ext`](gantz_core::node::Ref::set_ext)) under
 //! [`DSP_REF_EXT_KEY`], only when non-default so a default-configured
-//! reference keeps its address. [`DspRefExtUi`] renders the inspector toggle
-//! for references whose graph contains DSP nodes.
+//! reference keeps its address. `DspRefExtUi` (`egui` feature) renders the
+//! inspector toggle for references whose graph contains DSP nodes.
 
 use crate::ToNodeDsp;
 use gantz_ca::{CommitAddr, ContentAddr};
 use gantz_core::node::AsRefNode;
 use gantz_core::node::graph::Graph;
+#[cfg(feature = "egui")]
 use gantz_egui::node::{NamedRef, RefExtUi};
+#[cfg(feature = "egui")]
 use gantz_egui::widget::node_inspector;
+#[cfg(feature = "egui")]
 use gantz_egui::{InspectorRowsResponse, NodeCtx};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "egui")]
 use std::sync::Arc;
 
 /// The ext key under which [`DspRefExt`] is stored.
@@ -33,6 +37,7 @@ pub struct DspRefExt {
 
 /// The DSP domain's [`NamedRef`] inspector extension: an `inline` toggle for
 /// references whose graph contains DSP nodes (directly or transitively).
+#[cfg(feature = "egui")]
 #[derive(Debug, Default)]
 pub struct DspRefExtUi {
     /// The commit addresses of DSP graphs, precomputed where the concrete
@@ -40,6 +45,7 @@ pub struct DspRefExtUi {
     pub dsp_graphs: Arc<HashSet<ContentAddr>>,
 }
 
+#[cfg(feature = "egui")]
 impl RefExtUi for DspRefExtUi {
     fn inspector_rows(
         &self,

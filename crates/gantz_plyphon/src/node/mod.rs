@@ -2,8 +2,8 @@
 //!
 //! Each node implements [`gantz_core::Node`] (a placeholder, since DSP nodes are
 //! inert in the Steel world), [`NodeDsp`](crate::NodeDsp) (the audio behaviour),
-//! [`ToNodeDsp`](crate::ToNodeDsp) (discovery), and [`gantz_egui::NodeUi`] (the
-//! GUI). Their `~` keyword-name prefix marks them as dsp nodes.
+//! [`ToNodeDsp`](crate::ToNodeDsp) (discovery), and `gantz_egui::NodeUi` (the
+//! GUI, `egui` feature). Their `~` keyword-name prefix marks them as dsp nodes.
 
 pub use bus::Bus;
 pub use lag::Lag;

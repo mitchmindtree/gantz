@@ -4,6 +4,7 @@
 use gantz_ca::CaHash;
 use gantz_core::node::{Conns, EvalConf, ExprCtx, ExprResult, MetaCtx, RegCtx};
 use gantz_core::steel::SteelVal;
+#[cfg(feature = "egui")]
 use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
@@ -13,6 +14,7 @@ use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+#[cfg(feature = "egui")]
 use crate::param::value_row;
 
 /// A signal *tap*: streams every sample of its input signal into per-channel
@@ -154,6 +156,7 @@ impl ToNodeDsp for ScopeOut {
     }
 }
 
+#[cfg(feature = "egui")]
 impl NodeUi for ScopeOut {
     fn name(&self, _: &dyn Registry) -> &str {
         "~scopeout"

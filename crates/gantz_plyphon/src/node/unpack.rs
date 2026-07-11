@@ -2,6 +2,7 @@
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
+#[cfg(feature = "egui")]
 use gantz_egui::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
 };
@@ -9,6 +10,7 @@ use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
 use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+#[cfg(feature = "egui")]
 use crate::param::value_row;
 
 /// Split a channel group into `count` mono outputs (like Max's `mc.unpack~` or
@@ -111,6 +113,7 @@ impl ToNodeDsp for Unpack {
     }
 }
 
+#[cfg(feature = "egui")]
 impl NodeUi for Unpack {
     fn name(&self, _: &dyn Registry) -> &str {
         "~unpack"

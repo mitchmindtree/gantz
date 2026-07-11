@@ -89,6 +89,7 @@ pub fn cahash_lag(hasher: &mut gantz_ca::Hasher, lag: f32) {
 /// One inspector row toggling a node's ugen rate (`ar`/`kr`). Returns `true` on
 /// change - structural (the emitted unit's rate changes -> respawn), so the
 /// caller must `mark_changed`.
+#[cfg(feature = "egui")]
 pub fn rate_row(body: &mut egui_extras::TableBody, rate: &mut crate::dsp::NodeRate) -> bool {
     use crate::dsp::NodeRate;
     let row_h = gantz_egui::widget::node_inspector::table_row_h(body.ui_mut());
@@ -124,6 +125,7 @@ pub fn rate_row(body: &mut egui_extras::TableBody, rate: &mut crate::dsp::NodeRa
 /// `lag` dialer to its right stays put (and readable) as the value's text width
 /// changes while dragging - mirrors `node_inspector::DIAL_W`, but wider to fit a
 /// frequency like `20000 Hz`.
+#[cfg(feature = "egui")]
 const VALUE_W: f32 = 80.0;
 
 /// One inspector row for a DSP param: the table key column is `name`. The value
@@ -133,6 +135,7 @@ const VALUE_W: f32 = 80.0;
 /// Returns `(value_changed, lag_changed)`. The caller writes the value to VM node
 /// state (no `mark_changed` - it is not content-addressed) and the lag to the node
 /// weight (`mark_changed` - it is structural).
+#[cfg(feature = "egui")]
 pub fn param_row(
     body: &mut egui_extras::TableBody,
     name: &str,
@@ -171,6 +174,7 @@ pub fn param_row(
 /// is `name`, the value column is the caller-configured `value` dialer. Returns
 /// whether it changed. Used for params that are themselves a duration (e.g.
 /// `~lag`'s lag time), where there is no separate value-being-smoothed.
+#[cfg(feature = "egui")]
 pub fn value_row(
     body: &mut egui_extras::TableBody,
     name: &str,
@@ -195,6 +199,7 @@ pub fn value_row(
 ///
 /// DSP nodes emit this (via `show_state() -> false` + a call here) in place of the
 /// inspector's default raw `{value, pending}` state dump.
+#[cfg(feature = "egui")]
 pub fn param_state_row(body: &mut egui_extras::TableBody, state: Option<&SteelVal>) {
     let row_h = gantz_egui::widget::node_inspector::table_row_h(body.ui_mut());
     let n = state.map(pending_len).unwrap_or(0);

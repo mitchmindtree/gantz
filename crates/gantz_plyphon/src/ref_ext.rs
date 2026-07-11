@@ -7,8 +7,8 @@
 //! for references whose graph contains DSP nodes.
 
 use crate::ToNodeDsp;
-use crate::flatten::AsNamedRef;
 use gantz_ca::{CommitAddr, ContentAddr};
+use gantz_core::node::AsRefNode;
 use gantz_core::node::graph::Graph;
 use gantz_egui::node::{NamedRef, RefExtUi};
 use gantz_egui::widget::node_inspector;
@@ -87,17 +87,18 @@ impl RefExtUi for DspRefExtUi {
     }
 }
 
-/// The commit addresses (as [`ContentAddr`]s, the form a
-/// [`NamedRef::content_addr`] reports) of every registry commit whose graph
-/// contains DSP nodes, directly or transitively through references.
+/// The commit addresses (as [`ContentAddr`]s, the form
+/// [`Ref::content_addr`](gantz_core::node::Ref::content_addr) reports) of
+/// every registry commit whose graph contains DSP nodes, directly or
+/// transitively through references.
 ///
 /// Requires the concrete node type: typed probes like [`ToNodeDsp`] are
 /// unreachable through the GUI's erased registry, so callers (e.g. a bevy
 /// provider system) compute this where `N` is known and hand the set to
-/// [`DspRefExtUi`].
+/// `DspRefExtUi`.
 pub fn dsp_commits<N>(registry: &gantz_ca::Registry<Graph<N>>) -> HashSet<ContentAddr>
 where
-    N: ToNodeDsp + AsNamedRef,
+    N: ToNodeDsp + AsRefNode,
 {
     let mut memo: HashMap<CommitAddr, bool> = HashMap::new();
     let mut stack: Vec<CommitAddr> = Vec::new();
@@ -123,7 +124,7 @@ fn is_dsp<N>(
     stack: &mut Vec<CommitAddr>,
 ) -> bool
 where
-    N: ToNodeDsp + AsNamedRef,
+    N: ToNodeDsp + AsRefNode,
 {
     if let Some(&known) = memo.get(&ca) {
         return known;
@@ -141,8 +142,8 @@ where
         .any(|ix| graph[ix].to_node_dsp().is_some())
         || graph.node_indices().any(|ix| {
             graph[ix]
-                .as_named_ref()
-                .is_some_and(|nr| is_dsp(registry, nr.content_addr().into(), memo, stack))
+                .as_ref_node()
+                .is_some_and(|r| is_dsp(registry, r.content_addr().into(), memo, stack))
         });
     stack.pop();
     memo.insert(ca, dsp);

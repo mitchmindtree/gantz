@@ -43,8 +43,7 @@ use gantz_core::node::{GetNode, MetaCtx};
 
 use crate::dsp::{NodeDsp, ToNodeDsp};
 
-pub use gantz_egui::node::NamedRef;
-pub use gantz_egui::sync::AsNamedRef;
+pub use gantz_core::node::AsRefNode;
 
 /// A node spliced out of a nested structure into a flat graph, carrying its
 /// original path (e.g. `[3, 2]` for the node at index 2 within the graph
@@ -145,19 +144,19 @@ where
     Ok(out)
 }
 
-/// [`flatten`] resolving [`AsNamedRef`] nodes through the content-addressed
-/// registry (a `NamedRef`'s content address is the referenced graph's commit
+/// [`flatten`] resolving [`AsRefNode`] nodes through the content-addressed
+/// registry (a reference's content address is the referenced graph's commit
 /// address).
 pub fn flatten_from_registry<'g, N>(
     graph: &'g Graph<N>,
     registry: &'g gantz_ca::Registry<Graph<N>>,
 ) -> Result<Graph<Flat<N>>, FlattenError>
 where
-    N: gantz_core::Node + AsNamedRef + Clone,
+    N: gantz_core::Node + AsRefNode + Clone,
 {
     let resolve = |n: &N| {
-        n.as_named_ref().map(|nr| {
-            let ca = nr.content_addr();
+        n.as_ref_node().map(|r| {
+            let ca = r.content_addr();
             (ca, registry.commit_graph_ref(&ca.into()))
         })
     };

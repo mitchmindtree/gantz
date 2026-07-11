@@ -158,6 +158,12 @@ impl crate::sync::AsNamedRef for NamedRef {
     }
 }
 
+impl gantz_core::node::AsRefNode for NamedRef {
+    fn as_ref_node(&self) -> Option<&gantz_core::node::Ref> {
+        Some(&self.ref_)
+    }
+}
+
 impl Node for NamedRef {
     fn n_inputs(&self, ctx: MetaCtx) -> usize {
         self.ref_.n_inputs(ctx)

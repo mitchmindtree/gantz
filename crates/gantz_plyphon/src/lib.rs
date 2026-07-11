@@ -27,7 +27,7 @@ pub use dsp::{
     DspBuilder, FADE_LAG, GainRef, NodeDsp, NodeRate, ParamBinding, ScopeOutBinding, Signal,
     ToNodeDsp, node_dsp_of,
 };
-pub use flatten::{Flat, FlattenError, flatten, flatten_from_registry};
+pub use flatten::{AsRefNode, Flat, FlattenError, flatten, flatten_from_registry};
 pub use node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Unpack};
 pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, DspRefExtUi, dsp_commits};
 pub use settings::DspSettingsTab;

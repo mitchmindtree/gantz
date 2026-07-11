@@ -29,8 +29,8 @@ use cpal::{FromSample, SizedSample};
 use gantz_ca as ca;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    AddAction, Backend, Embedded, GainRef, ROOT_GROUP_ID, RegionDerived, ToNodeDsp,
-    derive_synthdefs, flatten::AsNamedRef, flatten_from_registry, structural_sig,
+    AddAction, AsRefNode, Backend, Embedded, GainRef, ROOT_GROUP_ID, RegionDerived, ToNodeDsp,
+    derive_synthdefs, flatten_from_registry, structural_sig,
 };
 use plyphon::{Controller, InputRef, Nrt, Options, StreamConsumer, World, engine};
 // `std::time::Instant` panics ("time not implemented") on `wasm32-unknown-unknown`;
@@ -165,7 +165,7 @@ impl<N> PlyphonPlugin<N> {
 
 impl<N> Plugin for PlyphonPlugin<N>
 where
-    N: 'static + ToNodeDsp + gantz_core::Node + AsNamedRef + Clone + Send + Sync,
+    N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Clone + Send + Sync,
 {
     fn build(&self, app: &mut App) {
         // DSP settings (the Settings -> DSP tab).
@@ -521,7 +521,7 @@ fn provide_dsp_ref_ext<N>(
     mut dsp_graphs: Local<Option<std::sync::Arc<std::collections::HashSet<ca::ContentAddr>>>>,
     mut ref_ext_uis: ResMut<RefExtUis>,
 ) where
-    N: 'static + ToNodeDsp + gantz_core::Node + AsNamedRef + Send + Sync,
+    N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Send + Sync,
 {
     if registry.is_changed() || dsp_graphs.is_none() {
         *dsp_graphs = Some(std::sync::Arc::new(dsp_commits(&registry)));
@@ -554,7 +554,7 @@ fn drive_synths<N>(
     mut vms: NonSendMut<HeadVms>,
     heads: Query<(Entity, &HeadRef, &WorkingGraph<N>), With<OpenHead>>,
 ) where
-    N: 'static + ToNodeDsp + gantz_core::Node + AsNamedRef + Clone + Send + Sync,
+    N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Clone + Send + Sync,
 {
     let Some(dsp) = dsp else {
         return;

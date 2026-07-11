@@ -83,6 +83,18 @@ impl gantz_egui::sync::AsNamedRef for Box<dyn Node> {
     }
 }
 
+// Lets reference-transparent passes (e.g. the DSP compiler's flattening) find
+// the underlying `Ref` within an erased node. `FnNamedRef` deliberately does
+// not match: a function value references a graph without standing in for it.
+impl gantz_core::node::AsRefNode for Box<dyn Node> {
+    fn as_ref_node(&self) -> Option<&gantz_core::node::Ref> {
+        let any = (&**self) as &dyn Any;
+        any.downcast_ref::<gantz_egui::node::NamedRef>()
+            .map(|nr| nr.ref_())
+            .or_else(|| any.downcast_ref::<gantz_core::node::Ref>())
+    }
+}
+
 impl bevy_gantz_egui::node::ToUpdateBang for Box<dyn Node> {
     fn to_update_bang(&self) -> Option<&bevy_gantz_egui::node::UpdateBang> {
         let any: &dyn std::any::Any = &**self;

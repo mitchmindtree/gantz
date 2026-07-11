@@ -10,6 +10,18 @@ use serde::ser::{Serialize, SerializeMap, Serializer};
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// A node-set hook exposing the underlying [`Ref`] when a node is
+/// transparently a reference to another graph (a bare [`Ref`], or a wrapper
+/// such as gantz_egui's `NamedRef`).
+///
+/// Deliberately *not* implemented by function-value wrappers
+/// ([`Fn`](crate::node::Fn)), which reference a graph without standing in for
+/// it within their parent.
+pub trait AsRefNode {
+    /// The underlying [`Ref`], if this node is transparently a reference.
+    fn as_ref_node(&self) -> Option<&Ref>;
+}
+
 /// A node that refers to another node in the environment by content address.
 ///
 /// A reference optionally carries domain-extension data in `ext`: canonical
@@ -172,6 +184,12 @@ impl<'de> Deserialize<'de> for Ref {
         }
 
         d.deserialize_newtype_struct("Ref", RefVisitor)
+    }
+}
+
+impl AsRefNode for Ref {
+    fn as_ref_node(&self) -> Option<&Ref> {
+        Some(self)
     }
 }
 

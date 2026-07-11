@@ -248,6 +248,41 @@ where
     flatten(&get_node, graph, &resolve)
 }
 
+/// Flatten every child graph `flat` (transitively) instances, so template
+/// derivation's resolver can hand out `&Graph<Flat<N>>` per child content
+/// address. Walks [`Flat::Instance`] markers to a fixpoint: only children an
+/// instanced ref actually reaches are flattened.
+pub fn flatten_instance_children<N>(
+    flat: &Graph<Flat<N>>,
+    registry: &gantz_ca::Registry<Graph<N>>,
+) -> Result<HashMap<ContentAddr, Graph<Flat<N>>>, FlattenError>
+where
+    N: gantz_core::Node + AsRefNode + Clone,
+{
+    fn marker_cas<N>(g: &Graph<Flat<N>>) -> Vec<ContentAddr> {
+        g.node_indices()
+            .filter_map(|n| match &g[n] {
+                Flat::Instance { child_ca, .. } => Some(*child_ca),
+                _ => None,
+            })
+            .collect()
+    }
+    let mut out: HashMap<ContentAddr, Graph<Flat<N>>> = HashMap::new();
+    let mut queue = marker_cas(flat);
+    while let Some(ca) = queue.pop() {
+        if out.contains_key(&ca) {
+            continue;
+        }
+        let graph = registry
+            .commit_graph_ref(&ca.into())
+            .ok_or(FlattenError::Unresolved(ca))?;
+        let child = flatten_from_registry(graph, registry)?;
+        queue.extend(marker_cas(&child));
+        out.insert(ca, child);
+    }
+    Ok(out)
+}
+
 /// Phase 1: recursively copy `graph`'s concrete nodes into `out` (paths
 /// prefixed by `prefix`), recording each level's boundary nodes and resolved
 /// refs in `levels` for [`bridge`] to resolve edges through. Returns the

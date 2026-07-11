@@ -27,7 +27,10 @@ pub use dsp::{
     DspBuilder, FADE_LAG, GainRef, NodeDsp, NodeRate, ParamBinding, ScopeOutBinding, Signal,
     ToNodeDsp, node_dsp_of,
 };
-pub use flatten::{AsRefNode, Flat, FlattenError, RefKind, flatten, flatten_from_registry};
+pub use flatten::{
+    AsRefNode, Flat, FlattenError, RefKind, flatten, flatten_from_registry,
+    flatten_instance_children,
+};
 pub use instance::{
     BusKey, DefCache, GraphTemplate, InstancePart, Part, ResolvedBus, ResolvedPart, TemplateBus,
     TemplateRegion, VariantKey, derive_template, instantiate,

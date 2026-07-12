@@ -1,0 +1,19 @@
+[package]
+name = "gantz_ui"
+version = "0.1.0"
+description = "Declarative UI tree model and value codecs for user-defined gantz GUIs."
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+
+[features]
+default = ["steel"]
+steel = ["dep:steel-core"]
+datum = ["dep:gantz_core"]
+
+[dependencies]
+gantz_core = { workspace = true, optional = true }
+steel-core = { workspace = true, optional = true }
+thiserror.workspace = true

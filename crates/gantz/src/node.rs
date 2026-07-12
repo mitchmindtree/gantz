@@ -507,7 +507,6 @@ mod tests {
     /// GUI's `flatten_from_registry` path with `Box<dyn Node>`.
     #[test]
     fn head_graph_with_unconnected_inlets_derives_sound() {
-        use gantz_plyphon::ToNodeDsp;
         use std::time::Duration;
         type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 

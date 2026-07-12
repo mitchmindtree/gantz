@@ -819,8 +819,12 @@ impl<'a> NodeCtx<'a> {
     }
 
     /// The node's full path into the state tree.
-    pub fn path(&self) -> &[node::Id] {
-        &self.path
+    ///
+    /// Returns the slice with the ctx's own lifetime (rather than borrowing
+    /// `self`), so a node can split its path into id + instance prefix and
+    /// still pass the ctx on (e.g. to the [`ui_tree`] interpreter).
+    pub fn path(&self) -> &'a [node::Id] {
+        self.path
     }
 
     /// Read-only access to the VM.

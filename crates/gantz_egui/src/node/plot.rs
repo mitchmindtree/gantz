@@ -22,7 +22,8 @@
 //! breaking the chain it flows through.
 
 use super::size_sync::{self, fitted_size};
-use crate::ui_tree::plot::{PlotParams, is_container, plot_body, resolve_color, split_channels};
+use crate::ui_tree::UiTree;
+use crate::ui_tree::plot::{is_container, resolve_color, split_channels};
 use crate::widget::node_inspector;
 use crate::widget::node_inspector::radio_option;
 use crate::{
@@ -306,20 +307,30 @@ impl gantz_core::Node for Plot {
 }
 
 impl Plot {
-    /// The shared plot leaf's rendering parameters, resolved from the weight.
-    fn params(&self) -> PlotParams {
-        PlotParams {
-            style: match self.style {
+    /// The plot's fragment, bound to its own state, with attrs baked from
+    /// the weight. `size` is the resolved body size (the resize container's
+    /// inner size); `None` fills the available space (the detached view).
+    fn fragment(&self, id: node::Id, size: Option<egui::Vec2>) -> gantz_ui::Element {
+        gantz_ui::Element::Plot(gantz_ui::Plot {
+            bind: Some(gantz_ui::BindPath(vec![id])),
+            mode: Some(match self.mode {
+                PlotMode::Scope => gantz_ui::PlotMode::Scope,
+                PlotMode::Signal => gantz_ui::PlotMode::Signal,
+            }),
+            style: Some(match self.style {
                 PlotStyle::Bars => gantz_ui::PlotStyle::Bars,
                 PlotStyle::Line => gantz_ui::PlotStyle::Line,
-            },
-            color: self.color,
+            }),
+            color: self.color.map(gantz_ui::Rgba),
             grid: self.show_grid,
             axes: self.show_axes,
             interactive: self.interactive,
             y_min: self.y_min.map(F32::get),
             y_max: self.y_max.map(F32::get),
-        }
+            w: size.map(|s| s.x),
+            h: size.map(|s| s.y),
+            key: None,
+        })
     }
 }
 
@@ -332,7 +343,7 @@ impl NodeUi for Plot {
         Some("Plot incoming values as a scrolling scope or a signal/array")
     }
 
-    fn ui(&mut self, ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
+    fn ui(&mut self, mut ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
         // Set when a settled resize commits a new (CA-affecting) body size.
         let mut changed = false;
 
@@ -351,12 +362,11 @@ impl NodeUi for Plot {
 
         let node_egui_id = uictx.egui_id();
         let resize_id = node_egui_id.with("resize");
-        let plot_id = node_egui_id.with("plot");
+        let root_id = node_egui_id.with("gui");
         let min_size = egui::Vec2::splat(style.interaction.interact_radius * 2.0);
         let default_size = egui::vec2(self.width as f32, self.height as f32);
 
-        // Read the series once, up-front (only borrows `ctx`).
-        let ys = series(&ctx);
+        let (&id, prefix) = ctx.path().split_last().expect("a node path is never empty");
 
         let size_sync_id = node_egui_id.with("size_sync");
         let framed = uictx.framed_with(frame, |ui, _sockets| {
@@ -399,7 +409,11 @@ impl NodeUi for Plot {
                     changed = true;
                 }
 
-                plot_body(&self.params(), &ys, plot_id, avail, ui)
+                let tree = self.fragment(id, Some(avail));
+                let r = UiTree::new(root_id)
+                    .instance_prefix(prefix)
+                    .show(&tree, &mut ctx, ui);
+                r.inner.unwrap_or_else(|| ui.response())
             });
 
             size_sync::store(
@@ -423,18 +437,20 @@ impl NodeUi for Plot {
         true
     }
 
-    fn view_ui(&mut self, ctx: NodeCtx, ui: &mut egui::Ui) -> NodeViewResponse {
-        // The detached view fills the pane. Unlike the in-graph body it has no
-        // resize handle and never writes back the node's CA-affecting
-        // `width`/`height` (so `changed` stays false). The plot id is derived
-        // from `ui` (scoped per pane by the caller), keeping it distinct from
-        // the in-graph plot's id.
-        let plot_id = ui.id().with("plot-view");
-        let ys = series(&ctx);
-        let size = ui.available_size();
-        let resp = plot_body(&self.params(), &ys, plot_id, size, ui);
+    fn view_ui(&mut self, mut ctx: NodeCtx, ui: &mut egui::Ui) -> NodeViewResponse {
+        // The detached view fills the pane (the fragment omits w/h). Unlike
+        // the in-graph body it has no resize handle and never writes back
+        // the node's CA-affecting `width`/`height` (so `changed` stays
+        // false). The root id is derived from `ui` (scoped per pane by the
+        // caller), keeping it distinct from the in-graph plot's id.
+        let (&id, prefix) = ctx.path().split_last().expect("a node path is never empty");
+        let tree = self.fragment(id, None);
+        let r = UiTree::new(ui.id().with("gui"))
+            .instance_prefix(prefix)
+            .show(&tree, &mut ctx, ui);
         let mut out = NodeViewResponse::default();
-        out.inner = Some(resp);
+        out.inner = r.inner;
+        out.payloads = r.payloads;
         out
     }
 
@@ -890,6 +906,44 @@ mod tests {
         // Stored as a lone number; `series` reads it as a single sample.
         let state = node::state::extract_value(&vm, &[p]).unwrap().unwrap();
         assert!(matches!(state, SteelVal::IntV(7)));
+    }
+
+    // The fragment bakes every render-relevant weight field, the bind id,
+    // and the resolved body size (absent for the fill-the-pane view).
+    #[test]
+    fn fragment_bakes_weight_attrs_and_bind() {
+        let plot = Plot {
+            mode: PlotMode::Signal,
+            style: PlotStyle::Line,
+            color: Some([1, 2, 3, 4]),
+            show_grid: true,
+            show_axes: true,
+            interactive: true,
+            y_min: Some(F32(-1.0)),
+            y_max: Some(F32(1.0)),
+            ..Default::default()
+        };
+        let expected = gantz_ui::Element::Plot(gantz_ui::Plot {
+            bind: Some(gantz_ui::BindPath(vec![4])),
+            mode: Some(gantz_ui::PlotMode::Signal),
+            style: Some(gantz_ui::PlotStyle::Line),
+            color: Some(gantz_ui::Rgba([1, 2, 3, 4])),
+            grid: true,
+            axes: true,
+            interactive: true,
+            y_min: Some(-1.0),
+            y_max: Some(1.0),
+            w: Some(120.0),
+            h: Some(80.0),
+            key: None,
+        });
+        assert_eq!(plot.fragment(4, Some(egui::vec2(120.0, 80.0))), expected);
+
+        // The view fragment omits w/h to fill the pane.
+        let gantz_ui::Element::Plot(p) = plot.fragment(4, None) else {
+            panic!("plot fragment is a plot element");
+        };
+        assert_eq!((p.w, p.h), (None, None));
     }
 
     // Registering the graph again on the same engine (as a recompile does) must

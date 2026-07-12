@@ -30,7 +30,9 @@ pub use identity::Identity;
 #[doc(inline)]
 pub use proto::{GossipMsg, Objects, SyncRequest, SyncResponse, Want, WireCommit, heads_digest};
 #[doc(inline)]
-pub use runtime::{Command, Event, Handle, Infra, PROTO_VERSION, RuntimeConfig, SYNC_ALPN, spawn};
+pub use runtime::{
+    Command, Event, Handle, Infra, PROTO_VERSION, RuntimeConfig, SYNC_ALPN, TOPIC_DOMAIN, spawn,
+};
 #[doc(inline)]
 pub use session::{Access, ConnState, PeerId, Role, Session, SessionId};
 #[doc(inline)]

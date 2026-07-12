@@ -4,8 +4,16 @@
 //! non-self-describing; `gantz_ca` addresses serialize as raw bytes).
 //! Graphs are the exception: the application's node type needs a
 //! self-describing format, so graphs travel inside [`Objects`] as opaque
-//! pre-serialized blobs the application encodes/decodes (RON, matching
-//! persistence).
+//! pre-serialized blobs the application encodes/decodes. The blob format is
+//! entirely the application's choice; it must be a *faithful* serde codec,
+//! since a received graph only applies if its deserialized content address
+//! verifies against the announced one. The gantz app uses the same RON
+//! encoding as its persisted registry (`bevy_gantz::storage`), so wire and
+//! persistence cannot drift. The human-facing `.gantz` text format is
+//! deliberately not used here: it is a name-resolving projection for
+//! import/export (its round-trip re-seeds names and re-roots commits),
+//! while sync ships bare address-keyed graphs and moves names only through
+//! the convergence rules.
 //!
 //! [postcard]: https://docs.rs/postcard
 

@@ -55,6 +55,12 @@ pub const SYNC_ALPN: &[u8] = b"gantz/sync/1";
 /// [`SyncRequest::Hello`].
 pub const PROTO_VERSION: u32 = 1;
 
+/// The domain-separation tag hashed with a session id to derive its gossip
+/// topic id: the raw session id never appears on the gossip wire. Versioned
+/// alongside the protocol - changing it partitions old and new peers onto
+/// disjoint topics.
+pub const TOPIC_DOMAIN: &[u8] = b"gantz/session/v1";
+
 /// Endpoint configuration for [`spawn`].
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeConfig {
@@ -528,11 +534,11 @@ fn infra_builder(infra: &Infra) -> Result<iroh::endpoint::Builder, String> {
     }
 }
 
-/// The session's gossip topic id: a hash of the session id under a protocol
-/// tag, so the raw session id never appears on the gossip wire.
+/// The session's gossip topic id: a hash of the session id under
+/// [`TOPIC_DOMAIN`], so the raw session id never appears on the gossip wire.
 fn topic_id(session: SessionId) -> TopicId {
     let mut hasher = gantz_ca::Hasher::new();
-    hasher.update(b"gantz/session/v1");
+    hasher.update(TOPIC_DOMAIN);
     hasher.update(&session.0);
     TopicId::from_bytes(hasher.finalize().into())
 }

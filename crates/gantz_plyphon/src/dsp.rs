@@ -129,6 +129,15 @@ pub trait NodeDsp {
     /// inputs, a purely Steel/state concern (a connected control value is written
     /// into the node's param state by its `expr`), and are ignored by the
     /// synthdef compiler.
+    ///
+    /// A dsp input may also be *hybrid*: backed by a control param it falls
+    /// back to when no dsp source is connected (e.g. `~sinosc`'s freq). The two
+    /// sides compose without coordination: the synthdef compiler only wires dsp
+    /// sources (a connected number materializes no signal, so
+    /// [`ugens`](Self::ugens) sees `None` and bakes the param), while the
+    /// node's Steel `expr` ([`control_input_expr`](crate::param::control_input_expr))
+    /// writes connected numbers into the param state and ignores dsp
+    /// placeholders via its `number?` guard.
     fn n_dsp_inputs(&self) -> usize {
         0
     }

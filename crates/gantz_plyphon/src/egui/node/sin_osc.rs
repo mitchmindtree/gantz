@@ -68,8 +68,9 @@ impl NodeUi for SinOsc {
 
     fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, ix: usize) -> Option<SocketDoc> {
         match (kind, ix) {
-            (SocketKind::Input, 0) => Some(SocketDoc::ty("number").with_description(
-                "frequency (Hz) control; overrides the inspector value while connected",
+            (SocketKind::Input, 0) => Some(SocketDoc::ty("signal | number").with_description(
+                "frequency (Hz): a connected signal drives it directly (audio-rate FM), \
+                 a connected number overrides the inspector value",
             )),
             (SocketKind::Output, _) => Some(SocketDoc::ty("signal").with_description(
                 "sine signal at the configured frequency (and the configured ar/kr rate)",

@@ -133,9 +133,13 @@ pub struct Derived {
 /// falls outside the traversal - it is a Steel/state concern, not part of the dsp
 /// signal graph. The same rule applies at *interior* nodes: only nodes that feed a
 /// sink transitively through dsp inputs contribute units, so a dsp chain wired into
-/// a control input (e.g. a `~lag` into `~sinosc`'s freq) emits nothing rather than
-/// dead units whose params the driver would drive and whose presence would force
-/// spurious respawns (they'd land in [`structural_sig`]).
+/// a control input emits nothing rather than dead units whose params the driver
+/// would drive and whose presence would force spurious respawns (they'd land in
+/// [`structural_sig`]). A *hybrid* dsp input (e.g. `~sinosc`'s freq, see
+/// [`NodeDsp::n_dsp_inputs`](crate::NodeDsp::n_dsp_inputs)) IS part of the
+/// traversal: a dsp chain wired into it emits units and drives the input
+/// directly (audio-rate FM), and the input's fallback param is only baked while
+/// no dsp source is connected.
 ///
 /// Nested graphs are supported via a pre-derivation pass: [`flatten`](crate::flatten())
 /// resolves graph refs and splices their nodes into a single flat graph (each

@@ -345,6 +345,77 @@ fn unconnected_inlet_bakes_silence() {
 }
 
 #[test]
+fn instance_inlet_drives_hybrid_freq() {
+    // A child `inlet -> ~sinosc.freq -> ~out` (an FM voice whose modulation
+    // input is the interface inlet). Fed variant: the carrier reads its freq
+    // from the interface `In` wire and bakes no freq param. Unfed variant: the
+    // freq falls back to its param - a distinct `VariantKey` (inlet
+    // connectivity is part of the key), so the two defs never collide in the
+    // cache.
+    let mut child = Graph::<N>::default();
+    let i = child.add_node(N::Inlet);
+    let s = child.add_node(N::SinOsc(SinOsc::default()));
+    let o = child.add_node(N::Out(Out::default()));
+    child.add_edge(i, s, Edge::new(0.into(), 0.into()));
+    child.add_edge(s, o, Edge::new(0.into(), 0.into()));
+    let map = HashMap::from([(ca(1), child)]);
+
+    // Fed: a parent modulator wired into the instance's inlet.
+    let mut g = Graph::<N>::default();
+    let m = g.add_node(N::SinOsc(SinOsc::default()));
+    let r = g.add_node(N::Ref(ca(1), 1, 0));
+    g.add_edge(m, r, Edge::new(0.into(), 0.into()));
+    let (template, cache) = derive(&g, &map).expect("derive");
+    let inst = &instances(&template)[0];
+    assert_eq!(inst.variant.inlets, vec![vec![1]]);
+    let child = cache.get(&inst.variant).expect("cached child");
+    let child_region = &regions(&child)[0];
+    let in_read = child_region
+        .bus_reads
+        .iter()
+        .find(|b| matches!(b.key, BusKey::IfaceIn { inlet: 0, .. }))
+        .expect("the child's In reads its interface inlet");
+    let osc = child_region
+        .def
+        .units
+        .iter()
+        .find(|u| u.name == "SinOsc")
+        .expect("carrier SinOsc");
+    assert!(
+        matches!(osc.inputs[0], plyphon::synthdef::InputRef::Unit { unit, .. }
+            if unit as usize == in_read.unit),
+        "the carrier's freq reads the inlet In wire",
+    );
+    assert!(
+        !child_region
+            .def
+            .params
+            .iter()
+            .any(|p| p.name.ends_with("/freq")),
+        "the wired carrier bakes no freq param",
+    );
+
+    // Unfed: the same child with nothing into the inlet.
+    let mut g2 = Graph::<N>::default();
+    let _r = g2.add_node(N::Ref(ca(1), 1, 0));
+    let (template2, cache2) = derive(&g2, &map).expect("derive");
+    let inst2 = &instances(&template2)[0];
+    assert_ne!(
+        inst.variant, inst2.variant,
+        "inlet connectivity keys the variant",
+    );
+    let child2 = cache2.get(&inst2.variant).expect("cached child");
+    assert!(
+        regions(&child2)[0]
+            .def
+            .params
+            .iter()
+            .any(|p| p.name.ends_with("/freq")),
+        "an unfed inlet leaves the freq param baked",
+    );
+}
+
+#[test]
 fn consumed_outlet_mask_keys_the_variant() {
     // A child with two outlets, only the second consumed: the variant records
     // `[false, true]` and the child def writes exactly one outlet bus.

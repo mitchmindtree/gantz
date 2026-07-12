@@ -11,8 +11,13 @@ use serde::{Deserialize, Serialize};
 use crate::dsp::{DspBuilder, NodeDsp, NodeRate, Signal, ToNodeDsp, cahash_rate};
 use crate::param::{cahash_lag, control_input_expr, param_name, param_state, plyphon_param};
 
-/// A sine oscillator. Emits a single `SinOsc` UGen at the configured `rate`
-/// (audio by default; control rate for modulator duty).
+/// A sine oscillator. Emits one `SinOsc` UGen per freq channel at the
+/// configured `rate` (audio by default; control rate for modulator duty).
+///
+/// The freq input is *hybrid* (see [`NodeDsp::n_dsp_inputs`]): a connected dsp
+/// signal drives the oscillator's frequency directly - audio-rate FM when the
+/// wire is audio rate - while an unconnected input falls back to the smoothed
+/// `freq` control param.
 ///
 /// The `freq` (Hz) *value* lives in the node's VM state (path-keyed, like
 /// `number`), so editing it does not churn the graph's content address; the audio
@@ -79,7 +84,8 @@ impl CaHash for SinOsc {
 
 impl gantz_core::Node for SinOsc {
     fn n_inputs(&self, _ctx: MetaCtx) -> usize {
-        // A single control input: the frequency. (No dsp signal inputs.)
+        // A single hybrid input: the frequency (dsp signal when connected,
+        // control param fallback otherwise).
         1
     }
 
@@ -100,33 +106,63 @@ impl gantz_core::Node for SinOsc {
     }
 
     fn expr(&self, ctx: ExprCtx<'_, '_>) -> ExprResult {
-        // The audio engine reads the freq from state; this node is otherwise
-        // Steel-inert. When its control input is connected, write the incoming
-        // value into state (the audio driver applies it via `set_control`). The
-        // placeholder output (the freq) feeds the inert dsp output edge.
-        control_input_expr(&ctx, self.n_dsp_inputs(), "state")
+        // The audio engine reads the freq from a connected dsp wire or from
+        // state; this node is otherwise Steel-inert. Input 0 is hybrid: a
+        // connected *number* is written into state (the audio driver applies it
+        // via `set_control`), while a dsp source's non-numeric placeholder is
+        // ignored by the `number?` guard. The placeholder output (the state)
+        // feeds the inert dsp output edge.
+        control_input_expr(&ctx, 0, "state")
     }
 }
 
 impl NodeDsp for SinOsc {
+    fn n_dsp_inputs(&self) -> usize {
+        // The hybrid freq input.
+        1
+    }
+
     fn n_dsp_outputs(&self) -> usize {
         1
     }
 
-    fn ugens(&self, path: &[usize], _inputs: &[Option<Signal>], b: &mut DspBuilder) -> Vec<Signal> {
-        // `freq` is a settable control param (a nominal default here; the driver
-        // applies the live state value via `set_control`).
-        let freq = b.push_param(
-            path,
-            plyphon_param(param_name(path, "freq"), Self::DEFAULT_FREQ, self.freq_lag),
-        );
-        let unit = b.push_unit(UnitSpec::new(
-            "SinOsc",
-            self.rate.to_plyphon(),
-            vec![InputRef::Param(freq), InputRef::Constant(0.0)],
-            1,
-        ));
-        vec![Signal::mono(InputRef::Unit { unit, output: 0 })]
+    fn ugens(&self, path: &[usize], inputs: &[Option<Signal>], b: &mut DspBuilder) -> Vec<Signal> {
+        match inputs.first().cloned().flatten() {
+            // A connected signal drives the frequency directly (audio-rate FM
+            // when the wire is audio rate; `freq_lag` is inert while wired).
+            // One `SinOsc` per freq channel: width N in -> width N out.
+            Some(freq) => {
+                let oscs = freq
+                    .channels()
+                    .map(|ch| {
+                        let unit = b.push_unit(UnitSpec::new(
+                            "SinOsc",
+                            self.rate.to_plyphon(),
+                            vec![ch, InputRef::Constant(0.0)],
+                            1,
+                        ));
+                        InputRef::Unit { unit, output: 0 }
+                    })
+                    .collect();
+                vec![oscs]
+            }
+            // Unconnected: `freq` falls back to the settable control param (a
+            // nominal default here; the driver applies the live state value via
+            // `set_control`).
+            None => {
+                let freq = b.push_param(
+                    path,
+                    plyphon_param(param_name(path, "freq"), Self::DEFAULT_FREQ, self.freq_lag),
+                );
+                let unit = b.push_unit(UnitSpec::new(
+                    "SinOsc",
+                    self.rate.to_plyphon(),
+                    vec![InputRef::Param(freq), InputRef::Constant(0.0)],
+                    1,
+                ));
+                vec![Signal::mono(InputRef::Unit { unit, output: 0 })]
+            }
+        }
     }
 }
 

@@ -43,6 +43,14 @@ pub fn plyphon_param(name: impl Into<String>, default: f32, lag: f32) -> Param {
 /// inspector edits. The expr always evaluates to `output`: the node's placeholder
 /// dsp output (`"state"` for a source like `~sinosc`, `"'()"` for a sink like
 /// `~out`). DSP nodes are otherwise Steel-inert.
+///
+/// The `number?` guard is what makes a *hybrid* input work (a dsp input that
+/// falls back to a control param, e.g. `~sinosc`'s freq - see
+/// [`NodeDsp::n_dsp_inputs`](crate::NodeDsp::n_dsp_inputs)): a connected dsp
+/// source's placeholder output is non-numeric by contract and is ignored here,
+/// as is the list a multi-edge input evaluates to. So while any dsp wire shares
+/// the input the wire wins - numbers are not queued, matching the derived def,
+/// where the param is absent and nothing would drain the queue.
 pub fn control_input_expr(ctx: &ExprCtx<'_, '_>, control_ix: usize, output: &str) -> ExprResult {
     let expr = match ctx.inputs().get(control_ix) {
         Some(Some(val)) => {

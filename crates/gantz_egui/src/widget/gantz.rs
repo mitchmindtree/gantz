@@ -399,6 +399,9 @@ pub enum Pane {
     /// Contains the inner graph tree with all open graph tabs.
     GraphScene,
     Graphs,
+    /// An editable GUI tree literal rendered live through the
+    /// [`ui_tree`][crate::ui_tree] interpreter against the focused head's VM.
+    GuiDebug,
     GuiPerf,
     History,
     Logs,
@@ -674,6 +677,7 @@ pub struct ViewToggles {
     pub perf_gui: bool,
     pub perf_vm: bool,
     pub steel: bool,
+    pub gui_debug: bool,
     pub graph_config: bool,
     /// Per-[`Pane::Ext`] visibility, keyed by the provider key. A missing
     /// entry means hidden (matching the tray panes' default). Keys of
@@ -697,6 +701,7 @@ impl Default for ViewToggles {
             perf_gui: false,
             perf_vm: false,
             steel: false,
+            gui_debug: false,
             graph_config: true,
             ext: BTreeMap::new(),
         }
@@ -942,6 +947,10 @@ impl<'a> Gantz<'a> {
         // Ensure every supplied extension pane has a tile.
         let ext_keys: Vec<&str> = self.ext_panes.iter().map(|p| p.key()).collect();
         sync_ext_panes(&mut tree, &ext_keys);
+
+        // Ensure the GUI Debug pane has a tile (trees persisted before it
+        // existed).
+        sync_singleton_pane(&mut tree, Pane::GuiDebug);
 
         // Check the `view_toggles` match the pane visibility.
         set_tile_visibility(&mut tree, &state.view_toggles);
@@ -1852,6 +1861,70 @@ where
                 ui,
             );
         }
+        Pane::GuiDebug => {
+            // The editor (plus its eval error and decode warnings) on the
+            // left, the interpreted tree on the right, rendered against the
+            // focused head's live VM: bindings resolve into its node state
+            // and pushes fire its entrypoints.
+            let cache = egui::Panel::left(egui::Id::new("gui-debug-editor-panel"))
+                .resizable(true)
+                .show_inside(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .show(ui, |ui| {
+                            let id = egui::Id::new("gantz-gui-debug-editor");
+                            let out = super::gui_debug::tree_editor(id, ui);
+                            if let Some(err) = &out.cache.eval_err {
+                                ui.colored_label(ui.visuals().error_fg_color, err);
+                            }
+                            if let Some(decoded) = &out.cache.decoded {
+                                if !decoded.warnings.is_empty() {
+                                    let title = format!("warnings ({})", decoded.warnings.len());
+                                    egui::CollapsingHeader::new(title).show(ui, |ui| {
+                                        for w in &decoded.warnings {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.weak(format!("{:?}", w.path.0));
+                                                ui.label(w.kind.to_string());
+                                            });
+                                        }
+                                    });
+                                }
+                            }
+                            out.cache
+                        })
+                        .inner
+                })
+                .inner;
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                let Some(decoded) = &cache.decoded else {
+                    ui.weak("nothing to render");
+                    return;
+                };
+                let Some(head) = access.heads().get(*focused_head).cloned() else {
+                    ui.weak("no focused graph");
+                    return;
+                };
+                let env = gantz.env;
+                egui::ScrollArea::both().show(ui, |ui| {
+                    let payloads = access.with_head_mut(&head, |data| {
+                        let (inlets, outlets) = crate::inlet_outlet_ids(env, data.graph);
+                        let n_outs = super::gui_debug::node_output_counts(env, data.graph);
+                        let resolver = move |p: &[node::Id]| match p {
+                            &[ix] => n_outs.get(&ix).copied(),
+                            _ => None,
+                        };
+                        let mut node_ctx = NodeCtx::new(env, &[], &inlets, &outlets, &[], data.vm);
+                        let root_id = egui::Id::new(("gantz-gui-debug", &head));
+                        let r = crate::ui_tree::UiTree::new(root_id)
+                            .n_outputs(&resolver)
+                            .show(&decoded.root, &mut node_ctx, ui);
+                        r.payloads
+                    });
+                    if let Some(payloads) = payloads {
+                        gantz_response.responses.extend(Some(&head), payloads);
+                    }
+                });
+            });
+        }
         Pane::VmPerf => {
             if let Some(ref mut capture) = gantz.perf_vm {
                 perf_view("VM Perf", capture, ui);
@@ -2230,6 +2303,7 @@ where
         Pane::NodeInspector => with_head("Node Inspector"),
         Pane::NodeView(p) => node_view_title(p),
         Pane::Steel => with_head("Steel"),
+        Pane::GuiDebug => with_head("GUI Debug"),
         Pane::VmPerf => "VM Perf".to_string(),
     }
 }
@@ -2288,7 +2362,9 @@ impl Default for GantzState {
 fn create_tree() -> egui_tiles::Tree<Pane> {
     let mut tiles = egui_tiles::Tiles::default();
 
-    // The leaf panes.
+    // The leaf panes. The GUI Debug pane is not created here: it joins the
+    // tray via `sync_singleton_pane` (the same path that serves persisted
+    // trees predating it).
     let graph_config = tiles.insert_pane(Pane::GraphConfig);
     let graph_scene = tiles.insert_pane(Pane::GraphScene);
     let graphs = tiles.insert_pane(Pane::Graphs);
@@ -2365,12 +2441,18 @@ fn add_node_view_pane(
         tree.make_active(|tile_id, _| tile_id == id);
         return;
     }
-    let pane_id = tree.tiles.insert_pane(Pane::NodeView(NodeViewPane {
+    let pane = Pane::NodeView(NodeViewPane {
         head,
         path,
         ty_name,
-    }));
-    // Default to the tray; fall back to the root if the layout isn't canonical.
+    });
+    insert_tray_pane(tree, pane);
+}
+
+/// Insert a new tile for `pane`, defaulting to the tray and falling back to
+/// the root if the layout isn't canonical.
+fn insert_tray_pane(tree: &mut egui_tiles::Tree<Pane>, pane: Pane) {
+    let pane_id = tree.tiles.insert_pane(pane);
     let container = layout_anchors(tree).map(|a| a.tray).or_else(|| tree.root());
     match container {
         Some(c) => tree.move_tile_to_container(pane_id, c, usize::MAX, true),
@@ -2388,15 +2470,21 @@ fn sync_ext_panes(tree: &mut egui_tiles::Tree<Pane>, keys: &[&str]) {
             .tiles
             .iter()
             .any(|(_, tile)| matches!(tile, egui_tiles::Tile::Pane(Pane::Ext(k)) if k == key));
-        if exists {
-            continue;
+        if !exists {
+            insert_tray_pane(tree, Pane::Ext(key.to_string()));
         }
-        let pane_id = tree.tiles.insert_pane(Pane::Ext(key.to_string()));
-        let container = layout_anchors(tree).map(|a| a.tray).or_else(|| tree.root());
-        match container {
-            Some(c) => tree.move_tile_to_container(pane_id, c, usize::MAX, true),
-            None => tree.root = Some(pane_id),
-        }
+    }
+}
+
+/// Ensure a tile exists for the given singleton pane, adding it to the tray
+/// when missing (a tree persisted before the pane existed).
+fn sync_singleton_pane(tree: &mut egui_tiles::Tree<Pane>, pane: Pane) {
+    let exists = tree
+        .tiles
+        .iter()
+        .any(|(_, tile)| matches!(tile, egui_tiles::Tile::Pane(p) if *p == pane));
+    if !exists {
+        insert_tray_pane(tree, pane);
     }
 }
 
@@ -2586,7 +2674,7 @@ fn impose_fixed_sizes(tree: &mut egui_tiles::Tree<Pane>, state: &GantzState, are
             (avail - width).max(1.0),
         );
     }
-    if state.view_toggles.logs || state.view_toggles.steel {
+    if state.view_toggles.logs || state.view_toggles.steel || state.view_toggles.gui_debug {
         let avail = area.height() - TILE_GAP;
         let height = state
             .tray_height
@@ -2701,6 +2789,7 @@ fn set_pane_visible(view: &mut ViewToggles, pane: &Pane, visible: bool) {
         Pane::GuiPerf => view.perf_gui = visible,
         Pane::Logs => view.logs = visible,
         Pane::Steel => view.steel = visible,
+        Pane::GuiDebug => view.gui_debug = visible,
         // No visibility toggle: always-visible scene / closable node views.
         Pane::GraphScene | Pane::NodeView(_) => {}
     }
@@ -2720,6 +2809,7 @@ fn pane_is_visible(view: &ViewToggles, pane: &Pane) -> bool {
         Pane::GuiPerf => view.perf_gui,
         Pane::Logs => view.logs,
         Pane::Steel => view.steel,
+        Pane::GuiDebug => view.gui_debug,
         Pane::GraphScene | Pane::NodeView(_) => true,
     }
 }
@@ -2741,6 +2831,7 @@ pub fn pane_key(pane: &Pane) -> String {
         Pane::GraphConfig => "graph-config".to_string(),
         Pane::GraphScene => "graph-scene".to_string(),
         Pane::Graphs => "graphs".to_string(),
+        Pane::GuiDebug => "gui-debug".to_string(),
         Pane::GuiPerf => "gui-perf".to_string(),
         Pane::History => "history".to_string(),
         Pane::Logs => "logs".to_string(),
@@ -2901,6 +2992,7 @@ fn set_tile_visibility(tree: &mut egui_tiles::Tree<Pane>, view: &ViewToggles) {
                 Pane::VmPerf => tree.set_visible(id, open && view.perf_vm),
                 Pane::Logs => tree.set_visible(id, view.logs),
                 Pane::Steel => tree.set_visible(id, view.steel),
+                Pane::GuiDebug => tree.set_visible(id, view.gui_debug),
                 // Always visible: a node view is removed by closing, not hiding.
                 Pane::NodeView(_) => tree.set_visible(id, true),
             }

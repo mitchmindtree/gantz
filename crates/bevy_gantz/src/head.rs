@@ -144,6 +144,10 @@ pub struct ChangedEvent {
     pub entity: Entity,
     pub old_head: ca::Head,
     pub new_head: ca::Head,
+    /// The commit the head pointed at before the change, if it resolved.
+    pub old_commit: Option<ca::CommitAddr>,
+    /// The commit the head points at after the change, if it resolves.
+    pub new_commit: Option<ca::CommitAddr>,
     /// Whether the new commit shares the previous commit's graph content
     /// address, i.e. only layout/metadata changed (e.g. a layout undo/redo).
     /// The VM and its node state are preserved across such a change.
@@ -178,10 +182,12 @@ pub struct CommittedEvent {
 /// VMs are keyed by Entity ID since `Engine` is not `Send`.
 ///
 /// A head's VM owns its graph's runtime node state. Paths that point a head
-/// at a *different* graph (replace, branch move) remove the VM (and reset
-/// [`vm::CompiledInputs`][crate::vm::CompiledInputs]) so that `vm::sync`
-/// performs a fresh init, discarding the old graph's state; in-place edits
-/// leave the VM so recompiles preserve it.
+/// at a *different* graph (replace, branch move - undo/redo and history
+/// navigation) keep the VM and migrate its node state through the commits'
+/// node-identity mapping (see [`vm::migrate_vm_state`][crate::vm::migrate_vm_state]),
+/// resetting [`vm::CompiledInputs`][crate::vm::CompiledInputs] so `vm::sync`
+/// recompiles; in-place edits leave both untouched-but-memoised. The VM is
+/// dropped (fresh init, default state) only when no mapping can be derived.
 #[derive(Default)]
 pub struct HeadVms(pub HashMap<Entity, Engine>);
 
@@ -343,7 +349,7 @@ pub fn on_replace<N>(
     mut vms: NonSendMut<HeadVms>,
     heads: Query<(Entity, &HeadRef), With<OpenHead>>,
 ) where
-    N: 'static + Clone + Send + Sync,
+    N: 'static + Clone + ca::CaHash + Send + Sync,
 {
     let ReplaceEvent(new_head) = trigger.event();
 
@@ -367,19 +373,25 @@ pub fn on_replace<N>(
     // When the new commit shares the old commit's graph content (a layout-only
     // change, e.g. a layout undo/redo), the graph is byte-identical, so keep the
     // VM and its node state and leave the compile memo intact (`vm::sync` then
-    // skips recompilation). Only when the graph actually differs do we drop the
-    // VM and reset the memo so `vm::sync` performs a fresh init.
+    // skips recompilation). When the graph differs, migrate the node state
+    // through the commits' node-identity mapping (state survives navigation
+    // for every node present on both sides) and reset the memo so `vm::sync`
+    // recompiles.
     // Note: HeadGuiState and GraphViews are updated by GantzEguiPlugin observer.
+    let old_ca = old_head
+        .as_ref()
+        .and_then(|h| registry.head_commit_ca(h).copied());
     let old_graph = old_head
         .as_ref()
         .and_then(|h| registry.head_commit(h).map(|c| c.graph));
+    let new_ca = registry.head_commit_ca(new_head).copied();
     let new_graph = registry.head_commit(new_head).map(|c| c.graph);
     let same_graph = matches!((old_graph, new_graph), (Some(a), Some(b)) if a == b);
     if same_graph {
         cmds.entity(focused_entity)
             .insert((HeadRef(new_head.clone()), WorkingGraph(graph)));
     } else {
-        vms.remove(&focused_entity);
+        crate::vm::migrate_vm_state(&registry, &mut vms, focused_entity, old_ca, new_ca);
         cmds.entity(focused_entity).insert((
             HeadRef(new_head.clone()),
             WorkingGraph(graph),
@@ -393,6 +405,8 @@ pub fn on_replace<N>(
             entity: focused_entity,
             old_head: old,
             new_head: new_head.clone(),
+            old_commit: old_ca,
+            new_commit: new_ca,
             same_graph,
         });
     }
@@ -503,12 +517,14 @@ pub fn on_move_branch<N>(
     mut registry: ResMut<Registry<N>>,
     mut vms: NonSendMut<HeadVms>,
 ) where
-    N: 'static + Clone + Send + Sync,
+    N: 'static + Clone + ca::CaHash + Send + Sync,
 {
     let event = trigger.event();
     let head = ca::Head::Branch(event.name.clone());
-    // Capture the current graph before moving the branch pointer so we can
-    // detect a same-graph move (a layout-only undo/redo) below.
+    // Capture the current commit before moving the branch pointer so we can
+    // detect a same-graph move (a layout-only undo/redo) and migrate node
+    // state below.
+    let old_ca = registry.head_commit_ca(&head).copied();
     let old_graph = registry.head_commit(&head).map(|c| c.graph);
     registry.insert_name(event.name.clone(), event.target);
     let Some(graph) = registry.head_graph(&head).cloned() else {
@@ -517,14 +533,22 @@ pub fn on_move_branch<N>(
     };
     // When the target shares the old commit's graph content (a layout-only
     // change), keep the VM, its node state and the compile memo intact so
-    // `vm::sync` skips recompilation. Otherwise drop the VM and reset the memo
-    // so `vm::sync` performs a fresh init.
+    // `vm::sync` skips recompilation. Otherwise migrate the node state
+    // through the commits' node-identity mapping - undo/redo and history
+    // navigation keep the state of every node present on both sides - and
+    // reset the memo so `vm::sync` recompiles.
     let new_graph = registry.head_commit(&head).map(|c| c.graph);
     let same_graph = matches!((old_graph, new_graph), (Some(a), Some(b)) if a == b);
     if same_graph {
         cmds.entity(event.entity).insert(WorkingGraph(graph));
     } else {
-        vms.remove(&event.entity);
+        crate::vm::migrate_vm_state(
+            &registry,
+            &mut vms,
+            event.entity,
+            old_ca,
+            Some(event.target),
+        );
         cmds.entity(event.entity)
             .insert((WorkingGraph(graph), crate::vm::CompiledInputs::default()));
     }
@@ -532,6 +556,8 @@ pub fn on_move_branch<N>(
         entity: event.entity,
         old_head: head.clone(),
         new_head: head,
+        old_commit: old_ca,
+        new_commit: Some(event.target),
         same_graph,
     });
 }

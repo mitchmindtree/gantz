@@ -633,10 +633,10 @@ pub fn on_head_opened<N: 'static + Send + Sync>(
 /// Migrate GUI state for changed head and reset components.
 ///
 /// Loads views for the new head and updates `GraphView` + `HeadGuiState` components.
-pub fn on_head_changed<N: 'static + Send + Sync>(
+pub fn on_head_changed<N: 'static + ca::CaHash + Send + Sync>(
     trigger: On<head::ChangedEvent>,
     registry: Res<Registry<N>>,
-    views: Res<Views>,
+    mut views: ResMut<Views>,
     mut gui_state: ResMut<GuiState>,
     mut ctxs: EguiContexts,
     graph_views: Query<&GraphView>,
@@ -648,11 +648,39 @@ pub fn on_head_changed<N: 'static + Send + Sync>(
         gantz_egui::widget::update_graph_pane_head(ctx, &event.old_head, &event.new_head);
     }
 
-    // Load the view for the new head's commit.
-    let mut head_view = registry
-        .head_commit_ca(&event.new_head)
-        .and_then(|ca| views.get(ca).cloned())
-        .unwrap_or_default();
+    // Load the view for the new head's commit. When the target commit has no
+    // stored view (e.g. a wire-fetched merge tip whose view blob went
+    // missing, or a commit minted by a headless peer), carry the live layout
+    // forward through the navigation node-identity matching rather than
+    // falling back to an empty layout - which the scene would destructively
+    // auto-layout - and seed the store so the commit has a view before any
+    // same-frame session announce.
+    let stored = event.new_commit.and_then(|ca| views.get(&ca).cloned());
+    let mut head_view = match stored {
+        Some(view) => view,
+        None => {
+            let live = graph_views.get(event.entity).ok();
+            let carried = match (live, event.old_commit, event.new_commit) {
+                (Some(live), _, _) if event.same_graph => live.0.clone(),
+                (Some(live), Some(old), Some(new)) => {
+                    let node_count = registry
+                        .commit_graph_ref(&new)
+                        .map(|g| g.node_count())
+                        .unwrap_or(0);
+                    bevy_gantz::vm::navigation_matching(&registry, old, new)
+                        .map(|m| gantz_egui::ops::carry_layout(&live.0, &m, node_count))
+                        .unwrap_or_default()
+                }
+                _ => Default::default(),
+            };
+            if let Some(new) = event.new_commit {
+                if !carried.layout.is_empty() {
+                    views.insert(new, carried.clone());
+                }
+            }
+            carried
+        }
+    };
 
     // Camera is excluded from undo: on a same-graph navigation (a layout
     // undo/redo) keep the live camera rather than restoring the target commit's

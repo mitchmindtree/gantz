@@ -19,6 +19,7 @@ pub mod inspect;
 pub mod named_ref;
 pub mod plot;
 pub mod ref_ext;
+mod size_sync;
 
 /// Builtin specs for the egui node set.
 pub fn builtins<N>() -> Vec<gantz_core::Builtin<N>>

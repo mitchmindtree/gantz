@@ -19,6 +19,10 @@ use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
 /// Cutting comes at a price on the wire itself: the write is lifted to audio
 /// rate and fade-gained (the crossfade lever), and cross-region feedback is not
 /// yet supported (a bus cycle fails derivation).
+///
+/// A `~bus` fed by several summands keeps only its cut role: each transitive
+/// source writes its own implicit single-writer bus and every reader emits one
+/// `In` per source, summing after the reads.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
 pub struct Bus {}
 

@@ -1,31 +1,29 @@
-//! The `~pack` node: concatenate signals into one channel group.
+//! The `~sum` node: sum signals into their unity-gain mix.
 
 use gantz_ca::CaHash;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, sum_signals};
 
-/// Concatenate `count` input signals into one channel group (like Max's
-/// `mc.pack~` or a VCV merge): the output's width is the sum of the input
-/// widths, an unconnected input contributing one channel of silence. Channels
-/// are *packed*, never summed - summing is `~sum` (and per-input-gain mixing
-/// a future `~mix`).
-///
-/// A routing node: it emits no UGens, it only re-groups wires at
-/// synthdef-derivation time (and is Steel-inert like the other dsp nodes).
+/// Sum `count` input signals into one channel group - the same unity-gain mix
+/// ([`sum_signals`]) as wiring several edges into one input, as an explicit
+/// node: the output is as wide as the widest input, a mono input broadcasts
+/// across every channel and a narrower one contributes silence past its own
+/// width. Per-input gain is a different (future `~mix`) node; channel
+/// concatenation is `~pack`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
-pub struct Pack {
+pub struct Sum {
     #[serde(default = "default_count")]
     count: usize,
 }
 
-impl Pack {
-    /// The number of inputs a fresh `~pack` starts with.
+impl Sum {
+    /// The number of inputs a fresh `~sum` starts with.
     pub const DEFAULT_COUNT: usize = 2;
 
-    /// The number of dsp inputs to concatenate.
+    /// The number of dsp inputs to sum.
     pub fn count(&self) -> usize {
         self.count
     }
@@ -37,22 +35,22 @@ impl Pack {
     }
 }
 
-impl Default for Pack {
+impl Default for Sum {
     fn default() -> Self {
-        Pack {
+        Sum {
             count: default_count(),
         }
     }
 }
 
-impl CaHash for Pack {
+impl CaHash for Sum {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-        hasher.update(b"gantz.plyphon.pack");
+        hasher.update(b"gantz.plyphon.sum");
         hasher.update(&self.count.to_le_bytes());
     }
 }
 
-impl gantz_core::Node for Pack {
+impl gantz_core::Node for Sum {
     fn n_inputs(&self, _ctx: MetaCtx) -> usize {
         // Every input is a dsp signal (any channel width each).
         self.count
@@ -63,13 +61,13 @@ impl gantz_core::Node for Pack {
     }
 
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
-        // Steel-inert: the packing happens at synthdef derivation. A placeholder
+        // Steel-inert: the summing happens at synthdef derivation. A placeholder
         // output feeds the inert dsp output edge.
         gantz_core::node::parse_expr("0")
     }
 }
 
-impl NodeDsp for Pack {
+impl NodeDsp for Sum {
     fn n_dsp_inputs(&self) -> usize {
         self.count
     }
@@ -78,19 +76,18 @@ impl NodeDsp for Pack {
         1
     }
 
-    fn ugens(&self, _path: &[usize], inputs: &[Signal], _b: &mut DspBuilder) -> Vec<Signal> {
-        // Pure re-grouping: no units, just the concatenation of every input's
-        // channels (unconnected inputs are already mono silence).
-        vec![Signal::concat(inputs.iter().cloned())]
+    fn ugens(&self, _path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
+        // Unconnected inputs are already mono silence, which folds away.
+        vec![sum_signals(b, inputs)]
     }
 }
 
-impl ToNodeDsp for Pack {
+impl ToNodeDsp for Sum {
     fn to_node_dsp(&self) -> Option<&dyn NodeDsp> {
         Some(self)
     }
 }
 
 fn default_count() -> usize {
-    Pack::DEFAULT_COUNT
+    Sum::DEFAULT_COUNT
 }

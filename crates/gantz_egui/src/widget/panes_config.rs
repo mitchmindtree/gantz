@@ -5,7 +5,11 @@
 use super::gantz::ViewToggles;
 
 /// Render the per-pane visibility checkboxes.
-pub fn panes_config(view: &mut ViewToggles, ui: &mut egui::Ui) {
+///
+/// `ext` lists the supplied extension panes as `(key, title, description)`
+/// (see [`ExtPane`][super::ExtPane]) - one checkbox per entry after the
+/// built-in tray panes.
+pub fn panes_config(view: &mut ViewToggles, ext: &[(String, String, String)], ui: &mut egui::Ui) {
     // Sidebar panes: enabling one also opens the sidebar if it is closed, so
     // the toggle has a visible effect (e.g. from the graph-area context menu).
     sidebar_pane(
@@ -62,6 +66,11 @@ pub fn panes_config(view: &mut ViewToggles, ui: &mut egui::Ui) {
         .on_hover_text("Log output from the running graphs.");
     ui.checkbox(&mut view.steel, "Steel")
         .on_hover_text("The compiled Steel code for the focused graph.");
+    for (key, title, description) in ext {
+        let on = view.ext.entry(key.clone()).or_insert(false);
+        ui.checkbox(on, title.as_str())
+            .on_hover_text(description.as_str());
+    }
 }
 
 /// Render the "reset all" layout button. Returns `true` when clicked.

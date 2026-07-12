@@ -357,7 +357,9 @@ where
                 }
                 if let Some(view) = view_toggles {
                     ui.menu_button("panes", |ui| {
-                        crate::widget::panes_config(view, ui);
+                        // Extension panes are toggled from Settings -> Panes;
+                        // the scene widget has no access to the supplied list.
+                        crate::widget::panes_config(view, &[], ui);
                         ui.separator();
                         if crate::widget::reset_layout_button(ui) {
                             reset_layout = true;

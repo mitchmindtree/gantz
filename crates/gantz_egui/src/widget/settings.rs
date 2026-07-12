@@ -54,7 +54,7 @@ pub struct SettingsResponse {
 ///
 /// `ext_panes` lists the supplied extension panes as
 /// `(key, title, description)` for the Panes subtab's visibility checkboxes
-/// (see [`panes_config`][super::panes_config]).
+/// (see [`panes_config`][super::panes_config()]).
 pub fn settings(
     view: &mut ViewToggles,
     compile_config: Option<gantz_core::compile::Config>,

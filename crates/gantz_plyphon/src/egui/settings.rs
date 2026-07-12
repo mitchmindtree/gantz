@@ -1,11 +1,12 @@
 //! The DSP settings subtab: the dsp runtime's status plus a couple of live
 //! knobs (scheduling lead and mute).
 
-use crate::{Config, Status};
+use crate::{Config, DeriveStatus, Status};
 use gantz_egui::Responses;
 
-/// The DSP settings subtab: a read-only status readout plus a live
-/// scheduling-lead control and an enable/mute toggle.
+/// The DSP settings subtab: a read-only status readout, a live
+/// scheduling-lead control and an enable/mute toggle, plus each open head's
+/// derive status.
 ///
 /// Holds a per-frame snapshot of the domain's [`Config`] and [`Status`].
 /// Edits apply to the snapshot in place, and the full updated [`Config`] is
@@ -16,6 +17,8 @@ pub struct DspSettingsTab {
     pub config: Config,
     /// The read-only runtime status snapshot.
     pub status: Status,
+    /// Each open head's display name and derive status, in tab order.
+    pub heads: Vec<(String, DeriveStatus)>,
 }
 
 impl gantz_egui::widget::SettingsTab for DspSettingsTab {
@@ -88,6 +91,23 @@ impl gantz_egui::widget::SettingsTab for DspSettingsTab {
                 responses.push(None, self.config.clone());
             }
         });
+
+        // Each open head's derive status (the DSP pane shows the focused
+        // head's in full).
+        if !self.heads.is_empty() {
+            ui.separator();
+            ui.label("Graphs:");
+            egui::Grid::new("dsp_heads_grid")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    for (name, status) in &self.heads {
+                        ui.label(name);
+                        super::pane::derive_status_label(status, ui);
+                        ui.end_row();
+                    }
+                });
+        }
 
         responses
     }

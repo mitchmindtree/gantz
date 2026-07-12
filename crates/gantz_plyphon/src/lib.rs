@@ -41,7 +41,7 @@ pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, dsp_commits};
 pub use sugar::PlyphonSugar;
 // `self::` disambiguates from the extern `egui` crate at the crate root.
 #[cfg(feature = "egui")]
-pub use self::egui::{DspRefExtUi, DspSettingsTab};
+pub use self::egui::{DSP_PANE_KEY, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab};
 
 pub mod backend;
 pub mod builtin;

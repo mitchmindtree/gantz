@@ -22,6 +22,7 @@
 //! breaking the chain it flows through.
 
 use super::size_sync::{self, fitted_size};
+use crate::ui_tree::plot::{PlotParams, is_container, plot_body, resolve_color, split_channels};
 use crate::widget::node_inspector;
 use crate::widget::node_inspector::radio_option;
 use crate::{
@@ -252,61 +253,6 @@ fn series(ctx: &NodeCtx) -> Vec<Vec<f64>> {
     }
 }
 
-/// Split a stored plot value into per-channel series. A list or vector *of lists/vectors*
-/// is one series per inner container (`~scopeout`'s per-channel rings produce this); a
-/// flat numeric list or vector - or a lone number - is a single channel. Lists and
-/// vectors are treated identically ([`SteelVal::ListV`] and [`SteelVal::VectorV`]).
-fn split_channels(val: &SteelVal) -> Vec<Vec<f64>> {
-    // The top-level elements of a list or vector; `None` if `val` is not a container.
-    let elems: Option<Vec<&SteelVal>> = match val {
-        SteelVal::ListV(list) => Some(list.iter().collect()),
-        SteelVal::VectorV(vec) => Some(vec.iter().collect()),
-        _ => None,
-    };
-    match elems {
-        // A container whose elements are themselves containers: one series each.
-        Some(elems) if elems.iter().any(|v| is_container(v)) => {
-            elems.iter().map(|v| channel_numerics(v)).collect()
-        }
-        // A flat numeric container: a single channel.
-        Some(elems) => vec![elems.iter().filter_map(|v| steel_num(v)).collect()],
-        // A lone number: one single-sample channel.
-        None => vec![steel_num(val).into_iter().collect()],
-    }
-}
-
-/// Whether `v` is a list or vector (a channel container).
-fn is_container(v: &SteelVal) -> bool {
-    matches!(v, SteelVal::ListV(_) | SteelVal::VectorV(_))
-}
-
-/// One channel's numeric samples: a list's or vector's numeric elements, or a lone number.
-fn channel_numerics(val: &SteelVal) -> Vec<f64> {
-    match val {
-        SteelVal::ListV(list) => list.iter().filter_map(steel_num).collect(),
-        SteelVal::VectorV(vec) => vec.iter().filter_map(steel_num).collect(),
-        other => steel_num(other).into_iter().collect(),
-    }
-}
-
-/// Convert a numeric [`SteelVal`] to `f64`.
-fn steel_num(val: &SteelVal) -> Option<f64> {
-    match val {
-        SteelVal::NumV(f) => Some(*f),
-        SteelVal::IntV(i) => Some(*i as f64),
-        _ => None,
-    }
-}
-
-/// Resolve the configured colour, falling back to the theme's strong text
-/// colour when unset.
-fn resolve_color(color: Option<[u8; 4]>, ui: &egui::Ui) -> egui::Color32 {
-    match color {
-        Some([r, g, b, a]) => egui::Color32::from_rgba_unmultiplied(r, g, b, a),
-        None => ui.visuals().strong_text_color(),
-    }
-}
-
 impl gantz_core::Node for Plot {
     fn n_inputs(&self, _ctx: MetaCtx) -> usize {
         1
@@ -360,113 +306,20 @@ impl gantz_core::Node for Plot {
 }
 
 impl Plot {
-    /// Render the plot filling `size`: a single channel fills it; multiple channels
-    /// (a list-of-lists, e.g. from `~scopeout` + `deinterleave`) are stacked as one
-    /// sub-plot each. Returns the combined response. Shared by the in-graph node body
-    /// ([`NodeUi::ui`]) and the detached view ([`NodeUi::view_ui`]).
-    fn plot_body(
-        &self,
-        channels: &[Vec<f64>],
-        plot_id: egui::Id,
-        size: egui::Vec2,
-        ui: &mut egui::Ui,
-    ) -> egui::Response {
-        // No data yet: draw a single empty plot so the node still has a body.
-        if channels.len() <= 1 {
-            let ys = channels.first().map(Vec::as_slice).unwrap_or(&[]);
-            return self.plot_channel(ys, plot_id, size, ui);
+    /// The shared plot leaf's rendering parameters, resolved from the weight.
+    fn params(&self) -> PlotParams {
+        PlotParams {
+            style: match self.style {
+                PlotStyle::Bars => gantz_ui::PlotStyle::Bars,
+                PlotStyle::Line => gantz_ui::PlotStyle::Line,
+            },
+            color: self.color,
+            grid: self.show_grid,
+            axes: self.show_axes,
+            interactive: self.interactive,
+            y_min: self.y_min.map(F32::get),
+            y_max: self.y_max.map(F32::get),
         }
-        // Stack one sub-plot per channel, splitting the height evenly.
-        let sub_h = size.y / channels.len() as f32;
-        ui.vertical(|ui| {
-            let mut resp: Option<egui::Response> = None;
-            for (i, ch) in channels.iter().enumerate() {
-                let r = self.plot_channel(ch, plot_id.with(i), egui::vec2(size.x, sub_h), ui);
-                resp = Some(match resp.take() {
-                    Some(prev) => prev.union(r),
-                    None => r,
-                });
-            }
-            resp.expect("at least two channels")
-        })
-        .inner
-    }
-
-    /// Render one channel's series (axes, grid, line/bars and bounds) filling `size`.
-    fn plot_channel(
-        &self,
-        ys: &[f64],
-        plot_id: egui::Id,
-        size: egui::Vec2,
-        ui: &mut egui::Ui,
-    ) -> egui::Response {
-        let color = resolve_color(self.color, ui);
-        let plot_style = self.style;
-        let interactive = self.interactive;
-        let bounds = value_bounds(ys, plot_style, self.y_min, self.y_max);
-
-        let mut plot = egui_plot::Plot::new(plot_id)
-            .width(size.x)
-            .height(size.y)
-            .show_background(false)
-            .show_axes(egui::Vec2b::new(self.show_axes, self.show_axes))
-            .show_grid(egui::Vec2b::new(self.show_grid, self.show_grid))
-            // Pan/zoom are always off. `Sense::hover` lets the node frame beneath
-            // capture drags and right-clicks, so the node moves and its context
-            // menu opens as usual.
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .allow_boxed_zoom(false)
-            .sense(egui::Sense::hover());
-        if !interactive {
-            // Purely visual: hide the crosshair (the value readout is also
-            // suppressed via `allow_hover(false)` below).
-            plot = plot.cursor_color(egui::Color32::TRANSPARENT);
-        }
-
-        let plot_resp = plot
-            .show(ui, |plot_ui| {
-                match plot_style {
-                    PlotStyle::Bars => {
-                        let bars = ys
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &y)| {
-                                egui_plot::Bar::new(i as f64, y)
-                                    .width(1.0)
-                                    .fill(color)
-                                    .stroke(egui::Stroke::NONE)
-                            })
-                            .collect();
-                        plot_ui
-                            .bar_chart(egui_plot::BarChart::new("", bars).allow_hover(interactive));
-                    }
-                    PlotStyle::Line => {
-                        let points = egui_plot::PlotPoints::from_ys_f64(ys);
-                        plot_ui.line(
-                            egui_plot::Line::new("", points)
-                                .color(color)
-                                .allow_hover(interactive),
-                        );
-                    }
-                }
-                // Drive the view deterministically from the data + config (the
-                // plot never pans), so live updates and min/max apply.
-                let ([xlo, ylo], [xhi, yhi]) = bounds;
-                plot_ui.set_plot_bounds_x(xlo..=xhi);
-                plot_ui.set_plot_bounds_y(ylo..=yhi);
-            })
-            .response;
-
-        // egui_plot sets a crosshair *mouse cursor* on hover; when not
-        // interactive, restore the default arrow so the plot reads as a static
-        // node. (The resize corner sets its own cursor after this, so it is
-        // unaffected.)
-        if !interactive && plot_resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-        }
-        plot_resp
     }
 }
 
@@ -546,7 +399,7 @@ impl NodeUi for Plot {
                     changed = true;
                 }
 
-                self.plot_body(&ys, plot_id, avail, ui)
+                plot_body(&self.params(), &ys, plot_id, avail, ui)
             });
 
             size_sync::store(
@@ -579,7 +432,7 @@ impl NodeUi for Plot {
         let plot_id = ui.id().with("plot-view");
         let ys = series(&ctx);
         let size = ui.available_size();
-        let resp = self.plot_body(&ys, plot_id, size, ui);
+        let resp = plot_body(&self.params(), &ys, plot_id, size, ui);
         let mut out = NodeViewResponse::default();
         out.inner = Some(resp);
         out
@@ -803,55 +656,10 @@ impl NodeUi for Plot {
     }
 }
 
-/// Compute `([x_min, y_min], [x_max, y_max])` for the view from the data and
-/// optional fixed value bounds. Bars include the baseline `0` and span integer
-/// x; lines span sample indices. The plot itself adds no margin.
-fn value_bounds(
-    ys: &[f64],
-    style: PlotStyle,
-    y_min: Option<F32>,
-    y_max: Option<F32>,
-) -> ([f64; 2], [f64; 2]) {
-    let n = ys.len() as f64;
-    let (xlo, xhi) = match style {
-        PlotStyle::Bars => (-0.5, (n - 0.5).max(0.5)),
-        PlotStyle::Line => (0.0, (n - 1.0).max(1.0)),
-    };
-
-    let (dmin, dmax) = ys
-        .iter()
-        .copied()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
-            (lo.min(v), hi.max(v))
-        });
-    let (mut ylo, mut yhi) = if dmin <= dmax {
-        match style {
-            // Bars draw from the baseline, so keep `0` in view.
-            PlotStyle::Bars => (dmin.min(0.0), dmax.max(0.0)),
-            PlotStyle::Line => (dmin, dmax),
-        }
-    } else {
-        (0.0, 1.0)
-    };
-    if (yhi - ylo).abs() < 1e-9 {
-        ylo -= 1.0;
-        yhi += 1.0;
-    }
-
-    // Fixed overrides are exact.
-    if let Some(v) = y_min {
-        ylo = v.get() as f64;
-    }
-    if let Some(v) = y_max {
-        yhi = v.get() as f64;
-    }
-
-    ([xlo, ylo], [xhi, yhi])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_tree::plot::steel_num;
     use gantz_core::node::{Node, WithPushEval};
     use gantz_core::{
         Edge, ROOT_STATE,
@@ -1026,52 +834,6 @@ mod tests {
         // [1,2,3], then keep the last 4 of [1,2,3] ++ [1,2,3] = [3,1,2,3].
         fire(&mut vm, &g, s, 2);
         assert_eq!(samples_of(&vm, p), vec![3.0, 1.0, 2.0, 3.0]);
-    }
-
-    // `split_channels` treats a list-or-vector-of-containers as one series per inner
-    // container (for the stacked multi-channel plot), and a flat list/vector or lone
-    // number as a single channel. Lists and vectors are interchangeable, including mixed.
-    #[test]
-    fn split_channels_by_shape() {
-        let num = |n: f64| SteelVal::NumV(n);
-        let list = |xs: Vec<SteelVal>| SteelVal::ListV(xs.into_iter().collect());
-        let vector = |xs: Vec<SteelVal>| SteelVal::VectorV(xs.into_iter().collect());
-
-        // A flat numeric list or vector is one channel.
-        assert_eq!(
-            split_channels(&list(vec![num(1.0), num(2.0), num(3.0)])),
-            vec![vec![1.0, 2.0, 3.0]],
-        );
-        assert_eq!(
-            split_channels(&vector(vec![num(1.0), num(2.0), num(3.0)])),
-            vec![vec![1.0, 2.0, 3.0]],
-        );
-        // A lone number is one single-sample channel.
-        assert_eq!(split_channels(&num(7.0)), vec![vec![7.0]]);
-        // A list of lists, a vector of vectors, and a mixed list of vectors all give
-        // one channel per inner container.
-        let expected = vec![vec![1.0, 3.0], vec![2.0, 4.0]];
-        assert_eq!(
-            split_channels(&list(vec![
-                list(vec![num(1.0), num(3.0)]),
-                list(vec![num(2.0), num(4.0)]),
-            ])),
-            expected,
-        );
-        assert_eq!(
-            split_channels(&vector(vec![
-                vector(vec![num(1.0), num(3.0)]),
-                vector(vec![num(2.0), num(4.0)]),
-            ])),
-            expected,
-        );
-        assert_eq!(
-            split_channels(&list(vec![
-                vector(vec![num(1.0), num(3.0)]),
-                vector(vec![num(2.0), num(4.0)]),
-            ])),
-            expected,
-        );
     }
 
     // `plot_push` accepts a vector input, accumulating its numeric elements into the

@@ -43,6 +43,8 @@ use crate::{NodeCtx, node, response::DynResponse};
 use gantz_ui::{Align, BindPath, Button, Dialer, Element, Key, Matrix, Rgba, Toggle};
 use steel::{SteelVal, Vector, gc::Gc};
 
+pub(crate) mod plot;
+
 /// The outcome of interpreting a UI tree for one frame.
 ///
 /// Interpreting a tree never edits CA-affecting state (controls write VM
@@ -230,10 +232,7 @@ impl Walk<'_> {
                 let r = ui.add(label);
                 self.merge(r);
             }
-            Element::Plot(_) => {
-                let r = placeholder_chip(ui, e.tag());
-                self.merge(r);
-            }
+            Element::Plot(plot) => self.plot(plot, id, ctx, ui),
             Element::RefGui(ref_gui) => {
                 let r = weak_chip(ui, &format!("ref-gui {}", ref_gui.id))
                     .on_hover_text("embedded reference GUIs resolve in a future version");
@@ -467,6 +466,39 @@ impl Walk<'_> {
         }
     }
 
+    /// Render bound state through the shared plot leaf. The `mode` attr
+    /// selects how the *producing* node accumulates its state and is
+    /// irrelevant to drawing, so the walker ignores it.
+    fn plot(&mut self, p: &gantz_ui::Plot, id: egui::Id, ctx: &mut NodeCtx, ui: &mut egui::Ui) {
+        let Some(bind) = &p.bind else {
+            let r = unbound_chip(ui, "plot");
+            self.merge(r);
+            return;
+        };
+        let path = self.resolve(bind);
+        let channels = match ctx.extract_value_at(&path) {
+            Ok(Some(val)) => plot::split_channels(&val),
+            _ => Vec::new(),
+        };
+        let params = plot::PlotParams {
+            style: p.style.unwrap_or(gantz_ui::PlotStyle::Bars),
+            color: p.color.map(|Rgba(c)| c),
+            grid: p.grid,
+            axes: p.axes,
+            interactive: p.interactive,
+            y_min: p.y_min,
+            y_max: p.y_max,
+        };
+        // Absent dimensions fill the available space (the detached view and
+        // debug pane cases). Fragments with a fixed size set both.
+        let size = egui::vec2(
+            p.w.unwrap_or_else(|| ui.available_width()),
+            p.h.unwrap_or_else(|| ui.available_height()),
+        );
+        let r = plot::plot_body(&params, &channels, id, size, ui);
+        self.merge(r);
+    }
+
     /// Write an edited value to its bound state, then queue a push
     /// evaluation when `push` is on.
     fn emit_set(&mut self, ctx: &mut NodeCtx, path: &[node::Id], val: SteelVal, push: bool) {
@@ -590,11 +622,6 @@ fn seq_rebuild(seq: Seq, items: Vec<SteelVal>) -> SteelVal {
             SteelVal::VectorV(Gc::new(v).into())
         }
     }
-}
-
-/// An inline chip for elements that cannot render yet.
-fn placeholder_chip(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    weak_chip(ui, text)
 }
 
 /// An inline chip for a control missing its `bind` attr.

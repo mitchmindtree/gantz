@@ -588,6 +588,18 @@ fn recursive_instantiate_prefixes_paths() {
 }
 
 #[test]
+fn describe_parts_renders_readably() {
+    // Substring checks only - the exact layout is free to iterate.
+    let (template, cache) = derive(&sine_out_child(), &HashMap::new()).expect("derive");
+    let resolved = instantiate(&template, &cache);
+    let text = gantz_plyphon::describe_parts(&resolved);
+    assert!(text.contains(&resolved[0].def.name), "def name:\n{text}");
+    assert!(text.contains("SinOsc ar"), "unit lines:\n{text}");
+    assert!(text.contains("freq"), "param names:\n{text}");
+    assert!(text.contains("[0].0: 1ch ar"), "port shapes:\n{text}");
+}
+
+#[test]
 fn resolved_part_shapes_are_instance_prefixed() {
     // head -> I1(child: sine -> out): the child's osc port shape resolves at
     // the absolute path [I1, sine].

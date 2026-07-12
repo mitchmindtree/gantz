@@ -847,6 +847,26 @@ impl<'a> NodeCtx<'a> {
         node::state::update(self.vm, self.path, val)
     }
 
+    /// Extract the state of the node at `path`, which need not be this
+    /// node's own path.
+    ///
+    /// Exists for the UI tree interpreter, whose widgets bind to node state
+    /// at resolved paths.
+    pub fn extract_value_at(&self, path: &[node::Id]) -> Result<Option<SteelVal>, SteelErr> {
+        node::state::extract_value(self.vm, path)
+    }
+
+    /// Register `val` as the new state of the node at `path`, which need not
+    /// be this node's own path.
+    ///
+    /// Exists for the UI tree interpreter, whose widgets bind to node state
+    /// at resolved paths. Like [`update_value`][Self::update_value], this
+    /// writes VM runtime state only and must never mark a response
+    /// `changed`.
+    pub fn update_value_at(&mut self, path: &[node::Id], val: SteelVal) -> Result<(), SteelErr> {
+        node::state::update_value(self.vm, path, val)
+    }
+
     /// The IDs of the inlets within the current graph.
     ///
     /// Primarily exposed so that `Inlet` nodes can present their index.

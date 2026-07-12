@@ -451,6 +451,29 @@ fn graph_without_sink_is_rejected() {
 }
 
 #[test]
+fn derive_error_displays_readably() {
+    // Derive failures surface in the UI, so each variant formats as a
+    // readable message rather than a `Debug` dump.
+    let ca = gantz_ca::ContentAddr([9; 32]);
+    assert_eq!(
+        DeriveError::NoSink.to_string(),
+        "no dsp sink (no `~out` output and no `~scopeout` monitor)",
+    );
+    assert_eq!(
+        DeriveError::BusCycle.to_string(),
+        "`~bus`/instance boundaries form a cycle between parts",
+    );
+    assert_eq!(
+        DeriveError::Unresolved(ca).to_string(),
+        format!("unresolved instanced reference: {ca}"),
+    );
+    assert_eq!(
+        DeriveError::RefCycle(ca).to_string(),
+        format!("instanced references form a cycle through {ca}"),
+    );
+}
+
+#[test]
 fn scopeout_joins_output_in_one_def() {
     // `~sinosc -> ~out` and `~sinosc -> ~scopeout`: the tap is a second sink that shares the
     // sine's chain, so one synthdef carries SinOsc, Out and a ScopeOut, with a single

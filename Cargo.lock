@@ -3930,6 +3930,7 @@ dependencies = [
  "plyphon",
  "ron 0.10.1",
  "serde",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

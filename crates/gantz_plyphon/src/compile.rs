@@ -18,19 +18,23 @@ use crate::dsp::{
 };
 
 /// An error deriving a synthdef from a graph.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DeriveError {
     /// The graph has no dsp *sink* (no `~out` output and no `~scopeout` monitor), so
     /// there is nothing to root a synthdef at.
+    #[error("no dsp sink (no `~out` output and no `~scopeout` monitor)")]
     NoSink,
     /// The `~bus` boundaries form a cycle between regions, so there is no
     /// writer-before-reader order to derive (or run) them in. Deliberate
     /// cross-region feedback (an `InFeedback`-based bus) is a planned follow-up.
+    #[error("`~bus`/instance boundaries form a cycle between parts")]
     BusCycle,
     /// An instanced reference's target graph could not be resolved.
+    #[error("unresolved instanced reference: {0}")]
     Unresolved(gantz_ca::ContentAddr),
     /// Instanced references form a cycle (a graph transitively instancing
     /// itself), so there is no finite template to derive.
+    #[error("instanced references form a cycle through {0}")]
     RefCycle(gantz_ca::ContentAddr),
 }
 

@@ -122,11 +122,13 @@ impl<N> Flat<N> {
 /// Both cases are defensive: the editor refuses to create ref cycles and the
 /// registry holds a committed graph for every ref it hands out, so neither
 /// should be reachable through the application.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FlattenError {
     /// A graph ref (transitively) resolves through itself.
+    #[error("graph reference resolves through itself: {0}")]
     RefCycle(ContentAddr),
     /// A graph ref whose target graph could not be found.
+    #[error("unresolved graph reference: {0}")]
     Unresolved(ContentAddr),
 }
 

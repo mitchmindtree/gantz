@@ -66,7 +66,7 @@ pub(crate) const OPTIONS_GLYPH: &str = "⛭";
 fn format_local(system_time: std::time::SystemTime, desc: &str) -> String {
     let datetime = OffsetDateTime::from(system_time);
     let local_datetime = to_local_datetime(datetime);
-    let format = format_description::parse(desc).expect("invalid format");
+    let format = format_description::parse_borrowed::<2>(desc).expect("invalid format");
     local_datetime
         .format(&format)
         .unwrap_or_else(|_| "<invalid-timestamp>".to_string())

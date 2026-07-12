@@ -119,6 +119,18 @@ worker: only one service worker can own the scope, and the cross-origin-isolatio
                 document.addEventListener(eventName, resumeAllContexts);
             });
         })();
+
+        // With winit's blanket keydown `preventDefault` disabled (so browser
+        // paste events reach the app - see `crates/gantz/src/window.rs`),
+        // guard the browser file shortcuts that would fight it (the native
+        // context menu is already suppressed above). Clipboard combos
+        // (Ctrl/Cmd+C/V/X) are deliberately left alone.
+        document.addEventListener('keydown', (e) => {
+            const mod = e.ctrlKey || e.metaKey;
+            if (mod && ['s', 'o', 'p'].includes(e.key.toLowerCase())) {
+                e.preventDefault();
+            }
+        });
     </script>
 </body>
 </html>

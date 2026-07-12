@@ -71,6 +71,7 @@ gantz_nodetag = { version = "0.1.0", path = "crates/gantz_nodetag" }
 gantz_nodetag_derive = { version = "0.1.0", path = "crates/gantz_nodetag_derive" }
 gantz_plyphon = { version = "0.1.0", path = "crates/gantz_plyphon" }
 gantz_std = { version = "0.3.0", path = "crates/gantz_std" }
+gantz_ui = { version = "0.1.0", path = "crates/gantz_ui" }
 hex = "0.4"
 humantime = "2.3"
 log = { version = "0.4", features = ["serde"] }

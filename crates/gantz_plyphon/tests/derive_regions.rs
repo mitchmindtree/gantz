@@ -463,3 +463,90 @@ fn goertzel(samples: &[f32], freq: f32) -> f32 {
     let power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
     power.max(0.0).sqrt() / n as f32
 }
+
+#[test]
+fn multi_fed_bus_sums_at_the_reader() {
+    // Two `~sinosc` (each its own region - they meet only at the boundary)
+    // feeding one `~bus`, read by `~out`: the bus keeps only its cut role.
+    // Each sine writes its own implicit endpoint bus, and the reader emits
+    // one `In` per endpoint and sums them after the reads.
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let b = g.add_node(N::Bus(Bus::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s0, b, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, b, Edge::new(0.into(), 0.into()));
+    g.add_edge(b, o, Edge::new(0.into(), 0.into()));
+
+    let regions = derive_synthdefs(&g, 1, "head").expect("derive");
+    assert_eq!(regions.len(), 3, "two writers + one reader");
+
+    // Each writer emits one endpoint-keyed bus write (the sine's own path +
+    // output port), not a `~bus`-keyed one.
+    for (region, s) in regions[..2].iter().zip([s0, s1]) {
+        assert_eq!(region.bus_writes.len(), 1);
+        let w = &region.bus_writes[0];
+        assert_eq!(w.node_path, vec![s.index()]);
+        assert_eq!(w.output, Some(0));
+        assert_eq!(w.channels, 1);
+        assert!(region.bus_reads.is_empty());
+    }
+
+    // The reader holds two `In`s (canonical endpoint order) and one add.
+    let reader = &regions[2];
+    assert_eq!(reader.bus_reads.len(), 2);
+    assert_eq!(reader.bus_reads[0].node_path, vec![s0.index()]);
+    assert_eq!(reader.bus_reads[1].node_path, vec![s1.index()]);
+    assert!(reader.bus_reads.iter().all(|r| r.output == Some(0)));
+    let rdef = &reader.derived.def;
+    assert_eq!(rdef.units.iter().filter(|u| u.name == "In").count(), 2);
+    let adds: Vec<_> = rdef
+        .units
+        .iter()
+        .filter(|u| u.name == "BinaryOpUGen" && u.special_index == 0)
+        .collect();
+    assert_eq!(adds.len(), 1, "the two bus reads sum after the `In`s");
+    assert!(matches!(adds[0].rate, Rate::Audio));
+}
+
+#[test]
+fn single_fed_bus_keeps_its_classic_shape_and_key() {
+    // A single-summand `~bus` chain must keep the exact pre-summing lowering:
+    // bus-keyed bindings (no endpoint port) and unchanged region keys, so
+    // existing patches neither respawn nor resound differently.
+    let build = |extra_edge: bool| {
+        let mut g = Graph::<N>::default();
+        let s = g.add_node(N::SinOsc(SinOsc::default()));
+        let b = g.add_node(N::Bus(Bus::default()));
+        let o = g.add_node(N::Out(Out::default()));
+        g.add_edge(s, b, Edge::new(0.into(), 0.into()));
+        g.add_edge(b, o, Edge::new(0.into(), 0.into()));
+        if extra_edge {
+            // A second summand flips the boundary out of the classic case.
+            let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+            g.add_edge(s1, b, Edge::new(0.into(), 0.into()));
+        }
+        (g, b)
+    };
+    let (g, b) = build(false);
+    let regions = derive_synthdefs(&g, 1, "head").expect("derive");
+    assert_eq!(regions.len(), 2);
+    let (writer, reader) = (&regions[0], &regions[1]);
+    assert_eq!(writer.bus_writes[0].node_path, vec![b.index()]);
+    assert_eq!(writer.bus_writes[0].output, None, "classic bus identity");
+    assert_eq!(reader.bus_reads[0].node_path, vec![b.index()]);
+    assert_eq!(reader.bus_reads[0].output, None);
+
+    // Adding a second summand re-keys the boundary's buses (endpoint-keyed),
+    // while removing it again restores the classic keys.
+    let (g2, _) = build(true);
+    let regions2 = derive_synthdefs(&g2, 1, "head").expect("derive");
+    assert_eq!(regions2.len(), 3);
+    let reader2 = &regions2[2];
+    assert!(reader2.bus_reads.iter().all(|r| r.output.is_some()));
+    let (g3, _) = build(false);
+    let regions3 = derive_synthdefs(&g3, 1, "head").expect("derive");
+    assert_eq!(regions3[0].key, regions[0].key, "writer key is stable");
+    assert_eq!(regions3[1].key, regions[1].key, "reader key is stable");
+}

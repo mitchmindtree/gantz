@@ -4,6 +4,7 @@
 //! bare `~sinosc`/`~out`/`~lag`/`~scopeout`/`~pack`/`~unpack`, with optional
 //! `(~sinosc #:freq-lag s [#:rate ar|kr])`, `(~lag #:rate ar|kr)`,
 //! `(~out #:gain-lag s)`, `(~scopeout #:size n)` and `(~pack #:count n)`/
+//! `(~sum #:count n)`/
 //! `(~unpack #:count n)` forms carrying the structural smoothing lag / ugen
 //! rate / ring length / socket count. The `freq`/`gain`/`dur` param *values*
 //! live in VM state (not the node weight), so they are not serialized and never
@@ -14,7 +15,7 @@ use gantz_format::{Datum, FormatError, Sugar, SugarArgs, node_datum};
 
 /// Keyword sugar for the plyphon DSP nodes ([`SinOsc`](crate::SinOsc),
 /// [`Out`](crate::Out), [`Lag`](crate::Lag), [`ScopeOut`](crate::ScopeOut),
-/// [`Pack`](crate::Pack), [`Unpack`](crate::Unpack)).
+/// [`Pack`](crate::Pack), [`Sum`](crate::Sum), [`Unpack`](crate::Unpack)).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlyphonSugar;
 
@@ -25,6 +26,7 @@ const KEYWORD_TAG: &[(&str, &str)] = &[
     ("~lag", "Lag"),
     ("~scopeout", "ScopeOut"),
     ("~pack", "Pack"),
+    ("~sum", "Sum"),
     ("~unpack", "Unpack"),
     ("~bus", "Bus"),
 ];
@@ -53,6 +55,7 @@ impl Sugar for PlyphonSugar {
             "~lag" => rate_spec("Lag", args)?,
             "~scopeout" => size_spec(args)?,
             "~pack" => count_spec("Pack", args)?,
+            "~sum" => count_spec("Sum", args)?,
             "~unpack" => count_spec("Unpack", args)?,
             "~bus" => node_datum("Bus", vec![]),
             _ => return Ok(None),
@@ -83,6 +86,7 @@ impl Sugar for PlyphonSugar {
             "Lag" => Some(write_form("~lag", rate_part(node).into_iter().collect())),
             "ScopeOut" => Some(write_size(node)),
             "Pack" => Some(write_count("~pack", crate::Pack::DEFAULT_COUNT, node)),
+            "Sum" => Some(write_count("~sum", crate::Sum::DEFAULT_COUNT, node)),
             "Unpack" => Some(write_count("~unpack", crate::Unpack::DEFAULT_COUNT, node)),
             other => keyword_for_tag(other).map(str::to_string),
         }
@@ -347,10 +351,11 @@ mod tests {
     }
 
     #[test]
-    fn pack_and_unpack_round_trip() {
+    fn count_nodes_round_trip() {
         let s = PlyphonSugar;
         for (kw, tag, default) in [
             ("~pack", "Pack", crate::Pack::DEFAULT_COUNT),
+            ("~sum", "Sum", crate::Sum::DEFAULT_COUNT),
             ("~unpack", "Unpack", crate::Unpack::DEFAULT_COUNT),
         ] {
             // A default count stays bare (read as a bare keyword or an empty spec),

@@ -34,15 +34,16 @@
 //!
 //! An edge into a ref's input `i` belongs to every consumer of the referenced
 //! graph's `i`-th inlet, and an edge from a ref's output `j` re-sources from
-//! the single edge feeding the referenced graph's `j`-th outlet (inlets and
+//! the edges feeding the referenced graph's `j`-th outlet (inlets and
 //! outlets map positionally by ascending node index, the same "input i to
 //! inlet i" contract the control compiler uses). Bridging resolves through
 //! arbitrarily deep chains of boundaries (a pure `inlet -> outlet` wire
-//! dissolves entirely). At each hop the *oldest* edge whose chain resolves
-//! wins, matching derivation's oldest-edge-wins input resolution, and an
-//! unresolvable chain (an unconnected inlet or outlet along the way) produces
-//! no edge, so the consumer's input falls back to derivation's usual mono
-//! silence.
+//! dissolves entirely). *Every* resolving chain bridges as its own flat edge
+//! - derivation sums a multi-fed input, so a boundary fanned in by several
+//! sources delivers every summand (two distinct chains reaching the same
+//! source deliberately sum it twice). An unresolvable chain (an unconnected
+//! inlet or outlet along the way) produces no edge, so the consumer's input
+//! falls back to derivation's usual mono silence.
 
 use std::collections::HashMap;
 
@@ -413,10 +414,11 @@ where
 /// Phase 2: emit the flat edges. Only edges whose target was kept are
 /// considered (each concrete input's feeds are enumerated exactly once, at
 /// the level where the target lives), with each source resolved through the
-/// boundary chain via [`resolve_src`]. Levels are visited in splice order and
-/// edges in creation (age) order, so a kept input's flat edges keep their
-/// original relative age and derivation's oldest-edge-wins resolution behaves
-/// as on an equivalent hand-flattened graph.
+/// boundary chain via [`resolve_src`] - one flat edge per resolving chain
+/// (derivation sums a multi-fed input). Levels are visited in splice order
+/// and edges in creation (age) order, so a kept input's flat edges keep their
+/// original relative age and the flat graph matches an equivalent
+/// hand-flattened one.
 fn bridge<N>(levels: &[Level<'_, N>], out: &mut Graph<Flat<N>>) {
     for (id, level) in levels.iter().enumerate() {
         for e in level.graph.edge_references() {
@@ -425,7 +427,7 @@ fn bridge<N>(levels: &[Level<'_, N>], out: &mut Graph<Flat<N>>) {
             };
             let mut stack = Vec::new();
             let src = e.weight().output.0 as usize;
-            if let Some((flat_s, port)) = resolve_src(levels, id, e.source(), src, &mut stack) {
+            for (flat_s, port) in resolve_src(levels, id, e.source(), src, &mut stack) {
                 let edge = Edge::new((port as u16).into(), e.weight().input);
                 out.add_edge(flat_s, flat_t, edge);
             }
@@ -433,58 +435,60 @@ fn bridge<N>(levels: &[Level<'_, N>], out: &mut Graph<Flat<N>>) {
     }
 }
 
-/// Resolve the source endpoint `(s, sp)` at level `lvl` to a kept flat node's
-/// output, following ref outputs down into their child's outlet and inlet
-/// outputs up into the parent's edges. `None` when the chain dead-ends
-/// (an unconnected boundary) or revisits an endpoint on `stack` (a pure
-/// boundary wiring cycle).
+/// Resolve the source endpoint `(s, sp)` at level `lvl` to every kept flat
+/// node output its boundary chains reach, following ref outputs down into
+/// their child's outlet and inlet outputs up into the parent's edges. Empty
+/// when every chain dead-ends (an unconnected boundary) or revisits an
+/// endpoint on `stack` (a pure boundary wiring cycle).
 fn resolve_src<N>(
     levels: &[Level<'_, N>],
     lvl: usize,
     s: NodeIx,
     sp: usize,
     stack: &mut Vec<SrcKey>,
-) -> Option<(NodeIx, usize)> {
+) -> Vec<(NodeIx, usize)> {
     let key = (lvl, s, sp);
     if stack.contains(&key) {
-        return None;
+        return Vec::new();
     }
     stack.push(key);
     let level = &levels[lvl];
     let resolved = if let Some(&flat) = level.kept.get(&s) {
-        Some((flat, sp))
+        vec![(flat, sp)]
     } else if let Some(&child) = level.child.get(&s) {
-        // A ref's output `sp` reads the child's `sp`-th outlet's one input.
+        // A ref's output `sp` reads the child's `sp`-th outlet's feeds.
         levels[child]
             .outlets
             .get(sp)
             .copied()
-            .and_then(|outlet| resolve_via_input(levels, child, outlet, 0, stack))
+            .map(|outlet| resolve_via_input(levels, child, outlet, 0, stack))
+            .unwrap_or_default()
     } else if let Some(i) = level.inlets.iter().position(|&n| n == s) {
         // An inlet's output reads the parent ref's input `i`. A root-level
         // inlet has no parent to read, so it dissolves unconnected.
         level
             .parent
-            .and_then(|(p, r)| resolve_via_input(levels, p, r, i, stack))
+            .map(|(p, r)| resolve_via_input(levels, p, r, i, stack))
+            .unwrap_or_default()
     } else {
         // An outlet as a source (outlets have no outputs) or a node dropped
         // by an earlier error path: nothing to wire.
-        None
+        Vec::new()
     };
     stack.pop();
     resolved
 }
 
-/// Resolve the winning source feeding `node`'s `input` at level `lvl`: the
-/// oldest edge whose chain resolves (`edges_directed` iterates newest-first,
-/// hence the reversal), matching derivation's input resolution.
+/// Resolve every source feeding `node`'s `input` at level `lvl`, oldest edge
+/// first (`edges_directed` iterates newest-first, hence the reversal) - each
+/// resolving chain is a summand of the consumer's input.
 fn resolve_via_input<N>(
     levels: &[Level<'_, N>],
     lvl: usize,
     node: NodeIx,
     input: usize,
     stack: &mut Vec<SrcKey>,
-) -> Option<(NodeIx, usize)> {
+) -> Vec<(NodeIx, usize)> {
     let edges: Vec<_> = levels[lvl]
         .graph
         .edges_directed(node, Direction::Incoming)
@@ -494,5 +498,6 @@ fn resolve_via_input<N>(
     edges
         .into_iter()
         .rev()
-        .find_map(|(s, sp)| resolve_src(levels, lvl, s, sp, stack))
+        .flat_map(|(s, sp)| resolve_src(levels, lvl, s, sp, stack))
+        .collect()
 }

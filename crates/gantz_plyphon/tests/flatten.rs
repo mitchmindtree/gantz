@@ -358,9 +358,9 @@ fn boundary_wiring_cycle_dissolves() {
 }
 
 #[test]
-fn oldest_edge_wins_across_a_bridge() {
-    // Two sources race for the ref's one input: the oldest resolving edge wins
-    // at each hop, matching derivation's input resolution.
+fn every_edge_bridges_across_a_boundary() {
+    // Two sources feed the ref's one input: BOTH chains bridge (oldest first),
+    // so derivation sums them - no edge is dropped at the boundary.
     let map = HashMap::from([(ca(1), wire_child())]);
     let mut g = Graph::<N>::default();
     let s_old = g.add_node(N::SinOsc(SinOsc::default()));
@@ -374,8 +374,46 @@ fn oldest_edge_wins_across_a_bridge() {
     let flat = flatten_with(&g, &map);
     assert_eq!(
         edges_into(&flat, &[3]),
-        vec![(vec![0], 0, 0)],
-        "the older source feeds the consumer",
+        vec![(vec![0], 0, 0), (vec![1], 0, 0)],
+        "both sources feed the consumer",
+    );
+
+    // Derivation sums the bridged summands: one add ties both sines into
+    // the out.
+    let def = derive_synthdef(&flat, 1, "t").expect("derive").def;
+    assert_eq!(def.units.iter().filter(|u| u.name == "SinOsc").count(), 2);
+    let adds = def
+        .units
+        .iter()
+        .filter(|u| u.name == "BinaryOpUGen" && u.special_index == 0)
+        .count();
+    assert_eq!(adds, 1, "the bridged summands sum at the input");
+}
+
+#[test]
+fn duplicate_chains_bridge_as_two_summands() {
+    // A child whose inlet fans to its outlet twice: both chains resolve to
+    // the same source, and both bridge - two distinct wires deliberately sum
+    // the signal twice (doubling), the honest reading of the patch.
+    let mut child = Graph::<N>::default();
+    let i = child.add_node(N::Inlet);
+    let o = child.add_node(N::Outlet);
+    child.add_edge(i, o, Edge::new(0.into(), 0.into()));
+    child.add_edge(i, o, Edge::new(0.into(), 0.into()));
+    let map = HashMap::from([(ca(1), child)]);
+
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let r = g.add_node(N::Ref(ca(1)));
+    let out = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, r, Edge::new(0.into(), 0.into()));
+    g.add_edge(r, out, Edge::new(0.into(), 0.into()));
+
+    let flat = flatten_with(&g, &map);
+    assert_eq!(
+        edges_into(&flat, &[2]),
+        vec![(vec![0], 0, 0), (vec![0], 0, 0)],
+        "each chain is a summand, even to the same source",
     );
 }
 

@@ -51,6 +51,7 @@ gantz_format::impl_node_set_serde! {
         gantz_plyphon::Lag,
         gantz_plyphon::ScopeOut,
         gantz_plyphon::Pack,
+        gantz_plyphon::Sum,
         gantz_plyphon::Unpack,
         gantz_plyphon::Bus,
     }
@@ -193,6 +194,7 @@ mod tests {
             "~pack",
             "~scopeout",
             "~sinosc",
+            "~sum",
             "~unpack",
         ];
         let builtins = super::builtins();
@@ -320,6 +322,8 @@ mod tests {
             ),
             node_datum("Pack", vec![]),
             node_datum("Pack", vec![("count", Datum::U64(4))]),
+            node_datum("Sum", vec![]),
+            node_datum("Sum", vec![("count", Datum::U64(4))]),
             node_datum("Unpack", vec![]),
             node_datum("Unpack", vec![("count", Datum::U64(4))]),
             node_datum("Bus", vec![]),
@@ -424,7 +428,7 @@ mod tests {
         use gantz_format::{NodeSugar, Sugar, to_datum};
 
         let sugar = <Box<dyn Node> as NodeSugar>::sugar();
-        let cases: [(Box<dyn Node>, &str, &str); 7] = [
+        let cases: [(Box<dyn Node>, &str, &str); 8] = [
             (
                 Box::new(gantz_plyphon::SinOsc::default()),
                 "SinOsc",
@@ -438,6 +442,7 @@ mod tests {
                 "~scopeout",
             ),
             (Box::new(gantz_plyphon::Pack::default()), "Pack", "~pack"),
+            (Box::new(gantz_plyphon::Sum::default()), "Sum", "~sum"),
             (
                 Box::new(gantz_plyphon::Unpack::default()),
                 "Unpack",

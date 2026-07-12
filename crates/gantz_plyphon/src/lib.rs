@@ -35,7 +35,7 @@ pub use instance::{
     BusKey, DefCache, GraphTemplate, InstancePart, Part, ResolvedBus, ResolvedPart, TemplateBus,
     TemplateRegion, VariantKey, derive_template, instantiate,
 };
-pub use node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Unpack};
+pub use node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Sum, Unpack};
 pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, dsp_commits};
 pub use sugar::PlyphonSugar;
 // `self::` disambiguates from the extern `egui` crate at the crate root.

@@ -165,7 +165,9 @@ pub trait NodeDsp {
     /// `path` is the node's path within the graph (e.g. `[2]` for the node at
     /// index 2 of a flat graph). Use it to name any control [`Param`]s
     /// uniquely within the synthdef (see [`param_name`](crate::param::param_name)).
-    /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs). An unconnected
+    /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs), each input
+    /// arriving pre-summed (a multi-edge input is the unity-gain mix of its
+    /// summands, [`sum_signals`]). An unconnected
     /// input is [`Signal::silent`]`(1)` (mono silence). Params should broadcast
     /// across an input's channels (e.g. `~lag` emits one `Lag` unit per channel,
     /// all sharing the one `dur` param).
@@ -422,13 +424,96 @@ pub fn node_dsp_of(any: &dyn std::any::Any) -> Option<&dyn NodeDsp> {
         .or_else(|| probe::<crate::Lag>(any))
         .or_else(|| probe::<crate::ScopeOut>(any))
         .or_else(|| probe::<crate::Pack>(any))
+        .or_else(|| probe::<crate::Sum>(any))
         .or_else(|| probe::<crate::Unpack>(any))
         .or_else(|| probe::<crate::Bus>(any))
 }
 
+/// Sum channel groups into one group: the unity-gain mix of every summand.
+///
+/// The result's width is the widest summand's. A mono summand broadcasts its
+/// single channel into every result channel. A wider-but-narrower summand
+/// contributes silence past its own width. Constant channels fold at derive
+/// time (so silent placeholders vanish). No summands sum to mono silence, and
+/// a lone summand passes through untouched (zero units), keeping a
+/// single-edge input's derive byte-identical to a direct wire.
+pub fn sum_signals(b: &mut DspBuilder, signals: &[Signal]) -> Signal {
+    match signals {
+        [] => Signal::silent(1),
+        [s] => s.clone(),
+        _ => {
+            let width = signals.iter().map(Signal::width).max().unwrap_or(1);
+            (0..width).map(|ch| sum_channel(b, signals, ch)).collect()
+        }
+    }
+}
+
+/// The wire carrying channel `ch` of the sum of `signals`: each summand
+/// contributes its channel `ch`, a mono summand its broadcast channel `0`, a
+/// wider-but-narrower summand nothing. Constant contributions fold into one
+/// trailing term, dropped when zero and other wires remain.
+fn sum_channel(b: &mut DspBuilder, signals: &[Signal], ch: usize) -> InputRef {
+    let mut constant = 0.0;
+    let mut wires = Vec::new();
+    let contributions = signals.iter().filter_map(|s| match s.width() {
+        1 => s.channel(0),
+        _ => s.channel(ch),
+    });
+    for c in contributions {
+        match c {
+            InputRef::Constant(v) => constant += v,
+            wire => wires.push(wire),
+        }
+    }
+    if constant != 0.0 || wires.is_empty() {
+        wires.push(InputRef::Constant(constant));
+    }
+    sum_wires(b, wires)
+}
+
+/// Sum a non-empty list of mono wires, tiling plyphon's summing units: one
+/// wire passes through, two add via a `BinaryOpUGen`, three or four via
+/// `Sum3`/`Sum4` (strict arity - `SumCtor` rejects a padded input list), and
+/// more tile as a `Sum4` over the first four fed back as the leading summand
+/// of the rest.
+fn sum_wires(b: &mut DspBuilder, mut wires: Vec<InputRef>) -> InputRef {
+    while wires.len() > 4 {
+        let head: Vec<InputRef> = wires.drain(..4).collect();
+        let sum = push_sum_unit(b, head);
+        wires.insert(0, sum);
+    }
+    match wires.len() {
+        1 => wires[0],
+        _ => push_sum_unit(b, wires),
+    }
+}
+
+/// Emit one summing unit over `inputs` (2 -> `BinaryOpUGen` add, 3 -> `Sum3`,
+/// 4 -> `Sum4`): audio rate if any input is audio, else control rate. Each
+/// input is still read at its own rate.
+fn push_sum_unit(b: &mut DspBuilder, inputs: Vec<InputRef>) -> InputRef {
+    let audio = inputs
+        .iter()
+        .any(|i| matches!(b.input_rate(i), Rate::Audio));
+    let rate = match audio {
+        true => Rate::Audio,
+        false => Rate::Control,
+    };
+    let name = match inputs.len() {
+        2 => "BinaryOpUGen",
+        3 => "Sum3",
+        _ => "Sum4",
+    };
+    let unit = b.push_unit(UnitSpec::new(name, rate, inputs, 1));
+    InputRef::Unit { unit, output: 0 }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::node_dsp_of;
+    use plyphon::Rate;
+    use plyphon::synthdef::{InputRef, UnitSpec};
+
+    use super::{DspBuilder, Signal, node_dsp_of, sum_signals};
 
     /// Every DSP node type in this crate must be found by [`node_dsp_of`], so
     /// a probe arm forgotten when adding a node fails here rather than in
@@ -444,7 +529,169 @@ mod tests {
         check::<crate::Lag>();
         check::<crate::ScopeOut>();
         check::<crate::Pack>();
+        check::<crate::Sum>();
         check::<crate::Unpack>();
         check::<crate::Bus>();
+    }
+
+    /// A unit-backed mono wire at `rate` to feed the summing helpers.
+    fn wire(b: &mut DspBuilder, rate: Rate) -> InputRef {
+        let unit = b.push_unit(UnitSpec::new("SinOsc", rate, vec![], 1));
+        InputRef::Unit { unit, output: 0 }
+    }
+
+    /// The names of the units pushed at or after index `from`.
+    fn unit_names(b: &DspBuilder, from: usize) -> Vec<String> {
+        b.units[from..].iter().map(|u| u.name.clone()).collect()
+    }
+
+    /// `InputRef` derives no `PartialEq`; compare wires via `Debug`.
+    fn wire_eq(a: &InputRef, b: &InputRef) -> bool {
+        format!("{a:?}") == format!("{b:?}")
+    }
+
+    #[test]
+    fn sum_of_none_is_mono_silence() {
+        let mut b = DspBuilder::new(2);
+        let sum = sum_signals(&mut b, &[]);
+        assert_eq!(sum.width(), 1);
+        assert!(wire_eq(&sum.channel(0).unwrap(), &InputRef::Constant(0.0)));
+        assert!(b.units.is_empty());
+    }
+
+    #[test]
+    fn sum_of_one_passes_through_unit_free() {
+        let mut b = DspBuilder::new(2);
+        let w0 = wire(&mut b, Rate::Audio);
+        let w1 = wire(&mut b, Rate::Audio);
+        let stereo: Signal = [w0, w1].into_iter().collect();
+        let before = b.units.len();
+        let sum = sum_signals(&mut b, &[stereo.clone()]);
+        assert_eq!(b.units.len(), before);
+        assert_eq!(sum.width(), 2);
+        assert!(wire_eq(&sum.channel(0).unwrap(), &w0));
+        assert!(wire_eq(&sum.channel(1).unwrap(), &w1));
+    }
+
+    #[test]
+    fn sum_tiles_binary_sum3_sum4_and_chains() {
+        for (n, expected) in [
+            (2, vec!["BinaryOpUGen"]),
+            (3, vec!["Sum3"]),
+            (4, vec!["Sum4"]),
+            (5, vec!["Sum4", "BinaryOpUGen"]),
+            (9, vec!["Sum4", "Sum4", "Sum3"]),
+        ] {
+            let mut b = DspBuilder::new(2);
+            let signals: Vec<Signal> = (0..n)
+                .map(|_| Signal::mono(wire(&mut b, Rate::Audio)))
+                .collect();
+            let before = b.units.len();
+            let sum = sum_signals(&mut b, &signals);
+            assert_eq!(sum.width(), 1);
+            assert_eq!(unit_names(&b, before), expected, "n = {n}");
+            // An add is special_index 0 (a `BinaryOpUGen` selector, unset on
+            // `Sum3`/`Sum4`).
+            assert!(b.units[before..].iter().all(|u| u.special_index == 0));
+        }
+    }
+
+    #[test]
+    fn mono_broadcasts_into_every_channel() {
+        let mut b = DspBuilder::new(2);
+        let m = wire(&mut b, Rate::Audio);
+        let s0 = wire(&mut b, Rate::Audio);
+        let s1 = wire(&mut b, Rate::Audio);
+        let stereo: Signal = [s0, s1].into_iter().collect();
+        let sum = sum_signals(&mut b, &[Signal::mono(m), stereo]);
+        assert_eq!(sum.width(), 2);
+        for (ch, s) in [(0, s0), (1, s1)] {
+            let InputRef::Unit { unit, .. } = sum.channel(ch).unwrap() else {
+                panic!("channel {ch} is not a summing unit");
+            };
+            let inputs = &b.units[unit as usize].inputs;
+            assert!(inputs.iter().any(|i| wire_eq(i, &m)));
+            assert!(inputs.iter().any(|i| wire_eq(i, &s)));
+        }
+    }
+
+    #[test]
+    fn narrower_summand_contributes_silence_past_its_width() {
+        let mut b = DspBuilder::new(2);
+        let s0 = wire(&mut b, Rate::Audio);
+        let s1 = wire(&mut b, Rate::Audio);
+        let w0 = wire(&mut b, Rate::Audio);
+        let w1 = wire(&mut b, Rate::Audio);
+        let w2 = wire(&mut b, Rate::Audio);
+        let stereo: Signal = [s0, s1].into_iter().collect();
+        let wide: Signal = [w0, w1, w2].into_iter().collect();
+        let before = b.units.len();
+        let sum = sum_signals(&mut b, &[stereo, wide]);
+        assert_eq!(sum.width(), 3);
+        // Channels 0 and 1 sum a pair; channel 2 is the wide summand's own
+        // wire passed through (the stereo summand contributes nothing there).
+        assert_eq!(unit_names(&b, before), vec!["BinaryOpUGen", "BinaryOpUGen"]);
+        assert!(wire_eq(&sum.channel(2).unwrap(), &w2));
+    }
+
+    #[test]
+    fn constants_fold_at_derive_time() {
+        // Silence + a wire: the zero constant vanishes, the wire passes
+        // through, no units.
+        let mut b = DspBuilder::new(2);
+        let w = wire(&mut b, Rate::Audio);
+        let before = b.units.len();
+        let sum = sum_signals(&mut b, &[Signal::silent(1), Signal::mono(w)]);
+        assert_eq!(b.units.len(), before);
+        assert!(wire_eq(&sum.channel(0).unwrap(), &w));
+
+        // Pure constants fold to one constant, no units.
+        let mut b = DspBuilder::new(2);
+        let sum = sum_signals(
+            &mut b,
+            &[
+                Signal::mono(InputRef::Constant(1.5)),
+                Signal::mono(InputRef::Constant(2.0)),
+            ],
+        );
+        assert!(b.units.is_empty());
+        assert!(wire_eq(&sum.channel(0).unwrap(), &InputRef::Constant(3.5)));
+
+        // A non-zero folded constant joins the wires as one trailing summand.
+        let mut b = DspBuilder::new(2);
+        let w0 = wire(&mut b, Rate::Audio);
+        let w1 = wire(&mut b, Rate::Audio);
+        let before = b.units.len();
+        let sum = sum_signals(
+            &mut b,
+            &[
+                Signal::mono(w0),
+                Signal::mono(InputRef::Constant(1.5)),
+                Signal::mono(w1),
+            ],
+        );
+        assert_eq!(unit_names(&b, before), vec!["Sum3"]);
+        let InputRef::Unit { unit, .. } = sum.channel(0).unwrap() else {
+            panic!("expected a summing unit");
+        };
+        let inputs = &b.units[unit as usize].inputs;
+        assert!(inputs.iter().any(|i| wire_eq(i, &InputRef::Constant(1.5))));
+    }
+
+    #[test]
+    fn sum_unit_rate_is_audio_iff_any_summand_is() {
+        let mut b = DspBuilder::new(2);
+        let k0 = wire(&mut b, Rate::Control);
+        let k1 = wire(&mut b, Rate::Control);
+        let before = b.units.len();
+        sum_signals(&mut b, &[Signal::mono(k0), Signal::mono(k1)]);
+        assert_eq!(b.units[before].rate, Rate::Control);
+
+        let mut b = DspBuilder::new(2);
+        let k = wire(&mut b, Rate::Control);
+        let a = wire(&mut b, Rate::Audio);
+        let before = b.units.len();
+        sum_signals(&mut b, &[Signal::mono(k), Signal::mono(a)]);
+        assert_eq!(b.units[before].rate, Rate::Audio);
     }
 }

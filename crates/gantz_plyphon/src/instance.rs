@@ -40,13 +40,25 @@
 //! must run *before* it and a node reading it *after*. A diamond such as
 //! `src -> instance -> mix` plus `src -> mix` therefore cannot fuse `src` and
 //! `mix` into one def. Each node is assigned a *stage* - the maximum over its
-//! winning sources, bumped when crossing an instance - and regions are the
-//! connected components *within a stage*. A winning edge crossing stages (or
+//! summand sources, bumped when crossing an instance - and regions are the
+//! connected components *within a stage*. An edge crossing stages (or
 //! otherwise crossing regions) lowers to an implicit bus
 //! ([`BusKey::Src`]), costing one bus and no latency (writers run before
 //! readers within a block). Cycles *through an instance* have no such order
 //! and are rejected as [`DeriveError::BusCycle`] (deliberate feedback is
 //! planned to land with `InFeedback` lowering, #293).
+//!
+//! # Summing
+//!
+//! Multiple edges into one dsp input sum ([`sum_signals`]), exactly as in
+//! [`derive_synthdefs`]. Every summand of a consumed input is classified
+//! (a `Feed`) and the consumer sums the resolved signals - in-region wires
+//! and bus `In`s alike - after materializing them. A multi-fed instance
+//! *inlet* sums inside the child template (the summand widths are part of the
+//! [`VariantKey`], and each summand gets its own [`BusKey::IfaceIn`] bus). A
+//! multi-fed root *outlet* exports one bus per summand
+//! ([`GraphTemplate::outlets`]) and the enclosing reader sums after its
+//! per-summand `In`s ([`BusKey::InstOut`]).
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -63,7 +75,9 @@ use gantz_core::node::graph::{Graph, NodeIx};
 use crate::compile::{
     DeriveError, content_def_name, derive_synthdefs, dsp_sinks, merged_pull_order, structural_sig,
 };
-use crate::dsp::{DspBuilder, GainRef, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp};
+use crate::dsp::{
+    DspBuilder, GainRef, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp, sum_signals,
+};
 use crate::flatten::Flat;
 
 /// A content-addressed shape identifying one template variant of a child
@@ -77,9 +91,10 @@ use crate::flatten::Flat;
 pub struct VariantKey {
     /// The referenced child graph's commit content address.
     pub child: ContentAddr,
-    /// One entry per inlet: `None` for unconnected (baked silence), `Some(w)`
-    /// for connected at width `w`.
-    pub inlets: Vec<Option<usize>>,
+    /// One entry per inlet: the width of each summand feeding it, in canonical
+    /// order (empty = unconnected, baked silence). The child sums a multi-fed
+    /// inlet's summands where the inlet is consumed.
+    pub inlets: Vec<Vec<usize>>,
     /// One entry per outlet: `true` if some downstream node consumes it.
     pub outlets: Vec<bool>,
     /// The engine's output channel count (baked into sinks).
@@ -104,20 +119,28 @@ pub enum BusKey {
         /// The source node's output port.
         output: usize,
     },
-    /// An instance's consumed outlet. Never allocated directly:
-    /// [`instantiate`] resolves it through the child template's
+    /// One summand of an instance's consumed outlet. Never allocated
+    /// directly: [`instantiate`] resolves it through the child template's
     /// [`outlets`](GraphTemplate::outlets) table to the bus actually carrying
-    /// the outlet's signal (falling back to an unwritten - silent - bus for a
-    /// sourceless outlet).
+    /// that summand's signal (falling back to an unwritten - silent - bus for
+    /// a sourceless outlet). A reader emits one `In` per summand and sums.
     InstOut {
         /// The instance marker's path.
         path: Vec<usize>,
         /// The consumed outlet's index.
         outlet: usize,
+        /// The summand's index within the outlet's exported buses.
+        summand: usize,
     },
-    /// The template's own `i`-th inlet. Resolved by [`instantiate`] to the
-    /// enclosing graph's feeding bus.
-    IfaceIn(usize),
+    /// One summand of the template's own `inlet`-th inlet. Resolved by
+    /// [`instantiate`] to the enclosing graph's feeding bus for that summand.
+    IfaceIn {
+        /// The inlet's interface index.
+        inlet: usize,
+        /// The summand's index within the inlet's feeds (canonical order,
+        /// matching [`VariantKey::inlets`]).
+        summand: usize,
+    },
 }
 
 /// One side of a bus within a region's def: the `In`/`Out` unit and the no-lag
@@ -178,9 +201,9 @@ pub struct InstancePart {
     pub path: Vec<usize>,
     /// The variant this instance instantiates (keys the shared template).
     pub variant: VariantKey,
-    /// Per inlet: the template-relative key of the bus feeding it (`None` =
-    /// unconnected, baked silence in the variant).
-    pub inlet_keys: Vec<Option<BusKey>>,
+    /// Per inlet: the template-relative key of the bus feeding each summand,
+    /// in canonical order (empty = unconnected, baked silence in the variant).
+    pub inlet_keys: Vec<Vec<BusKey>>,
 }
 
 /// A derived template: its parts in topological order (bus writers before
@@ -188,13 +211,14 @@ pub struct InstancePart {
 pub struct GraphTemplate {
     /// The parts, in bus-writer-before-reader topological order.
     pub parts: Vec<Part>,
-    /// One entry per outlet: the template-relative key of the bus carrying
-    /// the outlet's signal and its width, or `None` for an unconsumed or
-    /// sourceless outlet. A parent's read of the instance's outlet resolves
-    /// through this table at [`instantiate`] time, so an outlet fed by a
-    /// nested instance or passed through from an inlet aliases the underlying
-    /// bus with no relay def.
-    pub outlets: Vec<Option<(BusKey, usize)>>,
+    /// One entry per outlet: the template-relative key + width of the bus
+    /// carrying each of the outlet's summands, in canonical order (empty =
+    /// unconsumed or sourceless). A parent's read of the instance's outlet
+    /// resolves through this table at [`instantiate`] time, so an outlet fed
+    /// by a nested instance or passed through from an inlet aliases the
+    /// underlying buses with no relay def. A multi-fed outlet exports one bus
+    /// per summand and the enclosing reader sums.
+    pub outlets: Vec<Vec<(BusKey, usize)>>,
 }
 
 /// A memoised cache of derived child templates, keyed by [`VariantKey`].
@@ -313,6 +337,12 @@ enum PartId {
     Instance(usize),
 }
 
+/// Per (instance path, outlet): the number of summand buses the derived child
+/// template exports for that outlet ([`GraphTemplate::outlets`]). Populated in
+/// part order (writers precede readers), so a reader's `InstOut` expansion
+/// sees its instance's counts.
+type OutSummands = HashMap<(Vec<usize>, usize), usize>;
+
 /// Derive a [`GraphTemplate`] for `graph`, recursing into instance children
 /// per `resolve` (memoised in `cache`).
 ///
@@ -331,7 +361,7 @@ where
     N: ToNodeDsp,
 {
     let (n_inlets, n_outlets) = iface_arity(graph);
-    let inlets = vec![None; n_inlets];
+    let inlets = vec![Vec::new(); n_inlets];
     let outlets = vec![false; n_outlets];
     let mut deriving = Vec::new();
     derive_parts(
@@ -405,7 +435,7 @@ where
 fn derive_parts<N>(
     graph: &Graph<Flat<N>>,
     out_channels: usize,
-    inlets: &[Option<usize>],
+    inlets: &[Vec<usize>],
     outlets_consumed: &[bool],
     resolve: &InstanceResolve<'_, N>,
     cache: &mut DefCache,
@@ -428,7 +458,13 @@ where
                 let sig = structural_sig(&def);
                 def.name = content_def_name(sig);
                 let to_template = |b: crate::compile::BusBinding| TemplateBus {
-                    key: BusKey::Bus(b.node_path),
+                    key: match b.output {
+                        None => BusKey::Bus(b.node_path),
+                        Some(output) => BusKey::Src {
+                            path: b.node_path,
+                            output,
+                        },
+                    },
                     channels: b.channels,
                     unit: b.unit,
                     param: b.param,
@@ -548,23 +584,24 @@ where
         }
     }
 
-    // Winning sources per dsp input (oldest edge wins), reach-filtered.
-    let srcs: HashMap<NodeIx, Vec<Option<(NodeIx, usize)>>> = reach
+    // Summand sources per dsp input, reach-filtered: every edge into an input
+    // is a summand (empty = unconnected), canonically ordered (sorted by
+    // source path + output port) so derivation is independent of edge
+    // insertion order.
+    let srcs: HashMap<NodeIx, Vec<Vec<(NodeIx, usize)>>> = reach
         .iter()
         .map(|&n| {
             let n_in = n_dsp_in(n);
-            let mut inputs: Vec<Option<(NodeIx, usize)>> = vec![None; n_in];
-            let edges: Vec<_> = graph.edges_directed(n, Direction::Incoming).collect();
-            for e in edges.into_iter().rev() {
+            let mut inputs: Vec<Vec<(NodeIx, usize)>> = vec![Vec::new(); n_in];
+            for e in graph.edges_directed(n, Direction::Incoming) {
                 let input_ix = e.weight().input.0 as usize;
                 let s = e.source();
-                if input_ix < n_in
-                    && inputs[input_ix].is_none()
-                    && reach.contains(&s)
-                    && is_source_kind(s)
-                {
-                    inputs[input_ix] = Some((s, e.weight().output.0 as usize));
+                if input_ix < n_in && reach.contains(&s) && is_source_kind(s) {
+                    inputs[input_ix].push((s, e.weight().output.0 as usize));
                 }
+            }
+            for summands in &mut inputs {
+                summands.sort_by_cached_key(|&(s, port)| (graph[s].path().to_vec(), port));
             }
             (n, inputs)
         })
@@ -657,7 +694,10 @@ where
                     continue;
                 }
                 let input_ix = e.weight().input.0 as usize;
-                if srcs[&t].get(input_ix).copied().flatten().map(|(s, _)| s) == Some(n) {
+                let among = srcs[&t]
+                    .get(input_ix)
+                    .is_some_and(|ss| ss.iter().any(|&(s, _)| s == n));
+                if among {
                     comp.insert(t, id);
                     stack.push(t);
                 }
@@ -676,12 +716,15 @@ where
         v
     };
 
-    // `~bus` aliasing + sourcing, exactly as `derive_synthdefs`.
+    // `~bus` aliasing + sourcing, exactly as `derive_synthdefs`: a *pure*
+    // single-summand chain of boundaries keeps the classic effective-bus
+    // identity, while a fanned-out chain lowers to its transitive endpoints
+    // (each a summand the consumer classifies as though wired directly).
     let boundary = |n: NodeIx| kind.get(&n) == Some(&Kind::Boundary);
     let effective = |b: NodeIx| -> NodeIx {
         let mut cur = b;
         let mut visited = HashSet::new();
-        while let Some(&(s, _)) = srcs[&cur].first().and_then(|o| o.as_ref()) {
+        while let Some(&[(s, _)]) = srcs[&cur].first().map(|v| v.as_slice()) {
             if !boundary(s) || !visited.insert(cur) {
                 break;
             }
@@ -689,29 +732,54 @@ where
         }
         cur
     };
-    // The effective bus's winning source, unless it is itself a boundary (a
-    // pure bus cycle - an unsourced, silent bus).
-    let bus_source = |b: NodeIx| -> Option<(NodeIx, usize)> {
-        srcs[&effective(b)]
-            .first()
-            .copied()
-            .flatten()
-            .filter(|&(s, _)| !boundary(s))
+    // The classic case: the effective bus's lone summand is a non-boundary
+    // source (every hop of the chain had exactly one). `None` = the chain
+    // fans out somewhere, is unsourced, or is a pure bus cycle.
+    let classic_source = |b: NodeIx| -> Option<(NodeIx, usize)> {
+        match srcs[&effective(b)].first().map(|v| v.as_slice()) {
+            Some(&[(s, port)]) if !boundary(s) => Some((s, port)),
+            _ => None,
+        }
+    };
+    // Every transitive non-boundary endpoint feeding `b`, canonical order,
+    // duplicates kept (each is a summand). Empty = unsourced (silence).
+    let bus_endpoints = |b: NodeIx| -> Vec<(NodeIx, usize)> {
+        let mut endpoints = Vec::new();
+        let mut visited = HashSet::new();
+        let mut stack = vec![b];
+        while let Some(cur) = stack.pop() {
+            if !visited.insert(cur) {
+                continue;
+            }
+            for &(s, port) in srcs[&cur].iter().flatten() {
+                match boundary(s) {
+                    true => stack.push(s),
+                    false => endpoints.push((s, port)),
+                }
+            }
+        }
+        endpoints.sort_by_cached_key(|&(s, port)| (graph[s].path().to_vec(), port));
+        endpoints
     };
 
-    // Classify the winning source feeding a consumer. `at` is the consuming
-    // part (None for a root outlet, which belongs to no part).
-    let feed = |src: Option<(NodeIx, usize)>, at: Option<PartId>| -> Feed {
-        let Some((s, port)) = src else {
-            return Feed::Silence;
-        };
+    // Classify one *direct* (non-boundary) source feeding a consumer. `at` is
+    // the consuming part (None for a root outlet or instance inlet, which
+    // belong to no part). An inlet source expands to one read per enclosing
+    // summand; an instance-outlet source to one read per exported summand
+    // (`out_summands` - a lone silent read before the child is derived or for
+    // a sourceless outlet, preserving the In-on-silent-bus shape).
+    let direct_feeds = |s: NodeIx,
+                        port: usize,
+                        at: Option<PartId>,
+                        out_summands: &HashMap<(Vec<usize>, usize), usize>|
+     -> Vec<Feed> {
         match kind.get(&s) {
             Some(Kind::Plain) => {
                 let writer = PartId::Region(comp[&s]);
                 if at == Some(writer) {
-                    Feed::Wire(s, port)
+                    vec![Feed::Wire(s, port)]
                 } else {
-                    Feed::Read {
+                    vec![Feed::Read {
                         key: BusKey::Src {
                             path: graph[s].path().to_vec(),
                             output: port,
@@ -719,78 +787,80 @@ where
                         writer: Some(writer),
                         demand: Some((s, port)),
                         param_at: (graph[s].path().to_vec(), format!("bus{port}")),
-                    }
+                    }]
                 }
             }
-            Some(Kind::Boundary) => {
-                let eff = effective(s);
-                match bus_source(eff) {
-                    Some((src, sport)) => match kind.get(&src) {
-                        // A bus is transparent: it carries its source's
-                        // signal, so classify as though reading the source
-                        // directly - except a cross-region plain source keys
-                        // the *bus* (its path is the user-facing identity).
-                        Some(Kind::Plain) => {
-                            let writer = PartId::Region(comp[&src]);
-                            if at == Some(writer) {
-                                Feed::Wire(src, sport)
-                            } else {
-                                Feed::Read {
-                                    key: BusKey::Bus(graph[eff].path().to_vec()),
-                                    writer: Some(writer),
-                                    demand: Some((src, sport)),
-                                    param_at: (graph[eff].path().to_vec(), "bus".to_string()),
-                                }
-                            }
-                        }
-                        Some(Kind::Instance(..)) => Feed::Read {
-                            key: BusKey::InstOut {
-                                path: graph[src].path().to_vec(),
-                                outlet: sport,
-                            },
-                            writer: inst_part.get(&src).map(|&i| PartId::Instance(i)),
-                            demand: None,
-                            param_at: (graph[src].path().to_vec(), format!("out{sport}-bus")),
+            Some(Kind::Instance(..)) => {
+                let path = graph[s].path().to_vec();
+                let n = out_summands
+                    .get(&(path.clone(), port))
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1);
+                (0..n)
+                    .map(|summand| Feed::Read {
+                        key: BusKey::InstOut {
+                            path: path.clone(),
+                            outlet: port,
+                            summand,
                         },
-                        Some(Kind::Inlet(i)) => match inlets.get(*i) {
-                            Some(Some(_)) => Feed::Read {
-                                key: BusKey::IfaceIn(*i),
-                                writer: None,
-                                demand: None,
-                                param_at: (
-                                    inlet_paths.get(i).cloned().unwrap_or_default(),
-                                    "bus".to_string(),
-                                ),
-                            },
-                            _ => Feed::Silence,
-                        },
-                        _ => Feed::Silence,
-                    },
-                    None => Feed::Silence,
+                        writer: inst_part.get(&s).map(|&i| PartId::Instance(i)),
+                        demand: None,
+                        param_at: (
+                            path.clone(),
+                            summand_label(&format!("out{port}-bus"), summand),
+                        ),
+                    })
+                    .collect()
+            }
+            Some(Kind::Inlet(i)) => {
+                let summands = inlets.get(*i).map(Vec::as_slice).unwrap_or(&[]);
+                (0..summands.len())
+                    .map(|summand| Feed::Read {
+                        key: BusKey::IfaceIn { inlet: *i, summand },
+                        writer: None,
+                        demand: None,
+                        param_at: (
+                            inlet_paths.get(i).cloned().unwrap_or_default(),
+                            summand_label("bus", summand),
+                        ),
+                    })
+                    .collect()
+            }
+            _ => vec![Feed::Silence],
+        }
+    };
+    // Classify every read a summand source lowers to. A boundary is
+    // transparent: a pure single-summand chain to a cross-region plain source
+    // keys the *bus* (its path is the user-facing identity); any other chain
+    // lowers to its endpoints, each classified as though wired directly.
+    let feeds = |src: (NodeIx, usize),
+                 at: Option<PartId>,
+                 out_summands: &HashMap<(Vec<usize>, usize), usize>|
+     -> Vec<Feed> {
+        let (s, port) = src;
+        if !boundary(s) {
+            return direct_feeds(s, port, at, out_summands);
+        }
+        let eff = effective(s);
+        match classic_source(eff) {
+            Some((src, sport)) if kind.get(&src) == Some(&Kind::Plain) => {
+                let writer = PartId::Region(comp[&src]);
+                if at == Some(writer) {
+                    vec![Feed::Wire(src, sport)]
+                } else {
+                    vec![Feed::Read {
+                        key: BusKey::Bus(graph[eff].path().to_vec()),
+                        writer: Some(writer),
+                        demand: Some((src, sport)),
+                        param_at: (graph[eff].path().to_vec(), "bus".to_string()),
+                    }]
                 }
             }
-            Some(Kind::Instance(..)) => Feed::Read {
-                key: BusKey::InstOut {
-                    path: graph[s].path().to_vec(),
-                    outlet: port,
-                },
-                writer: inst_part.get(&s).map(|&i| PartId::Instance(i)),
-                demand: None,
-                param_at: (graph[s].path().to_vec(), format!("out{port}-bus")),
-            },
-            Some(Kind::Inlet(i)) => match inlets.get(*i) {
-                Some(Some(_)) => Feed::Read {
-                    key: BusKey::IfaceIn(*i),
-                    writer: None,
-                    demand: None,
-                    param_at: (
-                        inlet_paths.get(i).cloned().unwrap_or_default(),
-                        "bus".to_string(),
-                    ),
-                },
-                _ => Feed::Silence,
-            },
-            _ => Feed::Silence,
+            _ => bus_endpoints(s)
+                .into_iter()
+                .flat_map(|(e, eport)| direct_feeds(e, eport, at, out_summands))
+                .collect(),
         }
     };
 
@@ -807,6 +877,10 @@ where
             }
         }
     };
+    // Summand counts are unknown before derivation, so the DAG pass expands
+    // `InstOut` reads against an empty map (a single read - enough for the
+    // reader/writer relations, which are summand-agnostic).
+    let no_summands = OutSummands::new();
     for (&n, inputs) in &srcs {
         let at = match kind.get(&n) {
             Some(Kind::Plain) => Some(PartId::Region(comp[&n])),
@@ -817,20 +891,24 @@ where
                 }
                 None
             }
-            // Boundaries are transparent (resolved through `bus_source` by
+            // Boundaries are transparent (resolved through their endpoints by
             // their consumers); inlets consume nothing.
             _ => continue,
         };
-        for src in inputs.iter() {
-            if let Feed::Read {
-                key,
-                writer,
-                demand: d,
-                ..
-            } = feed(*src, at)
-            {
-                demand(writer, &key, d);
-                reads.push((at, key, writer));
+        for summands in inputs.iter() {
+            for &src in summands {
+                for f in feeds(src, at, &no_summands) {
+                    if let Feed::Read {
+                        key,
+                        writer,
+                        demand: d,
+                        ..
+                    } = f
+                    {
+                        demand(writer, &key, d);
+                        reads.push((at, key, writer));
+                    }
+                }
             }
         }
     }
@@ -904,11 +982,13 @@ where
         }
     }
 
-    // Derive each part in topo order, flowing bus widths forward.
+    // Derive each part in topo order, flowing bus widths (and outlet summand
+    // counts) forward.
     let mut port_width: HashMap<BusKey, usize> = HashMap::new();
-    for (i, w) in inlets.iter().enumerate() {
-        if let Some(w) = *w {
-            port_width.insert(BusKey::IfaceIn(i), w);
+    let mut out_summands = OutSummands::new();
+    for (i, ws) in inlets.iter().enumerate() {
+        for (summand, &w) in ws.iter().enumerate() {
+            port_width.insert(BusKey::IfaceIn { inlet: i, summand }, w);
         }
     }
     let mut parts: Vec<Part> = Vec::with_capacity(topo.len());
@@ -921,9 +1001,10 @@ where
                     c,
                     &comp,
                     &srcs,
-                    &feed,
+                    &feeds,
                     demands.get(&c).map(Vec::as_slice).unwrap_or(&[]),
                     &mut port_width,
+                    &out_summands,
                 )?;
                 parts.push(Part::Region(region));
             }
@@ -934,11 +1015,12 @@ where
                     inst,
                     out_channels,
                     &srcs,
-                    &feed,
+                    &feeds,
                     resolve,
                     cache,
                     deriving,
                     &mut port_width,
+                    &mut out_summands,
                 )?;
                 parts.push(Part::Instance(part));
             }
@@ -946,23 +1028,33 @@ where
     }
 
     // The template's own outlet table: the key + width of the bus carrying
-    // each consumed outlet's signal.
+    // each consumed outlet summand's signal.
     let outlets = (0..outlets_consumed.len())
         .map(|j| {
             if !outlets_consumed.get(j).copied().unwrap_or(false) {
-                return None;
+                return Vec::new();
             }
-            let o = outlet_ixs.get(&j)?;
-            let src = srcs.get(o).and_then(|inputs| inputs.first().copied())?;
-            match feed(src, None) {
-                Feed::Read { key, .. } => {
-                    let w = port_width.get(&key).copied().unwrap_or(1);
-                    Some((key, w))
-                }
-                // An outlet has no part of its own, so a `Wire` feed is
-                // unreachable (its source is always external to `None`).
-                Feed::Wire(..) | Feed::Silence => None,
-            }
+            let Some(o) = outlet_ixs.get(&j) else {
+                return Vec::new();
+            };
+            let summands = srcs
+                .get(o)
+                .and_then(|inputs| inputs.first())
+                .cloned()
+                .unwrap_or_default();
+            summands
+                .into_iter()
+                .flat_map(|src| feeds(src, None, &out_summands))
+                .filter_map(|f| match f {
+                    Feed::Read { key, .. } => {
+                        let w = port_width.get(&key).copied().unwrap_or(1);
+                        Some((key, w))
+                    }
+                    // An outlet has no part of its own, so a `Wire` feed is
+                    // unreachable (its source is always external to `None`).
+                    Feed::Wire(..) | Feed::Silence => None,
+                })
+                .collect()
         })
         .collect();
 
@@ -970,17 +1062,19 @@ where
 }
 
 /// Derive one region's synthdef: its nodes in dsp pull order, `In` units for
-/// its external reads and fade-gained `Out` units for its demanded writes.
+/// its external reads (each multi-summand input summed after materializing
+/// its wires and reads) and fade-gained `Out` units for its demanded writes.
 #[allow(clippy::too_many_arguments)]
 fn derive_region<N>(
     graph: &Graph<Flat<N>>,
     out_channels: usize,
     c: usize,
     comp: &HashMap<NodeIx, usize>,
-    srcs: &HashMap<NodeIx, Vec<Option<(NodeIx, usize)>>>,
-    feed: &impl Fn(Option<(NodeIx, usize)>, Option<PartId>) -> Feed,
+    srcs: &HashMap<NodeIx, Vec<Vec<(NodeIx, usize)>>>,
+    feeds: &impl Fn((NodeIx, usize), Option<PartId>, &OutSummands) -> Vec<Feed>,
     writes: &[(BusKey, (NodeIx, usize))],
     port_width: &mut HashMap<BusKey, usize>,
+    out_summands: &OutSummands,
 ) -> Result<TemplateRegion, DeriveError>
 where
     N: ToNodeDsp,
@@ -1018,40 +1112,49 @@ where
             continue;
         };
         let path = graph[n].path();
-        let inputs: Vec<Signal> = srcs[&n]
-            .iter()
-            .map(|src| match feed(*src, at) {
-                Feed::Wire(s, port) => outputs
-                    .get(&s)
-                    .and_then(|o| o.get(port))
-                    .cloned()
-                    .unwrap_or_else(|| Signal::silent(1)),
-                Feed::Read { key, param_at, .. } => in_signals
-                    .entry(key.clone())
-                    .or_insert_with(|| {
-                        let channels = port_width.get(&key).copied().unwrap_or(1);
-                        let (p_path, p_label) = &param_at;
-                        let bus_param = builder.push_control_param(p_path, p_label);
-                        let unit = builder.push_unit(UnitSpec::new(
-                            "In",
-                            Rate::Audio,
-                            vec![InputRef::Param(bus_param)],
-                            channels,
-                        ));
-                        bus_reads.push(TemplateBus {
-                            key: key.clone(),
-                            channels,
-                            unit: unit as usize,
-                            param: bus_param as usize,
-                        });
-                        (0..channels as u32)
-                            .map(|output| InputRef::Unit { unit, output })
-                            .collect()
-                    })
-                    .clone(),
-                Feed::Silence => Signal::silent(1),
-            })
-            .collect();
+        // Each input sums its summands' resolved signals.
+        let mut inputs: Vec<Signal> = Vec::with_capacity(srcs[&n].len());
+        for summands in &srcs[&n] {
+            let mut sigs: Vec<Signal> = Vec::new();
+            for &src in summands {
+                for f in feeds(src, at, out_summands) {
+                    let sig = match f {
+                        Feed::Wire(s, port) => outputs
+                            .get(&s)
+                            .and_then(|o| o.get(port))
+                            .cloned()
+                            .unwrap_or_else(|| Signal::silent(1)),
+                        Feed::Read { key, param_at, .. } => in_signals
+                            .entry(key.clone())
+                            .or_insert_with(|| {
+                                let channels = port_width.get(&key).copied().unwrap_or(1);
+                                let (p_path, p_label) = &param_at;
+                                let bus_param = builder.push_control_param(p_path, p_label);
+                                let unit = builder.push_unit(UnitSpec::new(
+                                    "In",
+                                    Rate::Audio,
+                                    vec![InputRef::Param(bus_param)],
+                                    channels,
+                                ));
+                                bus_reads.push(TemplateBus {
+                                    key: key.clone(),
+                                    channels,
+                                    unit: unit as usize,
+                                    param: bus_param as usize,
+                                });
+                                (0..channels as u32)
+                                    .map(|output| InputRef::Unit { unit, output })
+                                    .collect()
+                            })
+                            .clone(),
+                        Feed::Silence => Signal::silent(1),
+                    };
+                    sigs.push(sig);
+                }
+            }
+            // An unconnected (or unsourced-boundary) input sums to silence.
+            inputs.push(sum_signals(&mut builder, &sigs));
+        }
         let outs = dsp.ugens(path, &inputs, &mut builder);
         debug_assert_eq!(
             outs.len(),
@@ -1075,7 +1178,7 @@ where
             BusKey::Bus(bus_path) => (bus_path.clone(), (bus_path.clone(), "bus".to_string())),
             BusKey::Src { path, output } => (path.clone(), (path.clone(), format!("bus{output}"))),
             // Only `Bus`/`Src` writes are ever demanded of a region.
-            BusKey::InstOut { .. } | BusKey::IfaceIn(_) => continue,
+            BusKey::InstOut { .. } | BusKey::IfaceIn { .. } => continue,
         };
         let fade = *fades
             .entry(fade_path.clone())
@@ -1143,12 +1246,13 @@ fn derive_instance<N>(
     graph: &Graph<Flat<N>>,
     inst: NodeIx,
     out_channels: usize,
-    srcs: &HashMap<NodeIx, Vec<Option<(NodeIx, usize)>>>,
-    feed: &impl Fn(Option<(NodeIx, usize)>, Option<PartId>) -> Feed,
+    srcs: &HashMap<NodeIx, Vec<Vec<(NodeIx, usize)>>>,
+    feeds: &impl Fn((NodeIx, usize), Option<PartId>, &OutSummands) -> Vec<Feed>,
     resolve: &InstanceResolve<'_, N>,
     cache: &mut DefCache,
     deriving: &mut Vec<ContentAddr>,
     port_width: &mut HashMap<BusKey, usize>,
+    out_summands: &mut OutSummands,
 ) -> Result<InstancePart, DeriveError>
 where
     N: ToNodeDsp,
@@ -1165,18 +1269,22 @@ where
     let path = path.clone();
     let child_ca = *child_ca;
 
-    // Inlet feeds: the key of the bus feeding each connected inlet, and the
+    // Inlet feeds: the key of the bus feeding each inlet summand, and the
     // width that bus carries (its writer derived earlier in topo order).
-    let mut inlet_keys: Vec<Option<BusKey>> = vec![None; *n_inlets];
-    let mut inlet_widths: Vec<Option<usize>> = vec![None; *n_inlets];
-    for (i, src) in srcs[&inst].iter().enumerate() {
+    let mut inlet_keys: Vec<Vec<BusKey>> = vec![Vec::new(); *n_inlets];
+    let mut inlet_widths: Vec<Vec<usize>> = vec![Vec::new(); *n_inlets];
+    for (i, summands) in srcs[&inst].iter().enumerate() {
         // A marker's arity is its `n_inlets`, so `i` is always in range.
-        match feed(*src, None) {
-            Feed::Read { key, .. } => {
-                inlet_widths[i] = Some(port_width.get(&key).copied().unwrap_or(1));
-                inlet_keys[i] = Some(key);
+        for &src in summands {
+            for f in feeds(src, None, out_summands) {
+                match f {
+                    Feed::Read { key, .. } => {
+                        inlet_widths[i].push(port_width.get(&key).copied().unwrap_or(1));
+                        inlet_keys[i].push(key);
+                    }
+                    Feed::Wire(..) | Feed::Silence => {}
+                }
             }
-            Feed::Wire(..) | Feed::Silence => {}
         }
     }
 
@@ -1225,16 +1333,18 @@ where
         t
     };
 
-    // Continue the width flow: each consumed outlet's width, from the child's
-    // outlet table.
+    // Continue the width flow: each consumed outlet summand's width and the
+    // outlet's summand count, from the child's outlet table.
     for (j, out) in child.outlets.iter().enumerate() {
-        if let Some((_, w)) = out {
+        out_summands.insert((path.clone(), j), out.len());
+        for (summand, &(_, w)) in out.iter().enumerate() {
             port_width.insert(
                 BusKey::InstOut {
                     path: path.clone(),
                     outlet: j,
+                    summand,
                 },
-                *w,
+                w,
             );
         }
     }
@@ -1266,11 +1376,11 @@ fn instantiate_into(
     template: &GraphTemplate,
     cache: &DefCache,
     prefix: &[usize],
-    inlet_keys: &[Option<BusKey>],
+    inlet_keys: &[Vec<BusKey>],
     out: &mut Vec<ResolvedPart>,
-) -> Vec<Option<(BusKey, usize)>> {
+) -> Vec<Vec<(BusKey, usize)>> {
     // Per template-local instance path: its child's absolutized outlet table.
-    let mut inst_outlets: HashMap<Vec<usize>, Vec<Option<(BusKey, usize)>>> = HashMap::new();
+    let mut inst_outlets: HashMap<Vec<usize>, Vec<Vec<(BusKey, usize)>>> = HashMap::new();
 
     let prefixed = |p: &[usize]| -> Vec<usize> {
         let mut abs = prefix.to_vec();
@@ -1281,30 +1391,35 @@ fn instantiate_into(
     // instance's child outlet table (writers precede readers in part order,
     // so the entry exists by the time a reader needs it); a sourceless outlet
     // falls back to a dedicated unwritten - silent - bus key.
-    let abs_key = |key: &BusKey,
-                   inst_outlets: &HashMap<Vec<usize>, Vec<Option<(BusKey, usize)>>>|
-     -> BusKey {
-        match key {
-            BusKey::Bus(p) => BusKey::Bus(prefixed(p)),
-            BusKey::Src { path, output } => BusKey::Src {
-                path: prefixed(path),
-                output: *output,
-            },
-            BusKey::InstOut { path, outlet } => inst_outlets
-                .get(path)
-                .and_then(|outs| outs.get(*outlet).cloned().flatten())
-                .map(|(k, _)| k)
-                .unwrap_or_else(|| BusKey::InstOut {
+    let abs_key =
+        |key: &BusKey, inst_outlets: &HashMap<Vec<usize>, Vec<Vec<(BusKey, usize)>>>| -> BusKey {
+            match key {
+                BusKey::Bus(p) => BusKey::Bus(prefixed(p)),
+                BusKey::Src { path, output } => BusKey::Src {
                     path: prefixed(path),
-                    outlet: *outlet,
-                }),
-            BusKey::IfaceIn(i) => inlet_keys
-                .get(*i)
-                .cloned()
-                .flatten()
-                .expect("an IfaceIn read implies a connected inlet in the variant"),
-        }
-    };
+                    output: *output,
+                },
+                BusKey::InstOut {
+                    path,
+                    outlet,
+                    summand,
+                } => inst_outlets
+                    .get(path)
+                    .and_then(|outs| outs.get(*outlet))
+                    .and_then(|ss| ss.get(*summand).cloned())
+                    .map(|(k, _)| k)
+                    .unwrap_or_else(|| BusKey::InstOut {
+                        path: prefixed(path),
+                        outlet: *outlet,
+                        summand: *summand,
+                    }),
+                BusKey::IfaceIn { inlet, summand } => inlet_keys
+                    .get(*inlet)
+                    .and_then(|ks| ks.get(*summand))
+                    .cloned()
+                    .expect("an IfaceIn read implies a connected inlet summand in the variant"),
+            }
+        };
 
     for part in &template.parts {
         match part {
@@ -1348,10 +1463,10 @@ fn instantiate_into(
                     .get(&ip.variant)
                     .expect("derive_template populates the cache for every instance part");
                 let child_prefix = prefixed(&ip.path);
-                let child_inlets: Vec<Option<BusKey>> = ip
+                let child_inlets: Vec<Vec<BusKey>> = ip
                     .inlet_keys
                     .iter()
-                    .map(|k| k.as_ref().map(|k| abs_key(k, &inst_outlets)))
+                    .map(|ks| ks.iter().map(|k| abs_key(k, &inst_outlets)).collect())
                     .collect();
                 let outs = instantiate_into(&child, cache, &child_prefix, &child_inlets, out);
                 inst_outlets.insert(ip.path.clone(), outs);
@@ -1362,6 +1477,20 @@ fn instantiate_into(
     template
         .outlets
         .iter()
-        .map(|o| o.as_ref().map(|(k, w)| (abs_key(k, &inst_outlets), *w)))
+        .map(|ss| {
+            ss.iter()
+                .map(|(k, w)| (abs_key(k, &inst_outlets), *w))
+                .collect()
+        })
         .collect()
+}
+
+/// A per-summand bus param label: summand 0 keeps the bare `base` (def-sig
+/// stability for pre-summing single-summand shapes), later summands suffix
+/// their index.
+fn summand_label(base: &str, summand: usize) -> String {
+    match summand {
+        0 => base.to_string(),
+        j => format!("{base}{j}"),
+    }
 }

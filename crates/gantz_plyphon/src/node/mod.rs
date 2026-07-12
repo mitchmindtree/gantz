@@ -12,6 +12,7 @@ pub use out::Out;
 pub use pack::Pack;
 pub use scope_out::ScopeOut;
 pub use sin_osc::SinOsc;
+pub use sum::Sum;
 pub use unpack::Unpack;
 
 pub mod bus;
@@ -20,4 +21,5 @@ pub mod out;
 pub mod pack;
 pub mod scope_out;
 pub mod sin_osc;
+pub mod sum;
 pub mod unpack;

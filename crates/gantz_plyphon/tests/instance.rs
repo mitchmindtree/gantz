@@ -252,13 +252,14 @@ fn staging_diamond_derives_two_stages() {
     let inst_key = BusKey::InstOut {
         path: vec![r.index()],
         outlet: 0,
+        summand: 0,
     };
     assert!(
         reader.bus_reads.iter().any(|b| b.key == inst_key),
         "the mix region also reads the instance's outlet bus",
     );
     let inst = &instances(&template)[0];
-    assert_eq!(inst.inlet_keys, vec![Some(src_key)]);
+    assert_eq!(inst.inlet_keys, vec![vec![src_key]]);
 }
 
 #[test]
@@ -280,18 +281,18 @@ fn width_flows_through_an_instance() {
 
     let (template, cache) = derive(&g, &map).expect("derive");
     let inst = &instances(&template)[0];
-    assert_eq!(inst.variant.inlets, vec![Some(2)], "inlet width keyed at 2");
+    assert_eq!(inst.variant.inlets, vec![vec![2]], "inlet width keyed at 2");
 
     let child = cache.get(&inst.variant).expect("cached child template");
     let child_region = &regions(&child)[0];
     let in_read = child_region
         .bus_reads
         .iter()
-        .find(|b| matches!(b.key, BusKey::IfaceIn(0)))
+        .find(|b| matches!(b.key, BusKey::IfaceIn { inlet: 0, .. }))
         .expect("the child's In reads its interface inlet");
     assert_eq!(in_read.channels, 2, "the child's In is 2 wide");
     assert_eq!(
-        child.outlets[0].as_ref().map(|(_, w)| *w),
+        child.outlets[0].first().map(|(_, w)| *w),
         Some(2),
         "the child's outlet carries width 2",
     );
@@ -326,16 +327,19 @@ fn unconnected_inlet_bakes_silence() {
 
     let (template, cache) = derive(&g, &map).expect("derive");
     let inst = &instances(&template)[0];
-    assert_eq!(inst.variant.inlets, vec![Some(1), None]);
+    assert_eq!(inst.variant.inlets, vec![vec![1], vec![]]);
     assert_eq!(inst.inlet_keys.len(), 2);
-    assert!(inst.inlet_keys[1].is_none(), "unconnected inlet has no bus");
+    assert!(
+        inst.inlet_keys[1].is_empty(),
+        "unconnected inlet has no bus"
+    );
 
     let child = cache.get(&inst.variant).expect("cached child");
     let child_region = &regions(&child)[0];
     let iface_reads = child_region
         .bus_reads
         .iter()
-        .filter(|b| matches!(b.key, BusKey::IfaceIn(_)))
+        .filter(|b| matches!(b.key, BusKey::IfaceIn { .. }))
         .count();
     assert_eq!(iface_reads, 1, "one In; the silent inlet bakes silence");
 }
@@ -363,8 +367,11 @@ fn consumed_outlet_mask_keys_the_variant() {
     assert_eq!(inst.variant.outlets, vec![false, true]);
 
     let child = cache.get(&inst.variant).expect("cached child");
-    assert!(child.outlets[0].is_none(), "unconsumed outlet has no bus");
-    assert!(child.outlets[1].is_some(), "consumed outlet carries a bus");
+    assert!(child.outlets[0].is_empty(), "unconsumed outlet has no bus");
+    assert!(
+        !child.outlets[1].is_empty(),
+        "consumed outlet carries a bus"
+    );
     let writes: usize = regions(&child).iter().map(|r| r.bus_writes.len()).sum();
     assert_eq!(writes, 1, "one outlet write");
 }
@@ -553,5 +560,200 @@ fn instance_to_instance_shares_one_bus() {
             output: 0,
         },
         "the bus is the producer's absolutized source endpoint",
+    );
+}
+
+/// A child graph of two sines both feeding one `outlet` (a multi-fed root
+/// outlet).
+fn two_sines_outlet_child() -> Graph<N> {
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Outlet);
+    g.add_edge(s0, o, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, o, Edge::new(0.into(), 0.into()));
+    g
+}
+
+/// The add-selector summing units of a def (`special_index` 0; `Sum3`/`Sum4`
+/// would count too, but these tests sum pairs).
+fn n_adds(def: &plyphon::synthdef::SynthDef) -> usize {
+    def.units
+        .iter()
+        .filter(|u| {
+            u.name == "Sum3"
+                || u.name == "Sum4"
+                || (u.name == "BinaryOpUGen" && u.special_index == 0)
+        })
+        .count()
+}
+
+#[test]
+fn multi_fed_inlet_sums_inside_the_child() {
+    // Two `~sinosc` feeding ONE instance inlet: the variant keys both summand
+    // widths, the instance records one bus key per summand, and the child def
+    // reads two interface `In`s summed where the inlet is consumed.
+    let map = HashMap::from([(ca(1), lag_child())]);
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let r = g.add_node(N::Ref(ca(1), 1, 1));
+    let out = g.add_node(N::Out(Out::default()));
+    g.add_edge(s0, r, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, r, Edge::new(0.into(), 0.into()));
+    g.add_edge(r, out, Edge::new(0.into(), 0.into()));
+
+    let (template, cache) = derive(&g, &map).expect("derive");
+    let inst = &instances(&template)[0];
+    assert_eq!(inst.variant.inlets, vec![vec![1, 1]]);
+    assert_eq!(
+        inst.inlet_keys,
+        vec![vec![
+            BusKey::Src {
+                path: vec![s0.index()],
+                output: 0,
+            },
+            BusKey::Src {
+                path: vec![s1.index()],
+                output: 0,
+            },
+        ]],
+    );
+
+    let child = cache.get(&inst.variant).expect("cached child");
+    let region = &regions(&child)[0];
+    let iface: Vec<&BusKey> = region
+        .bus_reads
+        .iter()
+        .filter(|b| matches!(b.key, BusKey::IfaceIn { .. }))
+        .map(|b| &b.key)
+        .collect();
+    assert_eq!(
+        iface,
+        vec![
+            &BusKey::IfaceIn {
+                inlet: 0,
+                summand: 0,
+            },
+            &BusKey::IfaceIn {
+                inlet: 0,
+                summand: 1,
+            },
+        ],
+    );
+    assert_eq!(n_adds(&region.def), 1, "the child sums its inlet summands");
+}
+
+#[test]
+fn instance_outlet_and_plain_node_sum_at_a_parent_input() {
+    // A plain `~sinosc` and an instance's outlet both wired into one `~out`
+    // input: the reader region emits an `In` per source (the sine sits a
+    // stage below the instance-fed consumer, so it also crosses regions) and
+    // sums them.
+    let map = HashMap::from([(ca(1), lag_child())]);
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let feed = g.add_node(N::SinOsc(SinOsc::default()));
+    let r = g.add_node(N::Ref(ca(1), 1, 1));
+    let out = g.add_node(N::Out(Out::default()));
+    g.add_edge(feed, r, Edge::new(0.into(), 0.into()));
+    g.add_edge(s, out, Edge::new(0.into(), 0.into()));
+    g.add_edge(r, out, Edge::new(0.into(), 0.into()));
+
+    let (template, _cache) = derive(&g, &map).expect("derive");
+    let reader = regions(&template)
+        .into_iter()
+        .find(|reg| {
+            reg.bus_reads
+                .iter()
+                .any(|b| matches!(b.key, BusKey::InstOut { .. }))
+        })
+        .expect("a region reads the instance outlet");
+    let keys: Vec<&BusKey> = reader.bus_reads.iter().map(|b| &b.key).collect();
+    assert_eq!(
+        keys,
+        vec![
+            &BusKey::Src {
+                path: vec![s.index()],
+                output: 0,
+            },
+            &BusKey::InstOut {
+                path: vec![r.index()],
+                outlet: 0,
+                summand: 0,
+            },
+        ],
+    );
+    assert_eq!(n_adds(&reader.def), 1, "the two reads sum at the input");
+}
+
+#[test]
+fn multi_fed_outlet_exports_a_bus_per_summand() {
+    // A child whose outlet is fed by two sines: the child exports one bus per
+    // summand (no relay def sums inside the child), the parent reader emits
+    // one `In` per summand and sums, and `instantiate` resolves each summand
+    // read to the child's own endpoint bus.
+    let map = HashMap::from([(ca(1), two_sines_outlet_child())]);
+    let mut g = Graph::<N>::default();
+    let r = g.add_node(N::Ref(ca(1), 0, 1));
+    let out = g.add_node(N::Out(Out::default()));
+    g.add_edge(r, out, Edge::new(0.into(), 0.into()));
+
+    let (template, cache) = derive(&g, &map).expect("derive");
+    let inst = &instances(&template)[0];
+    let child = cache.get(&inst.variant).expect("cached child");
+    assert_eq!(child.outlets.len(), 1);
+    assert_eq!(
+        child.outlets[0]
+            .iter()
+            .map(|(k, w)| (k.clone(), *w))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                BusKey::Src {
+                    path: vec![0],
+                    output: 0,
+                },
+                1,
+            ),
+            (
+                BusKey::Src {
+                    path: vec![1],
+                    output: 0,
+                },
+                1,
+            ),
+        ],
+        "one exported bus per outlet summand",
+    );
+
+    // The parent reader holds one `In` per summand and sums them.
+    let reader = regions(&template)
+        .into_iter()
+        .find(|reg| !reg.bus_reads.is_empty())
+        .expect("the out region reads the instance outlet");
+    assert_eq!(reader.bus_reads.len(), 2);
+    assert_eq!(n_adds(&reader.def), 1);
+
+    // `instantiate` resolves each summand read to the child's endpoint bus,
+    // absolutized under the instance path.
+    let resolved = instantiate(&template, &cache);
+    let rreader = resolved
+        .iter()
+        .find(|p| p.bus_reads.len() == 2)
+        .expect("resolved reader");
+    let keys: Vec<&BusKey> = rreader.bus_reads.iter().map(|b| &b.key).collect();
+    assert_eq!(
+        keys,
+        vec![
+            &BusKey::Src {
+                path: vec![r.index(), 0],
+                output: 0,
+            },
+            &BusKey::Src {
+                path: vec![r.index(), 1],
+                output: 0,
+            },
+        ],
     );
 }

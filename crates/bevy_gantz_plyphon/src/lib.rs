@@ -1041,6 +1041,7 @@ fn spawn_part(
         gains,
         bus_writes,
         bus_reads,
+        shapes: _,
     } = part;
 
     // Allocate buses and cue scope streams up front so their indices are known

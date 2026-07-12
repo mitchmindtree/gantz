@@ -107,6 +107,24 @@ impl FromIterator<InputRef> for Signal {
     }
 }
 
+/// The channel width and rate a dsp output port's [`Signal`] carried at derive
+/// time (see [`PortShapes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortShape {
+    /// The number of channels the port carries.
+    pub width: usize,
+    /// The port's rate (see [`signal_rate`]).
+    pub rate: Rate,
+}
+
+/// Per-port shapes recorded during derivation, keyed by
+/// `(node path, dsp output port)`.
+///
+/// Covers exactly the ports derivation materialized a [`Signal`] for
+/// (dsp-reachable nodes) - a port with no entry contributed nothing to the
+/// derived program. A `BTreeMap` keeps any rendering of it deterministic.
+pub type PortShapes = std::collections::BTreeMap<(Vec<usize>, usize), PortShape>;
+
 /// A gantz node that contributes one or more plyphon UGens to a synthdef.
 ///
 /// This is the audio/DSP analogue of [`gantz_core::Node`]: where `Node::expr`
@@ -458,6 +476,39 @@ pub fn input_or_silent(inputs: &[Option<Signal>], i: usize) -> Signal {
         .cloned()
         .flatten()
         .unwrap_or_else(|| Signal::silent(1))
+}
+
+/// The rate of a channel group: audio if any channel is audio, else control
+/// if any is control, else scalar (a constant-only signal, e.g. baked
+/// silence).
+pub fn signal_rate(b: &DspBuilder, sig: &Signal) -> Rate {
+    let any = |rate: Rate| sig.channels().any(|ch| b.input_rate(&ch) == rate);
+    if any(Rate::Audio) {
+        Rate::Audio
+    } else if any(Rate::Control) {
+        Rate::Control
+    } else {
+        Rate::Scalar
+    }
+}
+
+/// Record one [`PortShape`] per output port of the node at `path` (with output
+/// [`Signal`]s `outs`) into `shapes`.
+pub(crate) fn record_port_shapes(
+    shapes: &mut PortShapes,
+    b: &DspBuilder,
+    path: &[usize],
+    outs: &[Signal],
+) {
+    let shape = |sig| PortShape {
+        width: Signal::width(sig),
+        rate: signal_rate(b, sig),
+    };
+    let entries = outs
+        .iter()
+        .enumerate()
+        .map(|(port, sig)| ((path.to_vec(), port), shape(sig)));
+    shapes.extend(entries);
 }
 
 /// Sum channel groups into one group: the unity-gain mix of every summand.

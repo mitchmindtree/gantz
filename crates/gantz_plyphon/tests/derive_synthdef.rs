@@ -5,8 +5,8 @@
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, NodeRate, Out, Pack, ScopeOut,
-    Signal, SinOsc, Sum, ToNodeDsp, Unpack, derive_synthdef, structural_sig,
+    Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, NodeRate, Out, Pack, PortShape,
+    ScopeOut, Signal, SinOsc, Sum, ToNodeDsp, Unpack, derive_synthdef, structural_sig,
 };
 use plyphon::synthdef::{InputRef, SynthDef, UnitSpec};
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, Rate, World, engine};
@@ -448,6 +448,41 @@ fn graph_without_sink_is_rejected() {
         derive_synthdef(&g, 1, "nope"),
         Err(DeriveError::NoSink)
     ));
+}
+
+#[test]
+fn port_shapes_record_width_and_rate() {
+    // Every dsp output port derivation materializes a signal for gets a
+    // `(path, port) -> (width, rate)` entry. `~out` has no dsp outputs, so a
+    // bare `~sinosc -> ~out` records exactly the oscillator's port.
+    let derived = derive_synthdef(&sine_to_out(), 1, "t").expect("derive");
+    let shape = |w, r| PortShape { width: w, rate: r };
+    assert_eq!(
+        derived.shapes.iter().collect::<Vec<_>>(),
+        vec![(&(vec![0], 0), &shape(1, Rate::Audio))],
+    );
+
+    // Two oscs packed into one group: the pack's port is 2 wide.
+    let mut g = Graph::<N>::default();
+    let a = g.add_node(N::SinOsc(SinOsc::default()));
+    let b = g.add_node(N::SinOsc(SinOsc::default()));
+    let pk = g.add_node(N::Pack(Pack::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(a, pk, Edge::new(0.into(), 0.into()));
+    g.add_edge(b, pk, Edge::new(0.into(), 1.into()));
+    g.add_edge(pk, o, Edge::new(0.into(), 0.into()));
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    assert_eq!(derived.shapes[&(vec![2], 0)], shape(2, Rate::Audio));
+
+    // A control-rate osc's port stays kr even though `~out` lifts it via K2A.
+    let mut g = Graph::<N>::default();
+    let mut sine = SinOsc::default();
+    sine.set_rate(NodeRate::Control);
+    let s = g.add_node(N::SinOsc(sine));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    assert_eq!(derived.shapes[&(vec![0], 0)], shape(1, Rate::Control));
 }
 
 #[test]

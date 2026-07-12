@@ -24,6 +24,8 @@ pub use merge::{
 };
 #[doc(inline)]
 pub use registry::Registry;
+#[doc(inline)]
+pub use sync::{SyncStep, monotonic_timestamp, plan_sync_step};
 
 mod ca;
 mod commit;
@@ -34,3 +36,4 @@ pub mod history;
 pub mod merge;
 pub mod registry;
 pub mod serde_sorted;
+pub mod sync;

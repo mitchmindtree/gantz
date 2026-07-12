@@ -19,6 +19,7 @@ pub use elem::{
 pub use encode::encode;
 pub use sexpr::{SExpr, summary};
 
+pub mod codec;
 pub mod decode;
 pub mod diag;
 pub mod elem;

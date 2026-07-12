@@ -50,10 +50,9 @@
 //!
 //! # Summing
 //!
-//! Multiple edges into one dsp input sum
-//! ([`sum_signals`](crate::dsp::sum_signals)), exactly as in
+//! Multiple edges into one dsp input sum ([`sum_signals`]), exactly as in
 //! [`derive_synthdefs`]. Every summand of a consumed input is classified
-//! ([`Feed`]) and the consumer sums the resolved signals - in-region wires
+//! (a `Feed`) and the consumer sums the resolved signals - in-region wires
 //! and bus `In`s alike - after materializing them. A multi-fed instance
 //! *inlet* sums inside the child template (the summand widths are part of the
 //! [`VariantKey`], and each summand gets its own [`BusKey::IfaceIn`] bus). A

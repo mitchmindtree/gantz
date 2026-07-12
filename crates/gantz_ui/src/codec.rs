@@ -6,5 +6,7 @@
 //! Adding a backend means writing one small total lowering, the model,
 //! decoder and encoder are shared.
 
+#[cfg(feature = "datum")]
+pub mod datum;
 #[cfg(feature = "steel")]
 pub mod steel;

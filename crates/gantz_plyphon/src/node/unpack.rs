@@ -5,7 +5,7 @@ use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, input_or_silent};
 
 /// Split a channel group into `count` mono outputs (like Max's `mc.unpack~` or
 /// a VCV split): output `i` carries the input's channel `i`, or silence past
@@ -87,10 +87,15 @@ impl NodeDsp for Unpack {
         self.count
     }
 
-    fn ugens(&self, _path: &[usize], inputs: &[Signal], _b: &mut DspBuilder) -> Vec<Signal> {
+    fn ugens(
+        &self,
+        _path: &[usize],
+        inputs: &[Option<Signal>],
+        _b: &mut DspBuilder,
+    ) -> Vec<Signal> {
         // Pure re-grouping: no units, output `i` = the input's channel `i` (or
         // mono silence past the input's width).
-        let signal = inputs.first().cloned().unwrap_or_else(|| Signal::silent(1));
+        let signal = input_or_silent(inputs, 0);
         (0..self.count)
             .map(|i| {
                 signal

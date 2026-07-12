@@ -77,9 +77,10 @@ impl NodeDsp for Sum {
         1
     }
 
-    fn ugens(&self, _path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
-        // Unconnected inputs are already mono silence, which folds away.
-        vec![sum_signals(b, inputs)]
+    fn ugens(&self, _path: &[usize], inputs: &[Option<Signal>], b: &mut DspBuilder) -> Vec<Signal> {
+        // Unconnected inputs contribute nothing (silence would fold away).
+        let sigs: Vec<Signal> = inputs.iter().flatten().cloned().collect();
+        vec![sum_signals(b, &sigs)]
     }
 }
 

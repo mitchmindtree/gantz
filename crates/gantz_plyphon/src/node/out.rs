@@ -9,7 +9,7 @@ use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, input_or_silent};
 use crate::param::{cahash_lag, control_input_expr, param_name, param_state, plyphon_param};
 
 /// The audio output sink. Applies a master `gain` to its input signal and writes
@@ -112,8 +112,8 @@ impl NodeDsp for Out {
         true
     }
 
-    fn ugens(&self, path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
-        let sig = inputs.first().cloned().unwrap_or_else(|| Signal::silent(1));
+    fn ugens(&self, path: &[usize], inputs: &[Option<Signal>], b: &mut DspBuilder) -> Vec<Signal> {
+        let sig = input_or_silent(inputs, 0);
         let out_channels = b.out_channels();
         // The output level = gain x fade, multiplied once at control rate:
         // `gain` is the settable (smoothed) control param (the driver applies

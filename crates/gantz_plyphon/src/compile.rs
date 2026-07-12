@@ -180,15 +180,17 @@ where
         let Some(dsp) = graph[n].to_node_dsp() else {
             continue;
         };
-        let inputs: Vec<Signal> = sources[&n]
+        let inputs: Vec<Option<Signal>> = sources[&n]
             .iter()
             .map(|summands| {
                 let sigs: Vec<Signal> = summands
                     .iter()
                     .filter_map(|&(s, port)| outputs.get(&s).and_then(|o| o.get(port)).cloned())
                     .collect();
-                // An unconnected input sums to mono silence.
-                sum_signals(&mut builder, &sigs)
+                // `None` iff no summand materialized a signal (unconnected, or
+                // e.g. a dangling `~unpack` port), so hybrid inputs fall back
+                // to their param exactly when the Steel side keeps it driven.
+                (!sigs.is_empty()).then(|| sum_signals(&mut builder, &sigs))
             })
             .collect();
         let outs = dsp.ugens(&graph[n].node_path(n.index()), &inputs, &mut builder);
@@ -552,7 +554,7 @@ where
             };
             // Each input sums its summands: a plain summand wires directly, a
             // boundary summand lowers to its buses - in-region wires or `In`s.
-            let mut inputs: Vec<Signal> = Vec::with_capacity(sources[&n].len());
+            let mut inputs: Vec<Option<Signal>> = Vec::with_capacity(sources[&n].len());
             for summands in &sources[&n] {
                 let mut sigs: Vec<Signal> = Vec::new();
                 for &(s, port) in summands {
@@ -592,18 +594,16 @@ where
                                     .clone();
                                 sigs.push(sig);
                             }
-                            _ => sigs.push(
-                                outputs
-                                    .get(&src)
-                                    .and_then(|o| o.get(sport))
-                                    .cloned()
-                                    .unwrap_or_else(|| Signal::silent(1)),
-                            ),
+                            // A dangling port materializes nothing.
+                            _ => sigs.extend(outputs.get(&src).and_then(|o| o.get(sport)).cloned()),
                         }
                     }
                 }
-                // An unconnected (or unsourced-boundary) input sums to silence.
-                inputs.push(sum_signals(&mut builder, &sigs));
+                // `None` iff no summand materialized a signal (unconnected, an
+                // unsourced boundary, or a dangling port), so hybrid inputs
+                // fall back to their param exactly when the Steel side keeps
+                // it driven.
+                inputs.push((!sigs.is_empty()).then(|| sum_signals(&mut builder, &sigs)));
             }
             let outs = dsp.ugens(&graph[n].node_path(n.index()), &inputs, &mut builder);
             debug_assert_eq!(

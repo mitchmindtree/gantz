@@ -332,7 +332,7 @@ fn scopeout_taps_a_multichannel_signal() {
         InputRef::Unit { unit: 7, output: 0 },
         InputRef::Unit { unit: 8, output: 0 },
     );
-    let outs = ScopeOut::default().ugens(&[2], &[sig], &mut b);
+    let outs = ScopeOut::default().ugens(&[2], &[Some(sig)], &mut b);
     assert!(outs.is_empty(), "a tap sink has no dsp outputs");
 
     let (def, _params, monitors, _gains) = b.finish("t");
@@ -358,7 +358,7 @@ fn lag_smooths_each_channel() {
     // single `dur` param (params broadcast across the group); width in = width out.
     let mut b = DspBuilder::new(1);
     let sig = stereo(InputRef::Constant(0.25), InputRef::Constant(0.5));
-    let outs = Lag::default().ugens(&[0], &[sig], &mut b);
+    let outs = Lag::default().ugens(&[0], &[Some(sig)], &mut b);
     assert_eq!(outs.len(), 1, "one dsp output port");
     assert_eq!(outs[0].width(), 2, "width flows through");
 
@@ -382,7 +382,7 @@ fn out_writes_multichannel_channel_per_bus() {
     // fan-out - the two written wires stay distinct).
     let mut b = DspBuilder::new(2);
     let sig = stereo(InputRef::Constant(0.25), InputRef::Constant(0.5));
-    let outs = Out::default().ugens(&[0], &[sig], &mut b);
+    let outs = Out::default().ugens(&[0], &[Some(sig)], &mut b);
     assert!(outs.is_empty());
 
     let (def, ..) = b.finish("t");
@@ -425,7 +425,7 @@ fn out_drops_excess_channels() {
         Signal::mono(InputRef::Constant(0.2)),
         Signal::mono(InputRef::Constant(0.3)),
     ]);
-    Out::default().ugens(&[0], &[sig], &mut b);
+    Out::default().ugens(&[0], &[Some(sig)], &mut b);
 
     let (def, ..) = b.finish("t");
     let n_muls = def

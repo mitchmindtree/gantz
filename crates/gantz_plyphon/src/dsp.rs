@@ -173,13 +173,16 @@ pub trait NodeDsp {
     /// `path` is the node's path within the graph (e.g. `[2]` for the node at
     /// index 2 of a flat graph). Use it to name any control [`Param`]s
     /// uniquely within the synthdef (see [`param_name`](crate::param::param_name)).
-    /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs), each input
-    /// arriving pre-summed (a multi-edge input is the unity-gain mix of its
-    /// summands, [`sum_signals`]). An unconnected
-    /// input is [`Signal::silent`]`(1)` (mono silence). Params should broadcast
-    /// across an input's channels (e.g. `~lag` emits one `Lag` unit per channel,
-    /// all sharing the one `dur` param).
-    fn ugens(&self, path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal>;
+    /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs). A connected
+    /// input arrives pre-summed as `Some` (a multi-edge input is the unity-gain
+    /// mix of its summands, [`sum_signals`]). `None` means no dsp summand
+    /// materialized a signal: the input is unconnected, or fed only by
+    /// signal-less sources (e.g. a dangling `~unpack` port). A node may treat
+    /// `None` as mono silence ([`input_or_silent`]) or fall back to a control
+    /// param (a *hybrid* input). Params should broadcast across an input's
+    /// channels (e.g. `~lag` emits one `Lag` unit per channel, all sharing the
+    /// one `dur` param).
+    fn ugens(&self, path: &[usize], inputs: &[Option<Signal>], b: &mut DspBuilder) -> Vec<Signal>;
 }
 
 /// A downcast hook so the synthdef compiler and the audio driver can find
@@ -435,6 +438,17 @@ pub fn node_dsp_of(any: &dyn std::any::Any) -> Option<&dyn NodeDsp> {
         .or_else(|| probe::<crate::Sum>(any))
         .or_else(|| probe::<crate::Unpack>(any))
         .or_else(|| probe::<crate::Bus>(any))
+}
+
+/// The signal at dsp input `i` of a [`NodeDsp::ugens`] `inputs` slice, or mono
+/// silence when no signal materialized there - the common fallback for a
+/// non-hybrid input.
+pub fn input_or_silent(inputs: &[Option<Signal>], i: usize) -> Signal {
+    inputs
+        .get(i)
+        .cloned()
+        .flatten()
+        .unwrap_or_else(|| Signal::silent(1))
 }
 
 /// Sum channel groups into one group: the unity-gain mix of every summand.

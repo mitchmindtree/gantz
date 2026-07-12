@@ -113,7 +113,7 @@ impl NodeDsp for SinOsc {
         1
     }
 
-    fn ugens(&self, path: &[usize], _inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
+    fn ugens(&self, path: &[usize], _inputs: &[Option<Signal>], b: &mut DspBuilder) -> Vec<Signal> {
         // `freq` is a settable control param (a nominal default here; the driver
         // applies the live state value via `set_control`).
         let freq = b.push_param(

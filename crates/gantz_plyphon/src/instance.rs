@@ -1113,17 +1113,19 @@ where
         };
         let path = graph[n].path();
         // Each input sums its summands' resolved signals.
-        let mut inputs: Vec<Signal> = Vec::with_capacity(srcs[&n].len());
+        let mut inputs: Vec<Option<Signal>> = Vec::with_capacity(srcs[&n].len());
         for summands in &srcs[&n] {
             let mut sigs: Vec<Signal> = Vec::new();
             for &src in summands {
                 for f in feeds(src, at, out_summands) {
                     let sig = match f {
-                        Feed::Wire(s, port) => outputs
-                            .get(&s)
-                            .and_then(|o| o.get(port))
-                            .cloned()
-                            .unwrap_or_else(|| Signal::silent(1)),
+                        // A dangling port materializes nothing.
+                        Feed::Wire(s, port) => {
+                            let Some(sig) = outputs.get(&s).and_then(|o| o.get(port)) else {
+                                continue;
+                            };
+                            sig.clone()
+                        }
                         Feed::Read { key, param_at, .. } => in_signals
                             .entry(key.clone())
                             .or_insert_with(|| {
@@ -1152,8 +1154,10 @@ where
                     sigs.push(sig);
                 }
             }
-            // An unconnected (or unsourced-boundary) input sums to silence.
-            inputs.push(sum_signals(&mut builder, &sigs));
+            // `None` iff no summand materialized a signal (e.g. an unconnected
+            // inlet), so hybrid inputs fall back to their param exactly when
+            // the Steel side keeps it driven.
+            inputs.push((!sigs.is_empty()).then(|| sum_signals(&mut builder, &sigs)));
         }
         let outs = dsp.ugens(path, &inputs, &mut builder);
         debug_assert_eq!(

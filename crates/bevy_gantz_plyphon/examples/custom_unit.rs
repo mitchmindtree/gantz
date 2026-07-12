@@ -108,7 +108,12 @@ impl NodeDsp for SawNode {
         1
     }
 
-    fn ugens(&self, _path: &[usize], _inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
+    fn ugens(
+        &self,
+        _path: &[usize],
+        _inputs: &[Option<Signal>],
+        b: &mut DspBuilder,
+    ) -> Vec<Signal> {
         // Name our custom unit. Freq is a baked constant (see ~sinosc for a param).
         let unit = b.push_unit(UnitSpec::new(
             "Saw",

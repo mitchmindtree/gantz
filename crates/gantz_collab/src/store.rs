@@ -1,10 +1,11 @@
-//! The served session content, shared between the application and the
-//! network runtime.
+//! The served session content, owned by the network runtime.
 //!
 //! The application mirrors each session's scoped closure (commits, graphs as
 //! serialized blobs, and the scoped `name -> tip` map) into its
-//! [`SessionStore`]; the runtime's request handler answers peers from it
-//! synchronously. Content-addressed keys make every insert idempotent.
+//! [`SessionStore`] via [`Command::Register`](crate::Command::Register) and
+//! [`Command::Update`](crate::Command::Update); the runtime's request
+//! handler answers peers from it synchronously. Content-addressed keys make
+//! every insert idempotent, so updates may be re-sent freely.
 
 use crate::{
     proto::{Objects, Want},
@@ -34,20 +35,37 @@ pub struct SessionEntry {
     pub store: SessionStore,
 }
 
-/// The state shared between the application and the network runtime.
+/// The state shared between the runtime's driver and its request-serving
+/// tasks. Internal: the application mutates it only through the ordered,
+/// non-blocking command channel, so it never takes (or waits on) this lock.
 #[derive(Debug, Default)]
-pub struct SharedState {
+pub(crate) struct SharedState {
     pub sessions: HashMap<SessionId, SessionEntry>,
 }
 
 /// A cheaply clonable handle to the [`SharedState`].
 ///
-/// Lock hold times must stay short (lookups and inserts only): the runtime
-/// answers peer requests under this lock.
+/// Lock hold times must stay short (lookups, inserts and response clones
+/// only), and every holder runs on the runtime's own thread (native) or the
+/// single browser thread (wasm) - contention never involves the
+/// application's frame loop.
 #[derive(Clone, Debug, Default)]
-pub struct Shared(Arc<Mutex<SharedState>>);
+pub(crate) struct Shared(Arc<Mutex<SharedState>>);
 
 impl SessionStore {
+    /// Merge served content into the store: content-addressed commit/graph
+    /// inserts (idempotent) and per-name head upserts.
+    pub fn merge(
+        &mut self,
+        heads: impl IntoIterator<Item = (String, CommitAddr)>,
+        commits: impl IntoIterator<Item = (CommitAddr, Commit)>,
+        graphs: impl IntoIterator<Item = (GraphAddr, Vec<u8>)>,
+    ) {
+        self.commits.extend(commits);
+        self.graphs.extend(graphs);
+        self.heads.extend(heads);
+    }
+
     /// The requested objects, where present.
     pub fn objects(&self, want: &Want) -> Objects {
         let commits = want
@@ -92,7 +110,7 @@ impl Shared {
     /// Lock the shared state. A poisoned lock (a panicked peer thread) still
     /// yields the data: content-addressed state cannot be half-written into
     /// an invalid shape.
-    pub fn lock(&self) -> MutexGuard<'_, SharedState> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, SharedState> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

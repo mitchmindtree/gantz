@@ -45,26 +45,22 @@ fn share_join_and_fetch_between_two_runtimes() {
         Event::Ready { peer } => Some(peer),
         _ => None,
     });
-    {
-        let mut state = host.shared.lock();
-        let mut store = SessionStore::default();
-        store.commits.insert(tip, commit.clone());
-        store.graphs.insert(graph_ca, graph_blob.clone());
-        store.heads.insert("jam".to_string(), tip);
-        state.sessions.insert(
-            session_id,
-            SessionEntry {
-                session: Session {
-                    id: session_id,
-                    branch: "jam".to_string(),
-                    access: Access::Public,
-                    resolutions: Default::default(),
-                    role: Role::Host,
-                },
-                store,
+    let mut store = SessionStore::default();
+    store.commits.insert(tip, commit.clone());
+    store.graphs.insert(graph_ca, graph_blob.clone());
+    store.heads.insert("jam".to_string(), tip);
+    host.cmds
+        .send_blocking(Command::Register(SessionEntry {
+            session: Session {
+                id: session_id,
+                branch: "jam".to_string(),
+                access: Access::Public,
+                resolutions: Default::default(),
+                role: Role::Host,
             },
-        );
-    }
+            store,
+        }))
+        .unwrap();
     host.cmds.send_blocking(Command::Share(session_id)).unwrap();
     let ticket = wait_for(&host, |e| match e {
         Event::TicketReady { ticket, .. } => Some(ticket),
@@ -80,22 +76,19 @@ fn share_join_and_fetch_between_two_runtimes() {
         Event::Ready { .. } => Some(()),
         _ => None,
     });
-    {
-        let mut state = guest.shared.lock();
-        state.sessions.insert(
-            session_id,
-            SessionEntry {
-                session: Session {
-                    id: session_id,
-                    branch: ticket.name.clone(),
-                    access: ticket.access.clone(),
-                    resolutions: ticket.resolutions,
-                    role: Role::Guest,
-                },
-                store: SessionStore::default(),
+    guest
+        .cmds
+        .send_blocking(Command::Register(SessionEntry {
+            session: Session {
+                id: session_id,
+                branch: ticket.name.clone(),
+                access: ticket.access.clone(),
+                resolutions: ticket.resolutions,
+                role: Role::Guest,
             },
-        );
-    }
+            store: SessionStore::default(),
+        }))
+        .unwrap();
     guest.cmds.send_blocking(Command::Join(ticket)).unwrap();
     let (heads, objects) = wait_for(&guest, |e| match e {
         Event::Joined { heads, objects, .. } => Some((heads, objects)),
@@ -139,23 +132,19 @@ fn restricted_sessions_deny_unlisted_peers() {
         Event::Ready { .. } => Some(()),
         _ => None,
     });
-    {
-        let mut state = host.shared.lock();
-        state.sessions.insert(
-            session_id,
-            SessionEntry {
-                session: Session {
-                    id: session_id,
-                    branch: "private".to_string(),
-                    // An empty allowlist: nobody may join.
-                    access: Access::Restricted(Default::default()),
-                    resolutions: Default::default(),
-                    role: Role::Host,
-                },
-                store: SessionStore::default(),
+    host.cmds
+        .send_blocking(Command::Register(SessionEntry {
+            session: Session {
+                id: session_id,
+                branch: "private".to_string(),
+                // An empty allowlist: nobody may join.
+                access: Access::Restricted(Default::default()),
+                resolutions: Default::default(),
+                role: Role::Host,
             },
-        );
-    }
+            store: SessionStore::default(),
+        }))
+        .unwrap();
     host.cmds.send_blocking(Command::Share(session_id)).unwrap();
     let ticket = wait_for(&host, |e| match e {
         Event::TicketReady { ticket, .. } => Some(ticket),

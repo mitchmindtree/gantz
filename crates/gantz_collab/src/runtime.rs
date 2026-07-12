@@ -27,10 +27,10 @@ use crate::{
     identity::Identity,
     proto::{self, GossipMsg, Objects, SyncRequest, SyncResponse, Want},
     session::{PeerId, SessionId},
-    store::Shared,
+    store::{SessionEntry, Shared},
     ticket::SessionTicket,
 };
-use gantz_ca::CommitAddr;
+use gantz_ca::{Commit, CommitAddr, GraphAddr};
 use iroh::{
     Endpoint, EndpointAddr, EndpointId,
     endpoint::{Connection, presets},
@@ -60,20 +60,43 @@ const REQUEST_LIMIT: usize = 1024 * 1024;
 const RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
 
 /// An instruction from the application to the runtime.
+///
+/// Commands apply in send order (one channel), so a [`Register`] reliably
+/// precedes the [`Share`]/[`Join`] that needs it. The channel is unbounded:
+/// sending never blocks, which keeps the application's frame loop free of
+/// runtime locks entirely - the served stores are owned by the runtime and
+/// mutated only here.
+///
+/// [`Register`]: Command::Register
+/// [`Share`]: Command::Share
+/// [`Join`]: Command::Join
 #[derive(Debug)]
 pub enum Command {
-    /// Start serving and gossiping a session. The session's
-    /// [`SessionEntry`](crate::SessionEntry) must already be in the shared
-    /// state, its store filled. Emits [`Event::TicketReady`].
+    /// Register (or replace) a session: its configuration plus the initially
+    /// served content (a filled store for a host, an empty one for a guest).
+    Register(SessionEntry),
+    /// Merge served content into a registered session's store:
+    /// content-addressed commit/graph inserts (idempotent) and per-name head
+    /// upserts. Unknown sessions are ignored with a warning.
+    Update {
+        session: SessionId,
+        heads: Vec<(String, CommitAddr)>,
+        commits: Vec<(CommitAddr, Commit)>,
+        graphs: Vec<(GraphAddr, Vec<u8>)>,
+    },
+    /// Start serving and gossiping a session. The session must already be
+    /// [`Register`](Command::Register)ed. Emits [`Event::TicketReady`].
     Share(SessionId),
-    /// Join a session from a ticket: inserts nothing into the shared state
-    /// itself - the application inserts the guest entry first - fetches the
-    /// snapshot from the ticket's hosts and subscribes the gossip topic.
+    /// Join a session from a ticket: the application
+    /// [`Register`](Command::Register)s the guest entry first; this fetches
+    /// the snapshot from the ticket's hosts and subscribes the gossip topic.
     /// Emits [`Event::Joined`] or [`Event::Error`].
     Join(SessionTicket),
-    /// Stop gossiping a session (the entry stays in the shared state until
-    /// the application removes it).
+    /// Stop gossiping a session (its content stays served until
+    /// [`Forget`](Command::Forget)).
     Leave(SessionId),
+    /// Drop a session entirely: stop serving its content.
+    Forget(SessionId),
     /// Broadcast a message on a session's gossip topic.
     Broadcast { session: SessionId, msg: GossipMsg },
     /// Fetch objects from a peer over the request plane. Emits
@@ -123,14 +146,16 @@ pub enum Event {
 }
 
 /// The application's handle to the runtime.
+///
+/// Both channels are unbounded: `cmds.try_send` never blocks and never
+/// drops, and `events.try_recv` polls without waiting, so a per-frame
+/// application loop touches no locks and never parks.
 #[derive(Clone, Debug)]
 pub struct Handle {
     /// Instructions into the runtime.
     pub cmds: async_channel::Sender<Command>,
     /// Notifications out of the runtime.
     pub events: async_channel::Receiver<Event>,
-    /// The served session state, updated directly by the application.
-    pub shared: Shared,
 }
 
 /// The request-plane server: answers [`SyncRequest`]s from the shared
@@ -220,13 +245,11 @@ impl iroh::protocol::ProtocolHandler for SyncServer {
 pub fn spawn(identity: Identity) -> Handle {
     let (cmd_tx, cmd_rx) = async_channel::unbounded();
     let (evt_tx, evt_rx) = async_channel::unbounded();
-    let shared = Shared::default();
     let handle = Handle {
         cmds: cmd_tx,
         events: evt_rx,
-        shared: shared.clone(),
     };
-    let drive = drive(identity, shared, cmd_rx, evt_tx);
+    let drive = drive(identity, Shared::default(), cmd_rx, evt_tx);
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(move || {
         match tokio::runtime::Builder::new_current_thread()
@@ -296,6 +319,27 @@ async fn drive(
 
     while let Ok(cmd) = cmd_rx.recv().await {
         match cmd {
+            Command::Register(entry) => {
+                let mut state = shared.lock();
+                state.sessions.insert(entry.session.id, entry);
+            }
+            Command::Update {
+                session,
+                heads,
+                commits,
+                graphs,
+            } => {
+                let mut state = shared.lock();
+                let Some(entry) = state.sessions.get_mut(&session) else {
+                    log::warn!("collab: update for an unregistered session");
+                    continue;
+                };
+                entry.store.merge(heads, commits, graphs);
+            }
+            Command::Forget(session) => {
+                let mut state = shared.lock();
+                state.sessions.remove(&session);
+            }
             Command::Share(session) => {
                 match subscribe(&gossip, &evt_tx, session, vec![]).await {
                     Ok(sender) => {

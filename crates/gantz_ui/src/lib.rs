@@ -9,6 +9,7 @@
 //! The full v1 vocabulary reference lives here at the crate level and grows
 //! alongside the modules below.
 
+pub use decode::{Decoded, Limits, decode};
 pub use diag::{ErrorReason, TreePath, Warning, WarningKind};
 pub use elem::{
     ATTRS_MARKER, Align, BindPath, Button, Col, Dialer, DialerStyle, Element, ErrorElem, Frame,
@@ -17,6 +18,7 @@ pub use elem::{
 };
 pub use sexpr::{SExpr, summary};
 
+pub mod decode;
 pub mod diag;
 pub mod elem;
 pub mod sexpr;

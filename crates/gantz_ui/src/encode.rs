@@ -128,6 +128,7 @@ pub fn encode(elem: &Element) -> SExpr {
             push_color(&mut attrs, "color", e.color);
             push_bool(&mut attrs, "grid", e.grid, false);
             push_bool(&mut attrs, "axes", e.axes, false);
+            push_bool(&mut attrs, "interactive", e.interactive, false);
             push_f32(&mut attrs, "y-min", e.y_min);
             push_f32(&mut attrs, "y-max", e.y_max);
             push_f32(&mut attrs, "w", e.w);
@@ -412,6 +413,7 @@ mod tests {
             color: Some(Rgba([0, 255, 0, 255])),
             grid: true,
             axes: true,
+            interactive: true,
             y_min: Some(-1.0),
             y_max: Some(1.0),
             w: Some(120.0),

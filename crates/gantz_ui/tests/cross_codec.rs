@@ -84,6 +84,7 @@ fn full_tree() -> Element {
                 color: Some(Rgba([0, 255, 0, 255])),
                 grid: true,
                 axes: true,
+                interactive: true,
                 y_min: Some(-1.0),
                 y_max: Some(1.0),
                 w: Some(120.0),

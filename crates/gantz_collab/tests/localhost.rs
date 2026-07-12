@@ -40,7 +40,7 @@ fn share_join_and_fetch_between_two_runtimes() {
     let graph_blob = b"(fake serialized graph)".to_vec();
 
     // The host runtime serves one session with a single-commit store.
-    let host = gantz_collab::spawn(Identity::generate());
+    let host = gantz_collab::spawn(Identity::generate(), Default::default());
     let host_peer = wait_for(&host, |e| match e {
         Event::Ready { peer } => Some(peer),
         _ => None,
@@ -71,7 +71,7 @@ fn share_join_and_fetch_between_two_runtimes() {
     assert_eq!(PeerId(*ticket.hosts[0].id.as_bytes()), host_peer);
 
     // The guest joins from the ticket and receives the snapshot.
-    let guest = gantz_collab::spawn(Identity::generate());
+    let guest = gantz_collab::spawn(Identity::generate(), Default::default());
     wait_for(&guest, |e| match e {
         Event::Ready { .. } => Some(()),
         _ => None,
@@ -127,7 +127,7 @@ fn share_join_and_fetch_between_two_runtimes() {
 #[ignore = "binds real sockets and may touch n0 discovery infrastructure"]
 fn restricted_sessions_deny_unlisted_peers() {
     let session_id = SessionId::generate();
-    let host = gantz_collab::spawn(Identity::generate());
+    let host = gantz_collab::spawn(Identity::generate(), Default::default());
     wait_for(&host, |e| match e {
         Event::Ready { .. } => Some(()),
         _ => None,
@@ -152,7 +152,7 @@ fn restricted_sessions_deny_unlisted_peers() {
     });
     let ticket: SessionTicket = ticket.parse().unwrap();
 
-    let guest = gantz_collab::spawn(Identity::generate());
+    let guest = gantz_collab::spawn(Identity::generate(), Default::default());
     wait_for(&guest, |e| match e {
         Event::Ready { .. } => Some(()),
         _ => None,

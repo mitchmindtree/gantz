@@ -3828,6 +3828,7 @@ dependencies = [
  "postcard",
  "serde",
  "tokio",
+ "url",
  "wasm-bindgen-futures",
 ]
 

@@ -15,13 +15,14 @@
 //!
 //! # Infrastructure
 //!
-//! The endpoint binds with iroh's `N0` preset: n0's public relay and
-//! discovery infrastructure assists connections. Native peers usually
-//! upgrade to direct (hole-punched) paths; browser peers are relay-only by
-//! design. n0's public relays are free but rate-limited with no SLA -
-//! suitable for development and jamming, while heavy production use should
-//! move to dedicated relays (self-hosted `iroh-relay` is open source, or
-//! n0's managed offering); a relay-configuration knob is a follow-up.
+//! The endpoint's relay and address-lookup infrastructure is chosen by
+//! [`RuntimeConfig::infra`]. The default, [`Infra::N0`], uses n0's public
+//! services: free but rate-limited with no SLA - suitable for development
+//! and jamming. [`Infra::Custom`] runs entirely on self-hosted or
+//! third-party infrastructure (relays via `iroh-relay`, address lookup via
+//! a pkarr relay such as `iroh-dns-server`) - nothing n0 is baked in.
+//! Native peers usually upgrade to direct (hole-punched) paths; browser
+//! peers are relay-only by design.
 
 use crate::{
     identity::Identity,
@@ -32,7 +33,8 @@ use crate::{
 };
 use gantz_ca::{Commit, CommitAddr, GraphAddr};
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode,
+    address_lookup::{PkarrPublisher, PkarrResolver},
     endpoint::{Connection, presets},
     protocol::{AcceptError, Router},
 };
@@ -52,6 +54,47 @@ pub const SYNC_ALPN: &[u8] = b"gantz/sync/1";
 /// The application-level protocol version negotiated in
 /// [`SyncRequest::Hello`].
 pub const PROTO_VERSION: u32 = 1;
+
+/// Endpoint configuration for [`spawn`].
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeConfig {
+    /// The relay and address-lookup infrastructure the endpoint binds with.
+    pub infra: Infra,
+}
+
+/// The relay and address-lookup (peer discovery) infrastructure.
+///
+/// Nothing n0-specific is baked into the protocol: [`Infra::Custom`] runs
+/// entirely on self-hosted or third-party services, and an invalid custom
+/// URL fails the runtime rather than silently falling back to n0.
+#[derive(Clone, Debug, Default)]
+pub enum Infra {
+    /// n0's public defaults: their relay servers and the `iroh.link`
+    /// address-lookup (pkarr/DNS) service. Free but rate-limited with no
+    /// SLA - right for development and jamming; heavier use should bring
+    /// its own infrastructure via [`Infra::Custom`].
+    #[default]
+    N0,
+    /// Explicit infrastructure; nothing contacts n0.
+    Custom {
+        /// Relay server URLs (e.g. a self-hosted [`iroh-relay`]). Empty
+        /// disables relaying entirely: peers must then be reachable
+        /// directly (e.g. on a LAN) via ticket bootstrap addresses or
+        /// address lookup. Browser peers are relay-routed by design, so a
+        /// session with web participants needs at least one relay.
+        ///
+        /// [`iroh-relay`]: https://github.com/n0-computer/iroh/tree/main/iroh-relay
+        relays: Vec<String>,
+        /// A pkarr relay URL for publishing and resolving peer addresses
+        /// (e.g. a self-hosted [`iroh-dns-server`]'s `/pkarr` endpoint).
+        /// `None` skips address lookup entirely: peers are then dialable
+        /// only via ticket bootstrap addresses, paths learnt over gossip,
+        /// and the relays above.
+        ///
+        /// [`iroh-dns-server`]: https://github.com/n0-computer/iroh/tree/main/iroh-dns-server
+        pkarr: Option<String>,
+    },
+}
 
 /// The read limit for a request (want lists scale with missing objects).
 const REQUEST_LIMIT: usize = 1024 * 1024;
@@ -242,14 +285,14 @@ impl iroh::protocol::ProtocolHandler for SyncServer {
 
 /// Spawn the runtime for the given identity, returning the application's
 /// handle. Emits [`Event::Ready`] once the endpoint is bound.
-pub fn spawn(identity: Identity) -> Handle {
+pub fn spawn(identity: Identity, config: RuntimeConfig) -> Handle {
     let (cmd_tx, cmd_rx) = async_channel::unbounded();
     let (evt_tx, evt_rx) = async_channel::unbounded();
     let handle = Handle {
         cmds: cmd_tx,
         events: evt_rx,
     };
-    let drive = drive(identity, Shared::default(), cmd_rx, evt_tx);
+    let drive = drive(identity, config, Shared::default(), cmd_rx, evt_tx);
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(move || {
         match tokio::runtime::Builder::new_current_thread()
@@ -269,6 +312,7 @@ pub fn spawn(identity: Identity) -> Handle {
 /// application commands until the command channel closes.
 async fn drive(
     identity: Identity,
+    config: RuntimeConfig,
     shared: Shared,
     cmd_rx: async_channel::Receiver<Command>,
     evt_tx: async_channel::Sender<Event>,
@@ -283,7 +327,14 @@ async fn drive(
         log::warn!("collab: {message}");
         send_evt(Event::Error { session, message })
     };
-    let endpoint = match Endpoint::builder(presets::N0)
+    let builder = match infra_builder(&config.infra) {
+        Ok(builder) => builder,
+        Err(e) => {
+            error(None, e).await;
+            return;
+        }
+    };
+    let endpoint = match builder
         .secret_key(identity.secret_key())
         .alpns(vec![SYNC_ALPN.to_vec(), iroh_gossip::ALPN.to_vec()])
         .bind()
@@ -445,6 +496,36 @@ async fn drive(
     // The application dropped its handle: shut the endpoint down.
     router.shutdown().await.ok();
     endpoint.close().await;
+}
+
+/// The endpoint builder for the configured [`Infra`].
+///
+/// Custom infrastructure starts from iroh's minimal preset, so nothing n0
+/// remains; an unparsable URL is an error rather than a silent fallback (a
+/// self-hosted deployment must not leak onto n0's services by accident).
+fn infra_builder(infra: &Infra) -> Result<iroh::endpoint::Builder, String> {
+    match infra {
+        Infra::N0 => Ok(Endpoint::builder(presets::N0)),
+        Infra::Custom { relays, pkarr } => {
+            let mut builder = Endpoint::builder(presets::Minimal);
+            builder = if relays.is_empty() {
+                builder.relay_mode(RelayMode::Disabled)
+            } else {
+                let map = RelayMap::try_from_iter(relays.iter().map(|s| s.as_str()))
+                    .map_err(|e| format!("invalid relay url: {e}"))?;
+                builder.relay_mode(RelayMode::Custom(map))
+            };
+            if let Some(pkarr) = pkarr {
+                let url: url::Url = pkarr
+                    .parse()
+                    .map_err(|e| format!("invalid pkarr url: {e}"))?;
+                builder = builder
+                    .address_lookup(PkarrPublisher::builder(url.clone()))
+                    .address_lookup(PkarrResolver::builder(url));
+            }
+            Ok(builder)
+        }
+    }
 }
 
 /// The session's gossip topic id: a hash of the session id under a protocol

@@ -19,6 +19,7 @@ log.workspace = true
 n0-future.workspace = true
 postcard.workspace = true
 serde.workspace = true
+url.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.44", default-features = false, features = ["rt"] }

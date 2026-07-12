@@ -21,6 +21,7 @@ pub mod reg;
 pub mod response;
 pub mod sugar;
 pub mod sync;
+pub mod ui_tree;
 pub mod view;
 pub mod widget;
 

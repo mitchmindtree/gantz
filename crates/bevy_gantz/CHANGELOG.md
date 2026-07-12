@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/nannou-org/gantz/compare/bevy_gantz-v0.3.1...bevy_gantz-v0.4.0) - 2026-07-12
+
+### Added
+
+- Settings -> Audio tab (status + scheduling lead + mute)
+- *(bevy_gantz)* stamp entrypoint firing time into %args
+- *(storage)* add BatchWriter, a buffering Save impl
+- *(persist)* log persist duration and on-disk counts
+- *(bevy_gantz)* drive recompiles from committed CA; commit at edit sites ([#159](https://github.com/nannou-org/gantz/pull/159))
+- *(bevy_gantz)* persist and apply graph descriptions
+- *(head)* preserve VM state across same-graph navigation
+
+### Fixed
+
+- *(bevy_gantz)* ChangedEvent carries old/new commit addrs
+- *(bevy_gantz)* preserve node state across undo/redo and navigation
+- *(gantz)* order-insensitive log layer, document assembly
+- *(bevy,egui)* order-insensitive EntrypointFns seeding
+- *(docs)* Various grammatical cleanup in comments
+
+### Other
+
+- *(bevy)* move DSP settings onto the domain seam
+- *(dsp)* rename the Audio* abstraction to Dsp*
+- *(license)* multi-license the repo; require explicit per-crate license
+- *(node)* rename frame! to update!
+- *(persist)* stagger egui memory onto a separate debounce
+- *(persist)* persist registry incrementally
+- house NodeUi response types in response.rs; rename ValidateCommitted
+
 ## [0.3.1](https://github.com/nannou-org/gantz/compare/bevy_gantz-v0.3.0...bevy_gantz-v0.3.1) - 2026-06-21
 
 ### Other

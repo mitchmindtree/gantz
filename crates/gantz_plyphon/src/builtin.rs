@@ -1,6 +1,6 @@
 //! Builtin specs for the DSP node set.
 
-use crate::node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Unpack};
+use crate::node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Sum, Unpack};
 use gantz_core::{Builtin, FromNode};
 
 /// Builtin specs for the DSP node set.
@@ -12,6 +12,7 @@ where
         + FromNode<Pack>
         + FromNode<ScopeOut>
         + FromNode<SinOsc>
+        + FromNode<Sum>
         + FromNode<Unpack>,
 {
     vec![
@@ -21,6 +22,7 @@ where
         Builtin::new("~pack", || N::from_node(Pack::default())),
         Builtin::new("~scopeout", || N::from_node(ScopeOut::default())),
         Builtin::new("~sinosc", || N::from_node(SinOsc::default())),
+        Builtin::new("~sum", || N::from_node(Sum::default())),
         Builtin::new("~unpack", || N::from_node(Unpack::default())),
     ]
 }

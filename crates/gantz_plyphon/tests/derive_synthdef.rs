@@ -6,7 +6,7 @@ use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
     Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, NodeRate, Out, Pack, ScopeOut,
-    Signal, SinOsc, ToNodeDsp, Unpack, derive_synthdef, structural_sig,
+    Signal, SinOsc, Sum, ToNodeDsp, Unpack, derive_synthdef, structural_sig,
 };
 use plyphon::synthdef::{InputRef, SynthDef, UnitSpec};
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, Rate, World, engine};
@@ -21,6 +21,7 @@ enum N {
     Out(Out),
     ScopeOut(ScopeOut),
     Pack(Pack),
+    Sum(Sum),
     Unpack(Unpack),
     Other,
 }
@@ -33,6 +34,7 @@ impl ToNodeDsp for N {
             N::Out(o) => Some(o),
             N::ScopeOut(t) => Some(t),
             N::Pack(p) => Some(p),
+            N::Sum(s) => Some(s),
             N::Unpack(u) => Some(u),
             N::Other => None,
         }
@@ -1392,5 +1394,58 @@ fn summed_sines_are_both_audible() {
     assert!(
         m220 > 5.0 * m550 && m330 > 5.0 * m550,
         "both summands must be audible: m220={m220}, m330={m330}, m550={m550}",
+    );
+}
+
+#[test]
+fn sum_node_mixes_mono_and_stereo() {
+    // `~sum` of a mono sine and a stereo `~pack`: the node's output is the
+    // stereo unity-gain mix (one add per channel, the mono input broadcast),
+    // exactly the implicit-summing width policy as an explicit node.
+    let mut g = Graph::<N>::default();
+    let m = g.add_node(N::SinOsc(SinOsc::default()));
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let pk = g.add_node(N::Pack(Pack::default()));
+    let sm = g.add_node(N::Sum(Sum::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s0, pk, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, pk, Edge::new(0.into(), 1.into()));
+    g.add_edge(m, sm, Edge::new(0.into(), 0.into()));
+    g.add_edge(pk, sm, Edge::new(0.into(), 1.into()));
+    g.add_edge(sm, o, Edge::new(0.into(), 0.into()));
+    let def = derive_synthdef(&g, 2, "t").expect("derive").def;
+
+    let adds = sum_units(&def);
+    assert_eq!(adds.len(), 2, "one add per output channel");
+    let (a, b) = (unit_refs(adds[0]), unit_refs(adds[1]));
+    let shared: Vec<_> = a.iter().filter(|r| b.contains(r)).collect();
+    assert_eq!(shared.len(), 1, "the mono input broadcasts into both");
+    let out = def.units.iter().find(|u| u.name == "Out").expect("Out");
+    assert_eq!(out.inputs.len(), 1 + 2, "the stereo mix reaches both buses");
+}
+
+#[test]
+fn sum_node_with_single_input_is_unit_free() {
+    // A count-1 (or singly-fed) `~sum` passes its input through with no
+    // units, so it derives identically to a plain wire.
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let mut sum = Sum::default();
+    sum.set_count(1);
+    let sm = g.add_node(N::Sum(sum));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, sm, Edge::new(0.into(), 0.into()));
+    g.add_edge(sm, o, Edge::new(0.into(), 0.into()));
+    let def = derive_synthdef(&g, 1, "t").expect("derive").def;
+    assert!(sum_units(&def).is_empty());
+    // The same unit chain as a bare `~sinosc -> ~out` (params differ only by
+    // node path).
+    let bare = derive_synthdef(&sine_to_out(), 1, "t").expect("derive").def;
+    let names = |d: &SynthDef| d.units.iter().map(|u| u.name.clone()).collect::<Vec<_>>();
+    assert_eq!(
+        names(&def),
+        names(&bare),
+        "a pass-through ~sum leaves no trace in the def",
     );
 }

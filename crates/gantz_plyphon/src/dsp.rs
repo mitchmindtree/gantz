@@ -165,7 +165,9 @@ pub trait NodeDsp {
     /// `path` is the node's path within the graph (e.g. `[2]` for the node at
     /// index 2 of a flat graph). Use it to name any control [`Param`]s
     /// uniquely within the synthdef (see [`param_name`](crate::param::param_name)).
-    /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs). An unconnected
+    /// `inputs` has length [`n_dsp_inputs`](Self::n_dsp_inputs), each input
+    /// arriving pre-summed (a multi-edge input is the unity-gain mix of its
+    /// summands, [`sum_signals`]). An unconnected
     /// input is [`Signal::silent`]`(1)` (mono silence). Params should broadcast
     /// across an input's channels (e.g. `~lag` emits one `Lag` unit per channel,
     /// all sharing the one `dur` param).
@@ -422,6 +424,7 @@ pub fn node_dsp_of(any: &dyn std::any::Any) -> Option<&dyn NodeDsp> {
         .or_else(|| probe::<crate::Lag>(any))
         .or_else(|| probe::<crate::ScopeOut>(any))
         .or_else(|| probe::<crate::Pack>(any))
+        .or_else(|| probe::<crate::Sum>(any))
         .or_else(|| probe::<crate::Unpack>(any))
         .or_else(|| probe::<crate::Bus>(any))
 }
@@ -526,6 +529,7 @@ mod tests {
         check::<crate::Lag>();
         check::<crate::ScopeOut>();
         check::<crate::Pack>();
+        check::<crate::Sum>();
         check::<crate::Unpack>();
         check::<crate::Bus>();
     }

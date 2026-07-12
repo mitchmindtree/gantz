@@ -11,4 +11,5 @@ pub mod out;
 pub mod pack;
 pub mod scope_out;
 pub mod sin_osc;
+pub mod sum;
 pub mod unpack;

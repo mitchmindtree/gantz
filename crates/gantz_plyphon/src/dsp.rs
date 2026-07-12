@@ -216,12 +216,13 @@ pub const FADE_LAG: f32 = 0.05;
 
 /// Records a synthdef *fade gain* - a driver-owned param scaling a sink's whole
 /// output - so the audio driver can fade the synth in and out across a
-/// crossfaded replacement (the respawn de-click). The driver patches the
-/// param's `default` from `1.0` to `0.0` before install (the synth spawns
-/// silent. [`structural_sig`](crate::structural_sig) excludes defaults) and
+/// crossfaded replacement (the respawn de-click). The default is baked at
+/// `0.0` so the synth spawns silent without any def mutation, and the driver
 /// ramps it via the param's own `LagControl` - to `1.0` once the synth is up,
-/// to `0.0` ahead of a deferred free. Fade gains have NO [`ParamBinding`]: no
-/// node state feeds them, the driver alone drives them.
+/// to `0.0` ahead of a deferred free. [`structural_sig`](crate::structural_sig)
+/// excludes defaults, so the baked `0.0` does not churn the sig. Fade gains
+/// have NO [`ParamBinding`]: no node state feeds them, the driver alone drives
+/// them.
 #[derive(Clone, Copy, Debug)]
 pub struct GainRef {
     /// The param's index within the synthdef's `params`.
@@ -232,9 +233,9 @@ pub struct GainRef {
 
 /// Records a monitor (`~scopeout`) node's `ScopeOut`, so the audio driver can cue a live
 /// scope stream and route its samples into the right node's ring-buffer state,
-/// capped at `size`. The `ScopeOut`'s `bufnum` input is a placeholder in the derived
-/// def. The driver allocates a globally-unique cued index and patches the unit at
-/// `scope_unit` before installing the def.
+/// capped at `size`. The `ScopeOut`'s `bufnum` is a no-lag control param in the
+/// derived def; the driver allocates a globally-unique cued index and sets it
+/// via `set_control` after spawning (no def mutation).
 #[derive(Clone, Debug)]
 pub struct ScopeOutBinding {
     /// The monitor node's path within the graph (where its ring state lives).
@@ -244,9 +245,11 @@ pub struct ScopeOutBinding {
     /// The number of channels the `ScopeOut` streams (`cue_scope`'s width) -
     /// the width of the monitored input [`Signal`], inferred at derive time.
     pub channels: usize,
-    /// The index within the def's `units` of this monitor's `ScopeOut`, so the driver
-    /// can patch its `bufnum` (input 0) to the cued scope-stream index.
+    /// The index within the def's `units` of this monitor's `ScopeOut`.
     pub scope_unit: usize,
+    /// The no-lag control param the driver sets to the cued scope-stream index
+    /// via `set_control` after spawning.
+    pub bufnum_param: usize,
 }
 
 /// Accumulates the [`UnitSpec`]s and [`Param`]s of a synthdef as nodes emit them.
@@ -295,16 +298,30 @@ impl DspBuilder {
         index as u32
     }
 
+    /// Declare a driver-owned, no-lag control param (no [`ParamBinding`]),
+    /// returning its index for [`InputRef::Param`]. Used for per-instance
+    /// wiring - bus indices, scope bufnums - that the driver sets via
+    /// `set_control` after spawning. No lag, since a lagged bus index would
+    /// glide through wrong buses; the default is `0.0`.
+    pub fn push_control_param(&mut self, path: &[usize], label: &str) -> u32 {
+        let index = self.params.len();
+        self.params
+            .push(Param::control(crate::param::param_name(path, label), 0.0));
+        index as u32
+    }
+
     /// Declare a driver-controlled *fade gain* for the sink at `path`: a lagged
-    /// param (default `1.0`, [`FADE_LAG`] ramp) that must scale the sink's whole
+    /// param (default `0.0`, [`FADE_LAG`] ramp) that must scale the sink's whole
     /// output, recorded as a [`GainRef`] but with NO [`ParamBinding`] - node
-    /// state never feeds it. the driver alone drives it across a crossfaded
-    /// replacement. Returns the param's index for [`InputRef::Param`].
+    /// state never feeds it. The default is baked at `0.0` so the synth spawns
+    /// silent; the driver ramps it to `1.0` via `set_control` once the synth is
+    /// up (and to `0.0` ahead of a deferred free). Returns the param's index
+    /// for [`InputRef::Param`].
     pub fn push_fade_gain(&mut self, path: &[usize]) -> u32 {
         let index = self.params.len();
         self.params.push(Param::lag(
             crate::param::param_name(path, "fade"),
-            1.0,
+            0.0,
             FADE_LAG,
         ));
         self.gains.push(GainRef {
@@ -317,20 +334,23 @@ impl DspBuilder {
     /// Declare a monitor for the dsp node at `path`, recording its [`ScopeOutBinding`]
     /// so the driver can cue a `channels`-wide scope stream and route its samples into
     /// the node's ring state (capped at `size` frames). `scope_unit` is the index of the
-    /// node's `ScopeOut` unit (from [`push_unit`](Self::push_unit)), so the driver can
-    /// patch its `bufnum`.
+    /// node's `ScopeOut` unit (from [`push_unit`](Self::push_unit)); `bufnum_param` is
+    /// the no-lag control param the driver sets to the cued scope-stream index via
+    /// `set_control` after spawning.
     pub fn push_monitor(
         &mut self,
         path: &[usize],
         size: usize,
         channels: usize,
         scope_unit: usize,
+        bufnum_param: usize,
     ) {
         self.monitors.push(ScopeOutBinding {
             node_path: path.to_vec(),
             size,
             channels,
             scope_unit,
+            bufnum_param,
         });
     }
 

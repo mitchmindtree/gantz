@@ -501,12 +501,69 @@ mod tests {
         );
     }
 
-    /// A nested graph of DSP nodes sounds through the flattening pass: the
-    /// child's `~lag` splices into the parent's synthdef carrying its nested
-    /// path, and that path reaches the node's live param state in the VM -
-    /// exactly the contract the audio driver's param sync relies on. Guards
-    /// the whole nested-DSP pipeline (registry ref resolution, flattening,
-    /// derivation, VM state bridge) end to end with the app's real node type.
+    /// A head graph with `~sinosc -> ~out` plus unconnected `inlet`/`outlet`
+    /// nodes flattens correctly (root-level boundaries stay as inert non-DSP
+    /// markers) and derives a sounding synthdef. Regression guard for the
+    /// GUI's `flatten_from_registry` path with `Box<dyn Node>`.
+    #[test]
+    fn head_graph_with_unconnected_inlets_derives_sound() {
+        use std::time::Duration;
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+
+        let text = "\
+(graph head
+  (s ~sinosc) (out ~out) (i inlet) (o outlet)
+  (-> s (out 0)))";
+        let export: gantz_egui::export::Export<G> =
+            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("from_str");
+        let head = gantz_ca::Head::Branch("head".into());
+        let graph = export.registry.head_graph(&head).expect("head graph");
+
+        let flat = gantz_plyphon::flatten_from_registry(graph, &export.registry).expect("flatten");
+        // Root inlet/outlet survive as markers (the head graph's interface);
+        // they are non-DSP, so derivation ignores them.
+        assert_eq!(
+            flat.node_count(),
+            4,
+            "sin + out + the two root boundary markers"
+        );
+        assert_eq!(flat.edge_count(), 1, "the sin -> out edge survives");
+        let markers = flat
+            .node_indices()
+            .filter(|&n| {
+                matches!(
+                    flat[n],
+                    gantz_plyphon::Flat::Inlet { .. } | gantz_plyphon::Flat::Outlet { .. }
+                )
+            })
+            .count();
+        assert_eq!(markers, 2, "the boundaries are kept as markers");
+
+        let regions = gantz_plyphon::derive_synthdefs(&flat, 1, "head").expect("derive");
+        assert_eq!(regions.len(), 1, "one region");
+        let names: Vec<&str> = regions[0]
+            .derived
+            .def
+            .units
+            .iter()
+            .map(|u| u.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["SinOsc", "BinaryOpUGen", "BinaryOpUGen", "Out"]);
+        assert_eq!(
+            regions[0].derived.gains.len(),
+            1,
+            "the out carries a fade gain"
+        );
+    }
+
+    /// A nested graph of DSP nodes lowers through the instancing pass: the
+    /// ref stays an instance marker, the child's `~lag` derives into the
+    /// shared child def, and the resolved part's binding carries the lag's
+    /// ABSOLUTE nested path - which reaches the node's live param state in
+    /// the VM, exactly the contract the audio driver's param sync relies on.
+    /// Guards the whole nested-DSP pipeline (registry ref resolution,
+    /// flattening, template derivation, VM state bridge) end to end with the
+    /// app's real node type.
     #[test]
     fn nested_dsp_graph_flattens_derives_and_bridges_state() {
         use gantz_egui::sync::AsNamedRef;
@@ -548,10 +605,22 @@ mod tests {
             .index();
 
         let flat = gantz_plyphon::flatten_from_registry(parent, &export.registry).expect("flatten");
-        let derived = gantz_plyphon::derive_synthdef(&flat, 1, "test").expect("derive");
-        let binding = derived
-            .params
+        // The DSP-bearing child lowers as an instance marker by default.
+        let markers = flat
+            .node_indices()
+            .filter(|&n| matches!(flat[n], gantz_plyphon::Flat::Instance { .. }))
+            .count();
+        assert_eq!(markers, 1, "the ref stays an instance marker");
+        let children =
+            gantz_plyphon::flatten_instance_children(&flat, &export.registry).expect("children");
+        let resolve = |ca: &gantz_ca::ContentAddr| children.get(ca);
+        let mut cache = gantz_plyphon::DefCache::new();
+        let template =
+            gantz_plyphon::derive_template(&flat, 1, &resolve, &mut cache).expect("derive");
+        let parts = gantz_plyphon::instantiate(&template, &cache);
+        let binding = parts
             .iter()
+            .flat_map(|p| p.params.iter())
             .find(|b| b.node_path == [ref_ix, lag_ix])
             .expect("a param binding keyed by the lag's nested path");
 
@@ -567,6 +636,45 @@ mod tests {
             .expect("nested lag param state");
         assert_eq!(value, f64::from(gantz_plyphon::Lag::DEFAULT_DUR));
         assert!(pending.is_empty());
+    }
+
+    /// Two references to one DSP child share a single derived variant: one
+    /// `DefCache` entry, both resolved parts naming the same content-hashed
+    /// def, with per-instance absolute binding paths. Guards the install-once
+    /// spawn-many contract end to end with the app's real node type.
+    #[test]
+    fn instanced_refs_share_one_variant() {
+        use std::time::Duration;
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+
+        let text = "\
+(graph voice
+  (s ~sinosc) (out ~out)
+  (-> s (out 0)))
+
+(graph env
+  (a (ref voice)) (b (ref voice)))";
+        let export: gantz_egui::export::Export<G> =
+            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("from_str");
+        let head = gantz_ca::Head::Branch("env".into());
+        let parent = export.registry.head_graph(&head).expect("env graph");
+
+        let flat = gantz_plyphon::flatten_from_registry(parent, &export.registry).expect("flatten");
+        let children =
+            gantz_plyphon::flatten_instance_children(&flat, &export.registry).expect("children");
+        let resolve = |ca: &gantz_ca::ContentAddr| children.get(ca);
+        let mut cache = gantz_plyphon::DefCache::new();
+        let template =
+            gantz_plyphon::derive_template(&flat, 1, &resolve, &mut cache).expect("derive");
+        assert_eq!(cache.len(), 1, "both refs share one variant");
+        let parts = gantz_plyphon::instantiate(&template, &cache);
+        assert_eq!(parts.len(), 2, "one spawn per instance");
+        assert_eq!(parts[0].def.name, parts[1].def.name, "one shared def");
+        assert_ne!(parts[0].key, parts[1].key, "distinct identities");
+        let mut prefixes: Vec<usize> = parts.iter().map(|p| p.params[0].node_path[0]).collect();
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        assert_eq!(prefixes.len(), 2, "bindings carry per-instance prefixes");
     }
 
     /// `~unpack`'s placeholder expr honours the multi-output contract for any

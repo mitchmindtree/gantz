@@ -71,7 +71,10 @@ fn derives_expected_units() {
         "gain has a default de-click lag"
     );
     assert!(def.params[2].name.ends_with("/fade"));
-    assert_eq!(def.params[2].default, 1.0, "fade defaults to unity");
+    assert_eq!(
+        def.params[2].default, 0.0,
+        "fade defaults to silence (driver ramps in)"
+    );
 
     // Bindings map each param back to its dsp node (sine at [0], out at [1]);
     // the fade has NO binding - the driver alone drives it.
@@ -298,12 +301,13 @@ fn scopeout_joins_output_in_one_def() {
     assert_eq!(mon.size, ScopeOut::DEFAULT_SIZE);
 
     // The binding's `scope_unit` names the ScopeOut; its bufnum (input 0) is the
-    // placeholder the driver patches, and its value input (1) is the tapped sine.
+    // no-lag control param the driver sets via `set_control`, and its value
+    // input (1) is the tapped sine.
     let scope = &derived.def.units[mon.scope_unit];
     assert_eq!(scope.name, "ScopeOut", "scope_unit must name the ScopeOut");
     assert!(
-        matches!(scope.inputs[0], InputRef::Constant(_)),
-        "bufnum is a patchable constant placeholder",
+        matches!(scope.inputs[0], InputRef::Param(_)),
+        "bufnum is a no-lag control param the driver sets post-spawn",
     );
     assert!(
         matches!(scope.inputs[1], InputRef::Unit { .. }),
@@ -645,12 +649,12 @@ fn scopeout_streams_every_sample() {
     let t = g.add_node(N::ScopeOut(ScopeOut::default()));
     g.add_edge(s, t, Edge::new(0.into(), 0.into()));
 
-    let mut derived = derive_synthdef(&g, 1, "t").expect("derive");
-    // The driver patches the ScopeOut's bufnum (at the monitor's `scope_unit`) to the
-    // cued scope index; here that index is 0.
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    // The driver sets the ScopeOut's bufnum param to the cued scope index via
+    // `set_control` after spawning; here that index is 0 (the param default).
+    let bufnum_param = derived.monitors[0].bufnum_param;
     let scope_unit = derived.monitors[0].scope_unit;
     assert_eq!(derived.def.units[scope_unit].name, "ScopeOut");
-    derived.def.units[scope_unit].inputs[0] = InputRef::Constant(0.0);
 
     // A pool generous enough to hold the whole run, so nothing overruns before the
     // single drain at the end (one chunk per block).
@@ -665,9 +669,12 @@ fn scopeout_streams_every_sample() {
         .cue_scope(0, 1, SR as f64, BLOCK, blocks + 2)
         .expect("cue_scope");
     controller.add_synthdef(derived.def);
-    controller
+    let node = controller
         .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
         .expect("synth_new");
+    controller
+        .set_control(node, bufnum_param, 0.0)
+        .expect("set bufnum");
 
     // Render a stretch of audio, then drain every streamed sample.
     let mut buf = vec![0.0f32; BLOCK];
@@ -738,17 +745,23 @@ fn render(world: &mut World, frames: usize) -> Vec<f32> {
 #[test]
 fn derived_synth_plays_expected_tone() {
     let g = sine_to_out();
-    let def = derive_synthdef(&g, 1, "test").expect("derive").def;
+    let derived = derive_synthdef(&g, 1, "test").expect("derive");
 
     let (mut controller, _nrt, mut world) = engine(Options {
         sample_rate: SR as f64,
         output_channels: 1,
         ..Options::default()
     });
-    controller.add_synthdef(def);
-    controller
+    controller.add_synthdef(derived.def);
+    let node = controller
         .synth_new("test", ROOT_GROUP_ID, AddAction::Tail)
         .expect("synth_new");
+    {
+        let mut backend = Embedded::new(&mut controller);
+        for gain in &derived.gains {
+            backend.set_control(node, gain.index, 1.0).expect("fade in");
+        }
+    }
 
     // The freq/gain params default to the nodes' nominal defaults (220 Hz, 0.2), so
     // the synth plays a 220 Hz tone with no set_control.
@@ -803,6 +816,12 @@ fn stereo_pack_plays_per_channel_tones() {
     let node = controller
         .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
         .expect("synth_new");
+    {
+        let mut backend = Embedded::new(&mut controller);
+        for gain in &derived.gains {
+            backend.set_control(node, gain.index, 1.0).expect("fade in");
+        }
+    }
     Embedded::new(&mut controller)
         .set_control(node, s1_freq, 330.0)
         .expect("re-tune sine1");
@@ -856,6 +875,12 @@ fn scheduled_control_change_takes_effect_at_its_time() {
     let node = controller
         .synth_new("test", ROOT_GROUP_ID, AddAction::Tail)
         .expect("synth_new");
+    {
+        let mut backend = Embedded::new(&mut controller);
+        for gain in &derived.gains {
+            backend.set_control(node, gain.index, 1.0).expect("fade in");
+        }
+    }
 
     // Schedule freq -> 440 Hz at 0.25 s on the engine's OSC clock.
     let osc = |secs: f64| (secs * OSC_UNITS_PER_SEC) as u64;
@@ -920,28 +945,30 @@ fn out_registers_a_fade_gain() {
 
 #[test]
 fn zeroed_gain_default_keeps_sig() {
-    // The driver patches gain defaults to 0.0 AFTER computing the sig (the
-    // spawn-silent half of the crossfade); the sig must not see the patch, or
-    // every re-derive would spuriously respawn.
+    // The fade default is baked at 0.0 (the spawn-silent half of the crossfade);
+    // the sig must exclude defaults, or every re-derive would spuriously
+    // respawn. Changing the default to any value must leave the sig untouched.
     let g = sine_to_out();
     let mut derived = derive_synthdef(&g, 1, "t").expect("derive");
+    for g in &derived.gains {
+        assert_eq!(derived.def.params[g.index].default, 0.0, "fade bakes 0.0");
+    }
     let sig = structural_sig(&derived.def);
     for g in &derived.gains {
-        derived.def.params[g.index].default = 0.0;
+        derived.def.params[g.index].default = 1.0;
     }
     assert_eq!(sig, structural_sig(&derived.def));
 }
 
 #[test]
 fn patched_fade_default_fades_in() {
-    // The crossfade's fade-in half: with the fade default patched to 0.0 the
+    // The crossfade's fade-in half: the fade default is baked at 0.0 so the
     // synth spawns SILENT (defaults seed the lag state too - no ramp-from-zero
     // surprise in reverse), and restoring the fade to unity ramps the output in
     // over `FADE_LAG` rather than stepping.
     let g = sine_to_out();
-    let mut derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
     let fade = derived.gains[0].index;
-    derived.def.params[fade].default = 0.0;
 
     let (mut controller, _nrt, mut world) = engine(Options {
         sample_rate: SR as f64,
@@ -993,13 +1020,15 @@ fn redefining_a_def_name_keeps_old_synth_playing() {
     let old = controller
         .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
         .expect("old synth");
+    Embedded::new(&mut controller)
+        .set_control(old, fade, 1.0)
+        .expect("fade old in");
     let before = render(&mut world, SR as usize / 10);
     assert!(rms(&before) > 0.05, "old synth must sound");
 
-    // Re-add the SAME name (a fresh derive, fade default patched to 0.0 as the
-    // driver would): the old synth keeps playing, unaffected.
-    let mut derived_new = derive_synthdef(&g, 1, "t").expect("derive");
-    derived_new.def.params[fade].default = 0.0;
+    // Re-add the SAME name (a fresh derive, fade default baked at 0.0): the old
+    // synth keeps playing, unaffected.
+    let derived_new = derive_synthdef(&g, 1, "t").expect("derive");
     controller.add_synthdef(derived_new.def);
     let after_redef = render(&mut world, SR as usize / 10);
     assert!(
@@ -1123,17 +1152,23 @@ fn kr_source_reaches_output() {
     let s = g.add_node(N::SinOsc(sine));
     let o = g.add_node(N::Out(Out::default()));
     g.add_edge(s, o, Edge::new(0.into(), 0.into()));
-    let def = derive_synthdef(&g, 1, "t").expect("derive").def;
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
 
     let (mut controller, _nrt, mut world) = engine(Options {
         sample_rate: SR as f64,
         output_channels: 1,
         ..Options::default()
     });
-    controller.add_synthdef(def);
-    controller
+    controller.add_synthdef(derived.def);
+    let node = controller
         .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
         .expect("synth_new");
+    {
+        let mut backend = Embedded::new(&mut controller);
+        for gain in &derived.gains {
+            backend.set_control(node, gain.index, 1.0).expect("fade in");
+        }
+    }
 
     let out = render(&mut world, SR as usize / 2);
     assert!(rms(&out) > 0.02, "kr source must be audible");

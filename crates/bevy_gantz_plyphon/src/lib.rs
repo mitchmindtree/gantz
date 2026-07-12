@@ -4,11 +4,14 @@
 //! stream (its own audio thread, running [`plyphon::World::fill_at`] so the engine
 //! clock is anchored to the host) and keeps the [`plyphon::Controller`] +
 //! [`plyphon::Nrt`] handles. Each update, after [`bevy_gantz::VmSet`], it derives
-//! one synthdef per `~bus`-cut *region* of each open head's DSP subgraph (rooted
-//! at its `~out` outputs and `~scopeout` monitors) and reconciles them with the
-//! running synths via the [`gantz_plyphon::Backend`] seam whenever the head's
-//! committed graph changes: unchanged regions keep their synths (and their unit
-//! state - oscillator phase, delay lines), changed ones are crossfade-replaced.
+//! one synthdef per *part* of each open head's DSP subgraph (rooted at its
+//! `~out` outputs and `~scopeout` monitors): the `~bus`-and-stage-cut regions,
+//! plus one spawn per *instanced* nested-graph ref of its child's shared,
+//! content-named defs (installed once, spawned per instance - see
+//! [`gantz_plyphon::instance`]). Parts reconcile with the running synths via
+//! the [`gantz_plyphon::Backend`] seam whenever the head's committed graph
+//! changes: unchanged parts keep their synths (and their unit state -
+//! oscillator phase, delay lines), changed ones are crossfade-replaced.
 //!
 //! The bridge runs both ways: control values drive dsp params via `set_control`,
 //! and each `~scopeout` monitor's scope stream is drained here into the node's
@@ -29,10 +32,11 @@ use cpal::{FromSample, SizedSample};
 use gantz_ca as ca;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    AddAction, AsRefNode, Backend, Embedded, GainRef, ROOT_GROUP_ID, RegionDerived, ToNodeDsp,
-    derive_synthdefs, flatten_from_registry, structural_sig,
+    AddAction, AsRefNode, Backend, BusKey, DefCache, Embedded, GainRef, ROOT_GROUP_ID,
+    ResolvedPart, ToNodeDsp, derive_template, flatten_from_registry, flatten_instance_children,
+    instantiate,
 };
-use plyphon::{Controller, InputRef, Nrt, Options, StreamConsumer, World, engine};
+use plyphon::{Controller, Nrt, Options, StreamConsumer, World, engine};
 // `std::time::Instant` panics ("time not implemented") on `wasm32-unknown-unknown`;
 // `web_time::Instant` shims it to `performance.now()` there and is plain `std::Instant`
 // on native. This clock drives the crossfade fade-out deadlines and the bus-run graveyard.
@@ -257,23 +261,38 @@ struct DspEngine {
 /// `~scopeout`'s scope `StreamConsumer` is `Send` but not `Sync`.
 #[derive(Default)]
 struct HeadSynths {
-    heads: HashMap<Entity, HeadRegions>,
+    heads: HashMap<Entity, HeadParts>,
     scope_alloc: ScopeAlloc,
     bus_alloc: BusAlloc,
+    /// Installed synthdef names -> `(refcount, structural_sig)`. A def is
+    /// installed once per name and reused while its structure is unchanged;
+    /// a structural edit (same name, different sig) re-installs (retiring the
+    /// old compiled def, which running synths keep via their own `Arc`). The
+    /// refcount frees the def only when its last synth is retired. Per-head
+    /// region defs (unique names per region) refcount 0 -> 1 -> 0 as before.
+    shared_defs: HashMap<String, (usize, u64)>,
     /// Crossfade-retired synths still ramping their gains to zero, freed once
     /// their deadline passes (oldest first - entries are pushed in replacement
     /// order). Their scope streams ride along: a stream index must not be
     /// re-cued while the old `ScopeOut` (bufnum baked into its def) can still
     /// write it.
     fading: Vec<FadingSynth>,
+    /// Memoised child templates, shared across heads and frames (content
+    /// addressed, so entries stay valid for as long as their variant recurs).
+    def_cache: DefCache,
 }
 
-/// One open head's running synths: one per boundary-cut region, in region-DAG
+/// One open head's running synths: one per resolved part, in part-DAG
 /// topological order (bus writers before their readers - also their node-tree
 /// order). Empty when the head's graph has no dsp sink.
-struct HeadRegions {
+struct HeadParts {
     graph: ca::GraphAddr,
-    regions: Vec<RegionSynth>,
+    /// Re-run the structural sync next frame even though `graph` is current:
+    /// a spawn failed transiently (command ring full). The ring drains within
+    /// a block and the re-run is convergent - already-spawned parts match by
+    /// key + sig + wiring and are kept.
+    retry: bool,
+    parts: Vec<PartSynth>,
 }
 
 /// A run of consecutive private audio-bus channels.
@@ -294,7 +313,7 @@ struct BusAlloc {
     /// Free runs, sorted by start and coalesced.
     free: Vec<Run>,
     /// Live allocations.
-    allocated: HashMap<(Entity, Vec<usize>), Run>,
+    allocated: HashMap<(Entity, BusKey), Run>,
     /// Quarantined runs, returned to `free` once their deadline passes.
     graveyard: Vec<(Run, Instant)>,
 }
@@ -315,7 +334,7 @@ impl BusAlloc {
     /// width change (the old run is quarantined). `None` = range exhausted.
     fn get_or_alloc(
         &mut self,
-        key: (Entity, Vec<usize>),
+        key: (Entity, BusKey),
         channels: usize,
         now: Instant,
     ) -> Option<Run> {
@@ -341,7 +360,7 @@ impl BusAlloc {
     }
 
     /// Quarantine `key`'s run (if any).
-    fn release(&mut self, key: &(Entity, Vec<usize>), now: Instant) {
+    fn release(&mut self, key: &(Entity, BusKey), now: Instant) {
         if let Some(run) = self.allocated.remove(key) {
             self.graveyard.push((run, now + FADE_GRACE * 2));
         }
@@ -429,9 +448,10 @@ impl ScopeAlloc {
     }
 }
 
-/// The installed synthdef + running synth for one region of a head.
-struct RegionSynth {
-    /// The region's identity across re-derives (`RegionDerived::key`), the
+/// The installed synthdef + running synth for one resolved part of a head
+/// (a top-level region, or one instance's spawn of a shared child region).
+struct PartSynth {
+    /// The part's identity across re-derives (`ResolvedPart::key`), the
     /// driver's match for the keep/replace decision.
     key: u64,
     def_name: String,
@@ -439,6 +459,11 @@ struct RegionSynth {
     /// Structural signature of the running synth's def (excludes param values) -
     /// unchanged across a structural-graph edit means the synth need not respawn.
     sig: u64,
+    /// Hash of the part's bus wiring (keys + widths + params). A wiring change
+    /// with an unchanged def (e.g. an inlet re-routed to another source)
+    /// crossfade-respawns rather than live-switching the bus param - an abrupt
+    /// bus switch clicks, while the respawn reuses the trusted fade machinery.
+    wiring: u64,
     /// One slot per control param, binding a dsp node's state value to its synth
     /// param index, with the last value pushed via `set_control`.
     params: Vec<ParamSlot>,
@@ -578,6 +603,9 @@ fn drive_synths<N>(
     // Tick NRT cleanup off the audio thread (drops freed synths, surfaces events).
     dsp.nrt.process();
     while dsp.nrt.poll().is_some() {}
+    // Drop retired compiled defs once the audio thread is done with them.
+    // Frees without a follow-up install would otherwise linger in `retiring`.
+    dsp.controller.reap_retired_defs();
 
     let out_channels = dsp.out_channels;
     let sample_rate = dsp.sample_rate;
@@ -595,14 +623,23 @@ fn drive_synths<N>(
         // flatten error (a ref cycle or an unresolvable ref, both forbidden
         // upstream): keep the previous synths, parking the head at this graph
         // address so the error logs once per commit rather than every frame.
-        if state.heads.get(&entity).map(|h| h.graph) != Some(graph_ca) {
-            match flatten_from_registry(&wg.0, &registry) {
-                Ok(flat) => structural_sync(
+        let stale = state
+            .heads
+            .get(&entity)
+            .is_none_or(|h| h.graph != graph_ca || h.retry);
+        if stale {
+            let flat_children = flatten_from_registry(&wg.0, &registry).and_then(|flat| {
+                let children = flatten_instance_children(&flat, &registry)?;
+                Ok((flat, children))
+            });
+            match flat_children {
+                Ok((flat, children)) => structural_sync(
                     &mut dsp.controller,
                     state,
                     entity,
                     graph_ca,
                     &flat,
+                    &children,
                     out_channels,
                     sample_rate,
                 ),
@@ -622,7 +659,7 @@ fn drive_synths<N>(
         let (Some(head), Some(vm)) = (state.heads.get_mut(&entity), vms.get_mut(&entity)) else {
             continue;
         };
-        for synth in &mut head.regions {
+        for synth in &mut head.parts {
             let node_id = synth.node_id;
             let mut backend = Embedded::new(&mut dsp.controller);
             for slot in &mut synth.params {
@@ -689,10 +726,10 @@ fn drive_synths<N>(
         .collect();
     for e in stale {
         if let Some(head) = state.heads.remove(&e) {
-            for synth in head.regions {
+            for synth in head.parts {
                 let def_name = synth.def_name.clone();
                 fade_out(&mut dsp.controller, state, e, synth);
-                let _ = Embedded::new(&mut dsp.controller).free_synthdef(&def_name);
+                release_def(&mut dsp.controller, &mut state.shared_defs, &def_name);
             }
         }
         state.bus_alloc.release_head(e, Instant::now());
@@ -734,9 +771,10 @@ fn expire_fades(fading: &mut Vec<FadingSynth>, now: Instant) -> Vec<FadingSynth>
 /// synths: a region whose key + structural signature both match keeps its synth
 /// untouched (its unit state - oscillator phase, delay lines - survives exactly).
 /// A changed region is crossfade-replaced. A disappeared region fades out. Every
-/// signature is computed on the *unpatched* def - `ScopeOut` bufnums, bus
-/// channels and fade defaults are all placeholders at that point - so a
-/// re-derive of the same graph never spuriously respawns.
+/// signature is computed on the final def - bus indices, `ScopeOut` bufnums
+/// and fade defaults are all no-lag control params / baked defaults excluded
+/// from [`structural_sig`] - so a re-derive of the same graph never spuriously
+/// respawns (and the driver never mutates a def copy).
 ///
 /// Park `entity` at `graph_ca` without touching its running synths, so an
 /// unactionable commit (a flatten or derive error) is not retried (and its
@@ -747,9 +785,10 @@ fn park_head(state: &mut HeadSynths, entity: Entity, graph_ca: ca::GraphAddr) {
         None => {
             state.heads.insert(
                 entity,
-                HeadRegions {
+                HeadParts {
                     graph: graph_ca,
-                    regions: Vec::new(),
+                    retry: false,
+                    parts: Vec::new(),
                 },
             );
         }
@@ -769,27 +808,28 @@ fn structural_sync<N>(
     state: &mut HeadSynths,
     entity: Entity,
     graph_ca: ca::GraphAddr,
-    graph: &Graph<N>,
+    graph: &Graph<gantz_plyphon::Flat<N>>,
+    children: &HashMap<gantz_ca::ContentAddr, Graph<gantz_plyphon::Flat<N>>>,
     out_channels: usize,
     sample_rate: f64,
 ) where
     N: ToNodeDsp,
 {
     let now = Instant::now();
-    let prefix = format!("gantz-head-{}", entity.index());
     let derive_start = Instant::now();
-    let derived_result = derive_synthdefs(graph, out_channels, &prefix);
-    log::debug!("Derived synthdef ({:?})", derive_start.elapsed());
-    let derived = match derived_result {
-        Ok(regions) => regions,
+    let resolve = |ca: &gantz_ca::ContentAddr| children.get(ca);
+    let template_result = derive_template(graph, out_channels, &resolve, &mut state.def_cache);
+    log::debug!("Derived synthdef template ({:?})", derive_start.elapsed());
+    let derived: Vec<ResolvedPart> = match template_result {
+        Ok(template) => instantiate(&template, &state.def_cache),
         // No dsp sink to root any synthdef at: fade every region out. Freeing
         // the defs now is safe - a fading synth holds its own compiled copy.
         Err(gantz_plyphon::DeriveError::NoSink) => {
             if let Some(head) = state.heads.remove(&entity) {
-                for synth in head.regions {
+                for synth in head.parts {
                     let def_name = synth.def_name.clone();
                     fade_out(controller, state, entity, synth);
-                    let _ = Embedded::new(controller).free_synthdef(&def_name);
+                    release_def(controller, &mut state.shared_defs, &def_name);
                 }
             }
             state.bus_alloc.release_head(entity, now);
@@ -797,65 +837,74 @@ fn structural_sync<N>(
             // graphs don't re-derive every frame.
             state.heads.insert(
                 entity,
-                HeadRegions {
+                HeadParts {
                     graph: graph_ca,
-                    regions: Vec::new(),
+                    retry: false,
+                    parts: Vec::new(),
                 },
             );
             return;
         }
-        // A bus cycle has no runnable writer-before-reader order: keep the
-        // previous synths, recording the graph address so the error logs once
-        // per commit rather than every frame.
+        // A cycle between parts (`~bus` regions or instances) has no runnable
+        // writer-before-reader order: keep the previous synths, recording the
+        // graph address so the error logs once per commit rather than every
+        // frame.
         Err(gantz_plyphon::DeriveError::BusCycle) => {
-            log::error!(
-                "bevy_gantz_plyphon: `~bus` cycle between regions, keeping the previous synths"
-            );
+            log::error!("bevy_gantz_plyphon: bus cycle between parts, keeping the previous synths");
+            park_head(state, entity, graph_ca);
+            return;
+        }
+        // Instanced-reference failures: keep the previous synths, parking the
+        // head so the error logs once per commit rather than every frame.
+        Err(e @ gantz_plyphon::DeriveError::Unresolved(_))
+        | Err(e @ gantz_plyphon::DeriveError::RefCycle(_)) => {
+            log::error!("bevy_gantz_plyphon: {e:?}, keeping the previous synths");
             park_head(state, entity, graph_ca);
             return;
         }
     };
 
-    // Release bus runs whose boundary nodes are gone from the derivation.
-    let live_buses: HashSet<Vec<usize>> = derived
+    // Release bus runs whose keys are gone from the derivation.
+    let live_buses: HashSet<BusKey> = derived
         .iter()
         .flat_map(|r| r.bus_writes.iter().chain(&r.bus_reads))
-        .map(|b| b.node_path.clone())
+        .map(|b| b.key.clone())
         .collect();
     let dead_buses: Vec<_> = state
         .bus_alloc
         .allocated
         .keys()
-        .filter(|(e, path)| *e == entity && !live_buses.contains(path))
+        .filter(|(e, key)| *e == entity && !live_buses.contains(key))
         .cloned()
         .collect();
     for key in dead_buses {
         state.bus_alloc.release(&key, now);
     }
 
-    // Plan each region: keep the running synth when key + sig match, else spawn
-    // a replacement (fading any predecessor once the replacement is up).
+    // Plan each part: keep the running synth when key + sig + wiring match,
+    // else spawn a replacement (fading any predecessor once the replacement
+    // is up).
     enum Plan {
-        Keep(RegionSynth),
-        Spawn(RegionDerived, u64, Option<RegionSynth>),
+        Keep(PartSynth),
+        Spawn(ResolvedPart, u64, Option<PartSynth>),
     }
     let mut prev = state
         .heads
         .remove(&entity)
-        .map(|h| h.regions)
+        .map(|h| h.parts)
         .unwrap_or_default();
     let mut plans: Vec<Plan> = Vec::with_capacity(derived.len());
     for r in derived {
-        let sig = structural_sig(&r.derived.def);
+        let wiring = wiring_hash(&r);
         match prev.iter().position(|p| p.key == r.key) {
             Some(ix) => {
                 let mut p = prev.remove(ix);
-                if p.sig == sig {
-                    // Structure unchanged (e.g. a non-dsp edit, or a ring-size
-                    // edit that is not in the def): keep the synth + its param
-                    // slots + its cued scope streams. Refresh each tap's ring
-                    // `size` in case a size edit changed it.
-                    for m in &r.derived.monitors {
+                if p.sig == r.sig && p.wiring == wiring {
+                    // Structure + wiring unchanged (e.g. a non-dsp edit, or a
+                    // ring-size edit that is not in the def): keep the synth +
+                    // its param slots + its cued scope streams. Refresh each
+                    // tap's ring `size` in case a size edit changed it.
+                    for m in &r.monitors {
                         if let Some(slot) = p.scopes.iter_mut().find(|s| s.node_path == m.node_path)
                         {
                             slot.size = m.size;
@@ -869,17 +918,17 @@ fn structural_sync<N>(
                     }
                     plans.push(Plan::Keep(p));
                 } else {
-                    plans.push(Plan::Spawn(r, sig, Some(p)));
+                    plans.push(Plan::Spawn(r, wiring, Some(p)));
                 }
             }
-            None => plans.push(Plan::Spawn(r, sig, None)),
+            None => plans.push(Plan::Spawn(r, wiring, None)),
         }
     }
-    // Regions that disappeared entirely: fade out + free their defs.
+    // Parts that disappeared entirely: fade out + free their defs.
     for old in prev {
         let def_name = old.def_name.clone();
         fade_out(controller, state, entity, old);
-        let _ = Embedded::new(controller).free_synthdef(&def_name);
+        release_def(controller, &mut state.shared_defs, &def_name);
     }
 
     // Each spawn's node-tree anchor: the first KEPT synth later in topo order
@@ -894,118 +943,185 @@ fn structural_sync<N>(
         })
         .collect();
 
-    let mut regions: Vec<RegionSynth> = Vec::with_capacity(plans.len());
+    let mut parts: Vec<PartSynth> = Vec::with_capacity(plans.len());
+    let mut transient_failure = false;
     for (plan, anchor) in plans.into_iter().zip(anchors) {
         match plan {
-            Plan::Keep(k) => regions.push(k),
-            Plan::Spawn(r, sig, old) => {
-                match spawn_region(controller, state, entity, r, sig, sample_rate, anchor) {
-                    Some(synth) => {
+            Plan::Keep(k) => parts.push(k),
+            Plan::Spawn(r, wiring, old) => {
+                match spawn_part(controller, state, entity, r, wiring, sample_rate, anchor) {
+                    Ok(synth) => {
                         // The replacement is live: fade the old out (the gain
-                        // overlap is the crossfade). The def name was just
-                        // re-installed, so the old def is already retired.
+                        // overlap is the crossfade) and release its def
+                        // refcount. If the new synth shares the name (stable
+                        // key), the refcount was bumped by `spawn_part`, so
+                        // this just drops the old's reference (the def stays
+                        // installed for the new synth); if the name differs,
+                        // the old def frees now (the old synth keeps its own
+                        // `Arc` while it fades out).
                         if let Some(old) = old {
+                            let old_def_name = old.def_name.clone();
                             fade_out(controller, state, entity, old);
+                            release_def(controller, &mut state.shared_defs, &old_def_name);
                         }
-                        regions.push(synth);
+                        parts.push(synth);
                     }
                     // Keep the old synth playing untouched on failure -
                     // strictly better than the silence a teardown would leave.
-                    None => regions.extend(old),
+                    // A transient failure (full command ring) marks the head
+                    // for a convergent re-sync next frame.
+                    Err(e) => {
+                        transient_failure |= matches!(e, SpawnError::Transient);
+                        parts.extend(old);
+                    }
                 }
             }
         }
     }
     state.heads.insert(
         entity,
-        HeadRegions {
+        HeadParts {
             graph: graph_ca,
-            regions,
+            retry: transient_failure,
+            parts,
         },
     );
 }
 
-/// Cue scope streams and patch every placeholder (`ScopeOut` bufnums, bus
-/// channels from [`BusAlloc`], fade-gain defaults to `0.0` so the synth spawns
-/// silent), then install and spawn one region's def - `Before` the given anchor
-/// when present, else at the root group's tail. Unbound fade gains are ramped
-/// straight to unity (bound params re-send from node state via the same-frame
-/// param sync). Returns `None` on failure, having cleaned up after itself.
-fn spawn_region(
+/// Why a part failed to spawn.
+#[derive(Debug)]
+enum SpawnError {
+    /// The command ring was momentarily full; retrying next frame converges.
+    Transient,
+    /// Anything else (bus exhaustion, install or build failure) - retrying
+    /// without an edit would fail identically, so the head parks as usual.
+    Permanent,
+}
+
+/// Hash of a part's bus wiring - every read/write's key, width and param.
+/// Combined with the def's structural sig for the keep/replace decision: a
+/// re-route that keeps the def (e.g. an instance inlet fed from a different
+/// source) still respawns, crossfading onto the new buses.
+fn wiring_hash(part: &ResolvedPart) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    for b in &part.bus_reads {
+        (0u8, &b.key, b.channels, b.param).hash(&mut h);
+    }
+    for b in &part.bus_writes {
+        (1u8, &b.key, b.channels, b.param).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Cue scope streams and allocate buses (so their indices are known), then
+/// install and spawn one part's def - `Before` the given anchor when present,
+/// else at the root group's tail. The synth spawns silent behind its fade
+/// gains' baked `0.0` defaults; bus indices, scope bufnums and unbound
+/// fade-to-unity are then set via `set_control` in one command-ring drain
+/// (landing before the first audible block). Bound params re-send from node
+/// state via the same-frame param sync. On failure, cleans up after itself
+/// and reports whether retrying next frame can converge ([`SpawnError`]).
+fn spawn_part(
     controller: &mut Controller,
     state: &mut HeadSynths,
     entity: Entity,
-    region: RegionDerived,
-    sig: u64,
+    part: ResolvedPart,
+    wiring: u64,
     sample_rate: f64,
     anchor: Option<i32>,
-) -> Option<RegionSynth> {
+) -> Result<PartSynth, SpawnError> {
     let now = Instant::now();
-    let RegionDerived {
+    let ResolvedPart {
         key,
-        derived,
-        bus_writes,
-        bus_reads,
-    } = region;
-    let gantz_plyphon::Derived {
-        mut def,
+        sig,
+        def,
         params,
         monitors,
         gains,
-    } = derived;
+        bus_writes,
+        bus_reads,
+    } = part;
 
-    // Patch the bus placeholders from the per-bus-node allocations.
+    // Allocate buses and cue scope streams up front so their indices are known
+    // for the post-spawn `set_control` drain below (no def mutation: the bus
+    // indices and bufnums are no-lag control params, set live per block).
+    // Whichever side of a bus spawns first allocates; the counterpart (spawned
+    // later in topo order, or kept from a previous sync) looks the run up by
+    // the same key.
+    let mut set_after_spawn: Vec<(usize, f32)> = Vec::new();
     for binding in bus_writes.iter().chain(&bus_reads) {
-        let bus_key = (entity, binding.node_path.clone());
+        let bus_key = (entity, binding.key.clone());
         let Some(run) = state.bus_alloc.get_or_alloc(bus_key, binding.channels, now) else {
-            log::error!("bevy_gantz_plyphon: private audio buses exhausted; region not spawned");
-            return None;
+            log::error!("bevy_gantz_plyphon: private audio buses exhausted; part not spawned");
+            return Err(SpawnError::Permanent);
         };
-        def.units[binding.unit].inputs[0] = InputRef::Constant(run.start as f32);
+        set_after_spawn.push((binding.param, run.start as f32));
     }
 
-    // Cue a scope stream per `~scopeout`, patching its `ScopeOut` bufnum.
     let mut scopes = Vec::new();
     for m in &monitors {
         let index = state.scope_alloc.alloc();
-        def.units[m.scope_unit].inputs[0] = InputRef::Constant(index as f32);
         let channels = m.channels.max(1);
         match controller.cue_scope(index, channels, sample_rate, CHUNK_FRAMES, NUM_CHUNKS) {
-            Ok(consumer) => scopes.push(ScopeSlot {
-                node_path: m.node_path.clone(),
-                size: m.size,
-                channels,
-                index,
-                consumer,
-            }),
+            Ok(consumer) => {
+                set_after_spawn.push((m.bufnum_param, index as f32));
+                scopes.push(ScopeSlot {
+                    node_path: m.node_path.clone(),
+                    size: m.size,
+                    channels,
+                    index,
+                    consumer,
+                })
+            }
             Err(e) => {
                 log::error!("bevy_gantz_plyphon: cue_scope failed: {e:?}");
                 state.scope_alloc.free(index);
             }
         }
     }
-    // Spawn silent; the fades ramp in below / via the same-frame param sync.
-    for g in &gains {
-        def.params[g.index].default = 0.0;
-    }
 
     let def_name = def.name.clone();
     let mut backend = Embedded::new(controller);
-    if let Err(e) = backend.install_synthdef(def) {
-        log::error!("bevy_gantz_plyphon: synthdef install failed: {e:?}");
-        drop(backend);
-        free_scopes(controller, &mut state.scope_alloc, scopes);
-        return None;
+    // Install the def unless an identical one (same name AND structural sig) is
+    // already installed. A structural edit to a stable-key region changes the
+    // def while keeping the name, so the sig differs and we re-install
+    // (retiring the old compiled def; running synths keep their own `Arc`).
+    let sig_matches = state
+        .shared_defs
+        .get(&def_name)
+        .is_some_and(|&(_, s)| s == sig);
+    if !sig_matches {
+        if let Err(e) = backend.install_synthdef((*def).clone()) {
+            log::error!("bevy_gantz_plyphon: synthdef install failed: {e:?}");
+            drop(backend);
+            free_scopes(controller, &mut state.scope_alloc, scopes);
+            return Err(SpawnError::Permanent);
+        }
     }
+    state
+        .shared_defs
+        .entry(def_name.clone())
+        .and_modify(|(rc, s)| {
+            *rc += 1;
+            *s = sig;
+        })
+        .or_insert((1, sig));
     let (target, action) = match anchor {
         Some(node) => (node, AddAction::Before),
         None => (ROOT_GROUP_ID, AddAction::Tail),
     };
     match backend.spawn(&def_name, target, action) {
         Ok(node_id) => {
-            // A gain with no param slot (no node state feeds it - every fade
-            // gain) would stay stuck at the patched 0.0 default. Ramp it
-            // straight to unity instead.
+            // Wire the synth in one command-ring drain: bus indices, scope
+            // bufnums, then the unbound fade gains ramped to unity. All land
+            // before the synth's first audible block (it spawns silent behind
+            // the fade's baked `0.0` default).
+            for (param, value) in &set_after_spawn {
+                if let Err(e) = backend.set_control(node_id, *param, *value) {
+                    log::error!("bevy_gantz_plyphon: post-spawn set_control failed: {e:?}");
+                }
+            }
             for g in &gains {
                 if !params.iter().any(|b| b.index == g.index) {
                     if let Err(e) = backend.set_control(node_id, g.index, 1.0) {
@@ -1021,11 +1137,12 @@ fn spawn_region(
                     last: None,
                 })
                 .collect();
-            Some(RegionSynth {
+            Ok(PartSynth {
                 key,
                 def_name,
                 node_id,
                 sig,
+                wiring,
                 params,
                 scopes,
                 gains,
@@ -1033,10 +1150,14 @@ fn spawn_region(
         }
         Err(e) => {
             log::error!("bevy_gantz_plyphon: synth spawn failed: {e:?}");
-            let _ = backend.free_synthdef(&def_name);
+            let spawn_err = match e {
+                gantz_plyphon::BackendError::QueueFull => SpawnError::Transient,
+                _ => SpawnError::Permanent,
+            };
             drop(backend);
+            release_def(controller, &mut state.shared_defs, &def_name);
             free_scopes(controller, &mut state.scope_alloc, scopes);
-            None
+            Err(spawn_err)
         }
     }
 }
@@ -1045,12 +1166,7 @@ fn spawn_region(
 /// and queue the synth - with its cued scope streams - for a deferred free once
 /// the slowest ramp has died away. A synth with no gains (e.g. monitor-only) has
 /// no audible output to de-click and is freed immediately.
-fn fade_out(
-    controller: &mut Controller,
-    state: &mut HeadSynths,
-    entity: Entity,
-    synth: RegionSynth,
-) {
+fn fade_out(controller: &mut Controller, state: &mut HeadSynths, entity: Entity, synth: PartSynth) {
     if synth.gains.is_empty() {
         let _ = Embedded::new(controller).free_node(synth.node_id);
         free_scopes(controller, &mut state.scope_alloc, synth.scopes);
@@ -1078,6 +1194,22 @@ fn free_scopes(controller: &mut Controller, scope_alloc: &mut ScopeAlloc, scopes
     for scope in scopes {
         let _ = controller.close_recording(scope.index);
         scope_alloc.free(scope.index);
+    }
+}
+
+/// Decrement the refcount of `def_name`, freeing the def (retiring it on the
+/// audio thread) only when the last reference drops. A shared variant def is
+/// thus installed once and freed once its last instance is retired.
+fn release_def(
+    controller: &mut Controller,
+    shared_defs: &mut HashMap<String, (usize, u64)>,
+    def_name: &str,
+) {
+    let entry = shared_defs.entry(def_name.to_string()).or_insert((0, 0));
+    entry.0 = entry.0.saturating_sub(1);
+    if entry.0 == 0 {
+        shared_defs.remove(def_name);
+        let _ = Embedded::new(controller).free_synthdef(def_name);
     }
 }
 
@@ -1311,19 +1443,22 @@ mod tests {
         let base = Instant::now();
         let mut alloc = BusAlloc::new(4, 12);
         let a = alloc
-            .get_or_alloc((e[0], vec![1]), 2, base)
+            .get_or_alloc((e[0], BusKey::Bus(vec![1])), 2, base)
             .expect("2 channels");
         assert_eq!(a, Run { start: 4, len: 2 });
         let b = alloc
-            .get_or_alloc((e[0], vec![2]), 3, base)
+            .get_or_alloc((e[0], BusKey::Bus(vec![2])), 3, base)
             .expect("3 channels");
         assert_eq!(b, Run { start: 6, len: 3 });
         // Same key + width: the same run (an unchanged region's baked channel
         // stays valid).
-        assert_eq!(alloc.get_or_alloc((e[0], vec![1]), 2, base), Some(a));
+        assert_eq!(
+            alloc.get_or_alloc((e[0], BusKey::Bus(vec![1])), 2, base),
+            Some(a)
+        );
         // A width change re-allocates; the old run is quarantined, not reused.
         let a2 = alloc
-            .get_or_alloc((e[0], vec![1]), 4, base)
+            .get_or_alloc((e[0], BusKey::Bus(vec![1])), 4, base)
             .expect("4 channels");
         assert_eq!(a2, Run { start: 9, len: 4 });
         assert!(alloc.graveyard.iter().any(|(run, _)| *run == a));
@@ -1336,20 +1471,666 @@ mod tests {
         let e = entities(1);
         let base = Instant::now();
         let mut alloc = BusAlloc::new(0, 4);
-        let a = alloc.get_or_alloc((e[0], vec![1]), 2, base).expect("a");
-        let b = alloc.get_or_alloc((e[0], vec![2]), 2, base).expect("b");
+        let a = alloc
+            .get_or_alloc((e[0], BusKey::Bus(vec![1])), 2, base)
+            .expect("a");
+        let b = alloc
+            .get_or_alloc((e[0], BusKey::Bus(vec![2])), 2, base)
+            .expect("b");
         assert_eq!((a.start, b.start), (0, 2));
         // Exhausted while both are live.
-        assert_eq!(alloc.get_or_alloc((e[0], vec![3]), 1, base), None);
+        assert_eq!(
+            alloc.get_or_alloc((e[0], BusKey::Bus(vec![3])), 1, base),
+            None
+        );
         // Released runs stay quarantined until the deadline passes...
         alloc.release_head(e[0], base);
         alloc.sweep(base);
-        assert_eq!(alloc.get_or_alloc((e[0], vec![3]), 1, base), None);
+        assert_eq!(
+            alloc.get_or_alloc((e[0], BusKey::Bus(vec![3])), 1, base),
+            None
+        );
         // ...then coalesce back into one allocatable 4-wide run.
         alloc.sweep(base + FADE_GRACE * 2);
         assert_eq!(
-            alloc.get_or_alloc((e[0], vec![3]), 4, base),
+            alloc.get_or_alloc((e[0], BusKey::Bus(vec![3])), 4, base),
             Some(Run { start: 0, len: 4 }),
+        );
+    }
+
+    /// A `~sinosc -> ~out` graph spawns through `spawn_part` and sounds: the
+    /// fade gain (baked at `0.0`) is ramped to unity via `set_control`, and the
+    /// tone is audible after the fade lag. Guards the driver's runtime spawn
+    /// path (the GUI's path) end to end with an offline engine.
+    #[test]
+    fn spawn_part_sounds_sin_out() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_plyphon::flatten::{Flat, RefKind, flatten};
+
+        let mut g = Graph::<TestN>::default();
+        let s = g.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+        let o = g.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+        let resolve =
+            |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> { None };
+        let flat: Graph<Flat<TestN>> = flatten(&|_| None, &g, &resolve).expect("flatten");
+
+        let mut cache = DefCache::new();
+        let template = derive_template(&flat, 1, &|_| None, &mut cache).expect("derive");
+        let part = instantiate(&template, &cache).into_iter().next().unwrap();
+        let wiring = wiring_hash(&part);
+
+        let (mut controller, _nrt, mut world) = plyphon::engine(plyphon::Options {
+            sample_rate: 48_000.0,
+            output_channels: 1,
+            ..plyphon::Options::default()
+        });
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+        let synth = spawn_part(
+            &mut controller,
+            &mut state,
+            entity,
+            part,
+            wiring,
+            48_000.0,
+            None,
+        )
+        .expect("spawn_part");
+        assert_eq!(synth.gains.len(), 1, "the out carries a fade gain");
+
+        let mut out = vec![0.0f32; 48_000 / 2];
+        for block in out.chunks_mut(64) {
+            world.fill(block, 1);
+        }
+        let rms = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(
+            rms > 0.05,
+            "sin -> out must sound via spawn_part: rms={rms}"
+        );
+    }
+
+    /// Multi-frame `structural_sync`: a `~sinosc -> ~out` head graph sounds,
+    /// and adding unconnected `inlet`/`outlet` nodes (which dissolve in the
+    /// flattener) keeps the tone audible (the region is kept or respawned with
+    /// the fade ramped in). Regression guard for the GUI's reported "no sound
+    /// with inlet/outlet" issue. Mimics the GUI exactly: flatten, then sync.
+    #[test]
+    fn structural_sync_keeps_sound_with_inlets() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_plyphon::flatten::{Flat, RefKind, flatten};
+
+        let flatten_no_refs = |g: &Graph<TestN>| -> Graph<Flat<TestN>> {
+            let resolve =
+                |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> {
+                    None
+                };
+            flatten(&|_| None, g, &resolve).expect("flatten")
+        };
+
+        let (mut controller, _nrt, mut world) = plyphon::engine(plyphon::Options {
+            sample_rate: 48_000.0,
+            output_channels: 1,
+            ..plyphon::Options::default()
+        });
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+
+        // Frame 1: `~sinosc -> ~out`.
+        let mut g1 = Graph::<TestN>::default();
+        let s = g1.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+        let o = g1.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        g1.add_edge(s, o, Edge::new(0.into(), 0.into()));
+        let ca1 = gantz_ca::graph_addr(&g1);
+        let flat1 = flatten_no_refs(&g1);
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            ca1,
+            &flat1,
+            &HashMap::new(),
+            1,
+            48_000.0,
+        );
+        let mut out = vec![0.0f32; 48_000 / 4];
+        for block in out.chunks_mut(64) {
+            world.fill(block, 1);
+        }
+        let rms1 = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(rms1 > 0.05, "frame 1 must sound: rms={rms1}");
+
+        // Frame 2: add unconnected `inlet`/`outlet` (different graph address).
+        let mut g2 = Graph::<TestN>::default();
+        let s = g2.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+        let o = g2.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        let _i = g2.add_node(TestN::Inlet);
+        let _o2 = g2.add_node(TestN::Outlet);
+        g2.add_edge(s, o, Edge::new(0.into(), 0.into()));
+        let ca2 = gantz_ca::graph_addr(&g2);
+        assert_ne!(ca1, ca2, "adding nodes changes the graph address");
+        let flat2 = flatten_no_refs(&g2);
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            ca2,
+            &flat2,
+            &HashMap::new(),
+            1,
+            48_000.0,
+        );
+        // Render past the crossfade (the respawn fades in over FADE_LAG).
+        let mut out = vec![0.0f32; 48_000 / 2];
+        for block in out.chunks_mut(64) {
+            world.fill(block, 1);
+        }
+        let rms2 = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(rms2 > 0.05, "frame 2 (with inlets) must sound: rms={rms2}");
+    }
+
+    /// A structural edit within a stable-key region (connecting `~sinosc` into
+    /// an existing `~pack -> ~unpack -> ~out` chain) re-installs the def and
+    /// the synth plays the NEW (sounding) def. Regression guard for the GUI's
+    /// reported "~pack/~unpack no longer work" issue: the Phase-4 refcounting
+    /// must not skip `install_synthdef` when the def changed (same name, new sig).
+    #[test]
+    fn structural_edit_in_stable_region_reinstalls_def() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_plyphon::flatten::{Flat, RefKind, flatten};
+
+        let flatten_no_refs = |g: &Graph<TestN>| -> Graph<Flat<TestN>> {
+            let resolve =
+                |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> {
+                    None
+                };
+            flatten(&|_| None, g, &resolve).expect("flatten")
+        };
+
+        let (mut controller, _nrt, mut world) = plyphon::engine(plyphon::Options {
+            sample_rate: 48_000.0,
+            output_channels: 1,
+            ..plyphon::Options::default()
+        });
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+
+        // Frame 1: `~pack -> ~unpack -> ~out` (pack input unconnected -> silence).
+        let mut g1 = Graph::<TestN>::default();
+        let pk = g1.add_node(TestN::Pack(gantz_plyphon::Pack::default()));
+        let up = g1.add_node(TestN::Unpack(gantz_plyphon::Unpack::default()));
+        let o = g1.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        g1.add_edge(pk, up, Edge::new(0.into(), 0.into()));
+        g1.add_edge(up, o, Edge::new(0.into(), 0.into()));
+        let ca1 = gantz_ca::graph_addr(&g1);
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            ca1,
+            &flatten_no_refs(&g1),
+            &HashMap::new(),
+            1,
+            48_000.0,
+        );
+        let mut out = vec![0.0f32; 48_000 / 8];
+        for block in out.chunks_mut(64) {
+            world.fill(block, 1);
+        }
+        let rms1 = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(
+            rms1 < 1e-3,
+            "frame 1 (unconnected pack) must be silent: rms={rms1}"
+        );
+
+        // Frame 2: connect `~sinosc -> ~pack` (same `~out` path -> stable key,
+        // same name, but the def CHANGED: now carries a SinOsc). Must re-install.
+        let mut g2 = g1.clone();
+        let s = g2.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+        g2.add_edge(s, pk, Edge::new(0.into(), 0.into()));
+        let ca2 = gantz_ca::graph_addr(&g2);
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            ca2,
+            &flatten_no_refs(&g2),
+            &HashMap::new(),
+            1,
+            48_000.0,
+        );
+        let mut out = vec![0.0f32; 48_000 / 2];
+        for block in out.chunks_mut(64) {
+            world.fill(block, 1);
+        }
+        let rms2 = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(
+            rms2 > 0.05,
+            "frame 2 (sinosc connected) must sound: rms={rms2}"
+        );
+    }
+
+    /// A minimal node enum for driver tests: DSP sinks/sources plus the nesting
+    /// markers (`Inlet`/`Outlet`) and a graph ref carrying its child's content
+    /// address, arity and `inline` flag.
+    #[derive(Clone)]
+    enum TestN {
+        SinOsc(gantz_plyphon::SinOsc),
+        Out(gantz_plyphon::Out),
+        Pack(gantz_plyphon::Pack),
+        Unpack(gantz_plyphon::Unpack),
+        Inlet,
+        Outlet,
+        Ref(gantz_ca::ContentAddr, usize, usize, bool),
+    }
+
+    impl gantz_ca::CaHash for TestN {
+        fn hash(&self, hasher: &mut gantz_ca::Hasher) {
+            match self {
+                TestN::SinOsc(s) => gantz_ca::CaHash::hash(s, hasher),
+                TestN::Out(o) => gantz_ca::CaHash::hash(o, hasher),
+                TestN::Pack(p) => gantz_ca::CaHash::hash(p, hasher),
+                TestN::Unpack(u) => gantz_ca::CaHash::hash(u, hasher),
+                TestN::Inlet => {
+                    hasher.update(b"inlet");
+                }
+                TestN::Outlet => {
+                    hasher.update(b"outlet");
+                }
+                TestN::Ref(ca, n_in, n_out, inline) => {
+                    hasher.update(b"ref");
+                    hasher.update(&ca.0);
+                    hasher.update(&n_in.to_le_bytes());
+                    hasher.update(&n_out.to_le_bytes());
+                    hasher.update(&[u8::from(*inline)]);
+                }
+            }
+        }
+    }
+
+    impl gantz_plyphon::ToNodeDsp for TestN {
+        fn to_node_dsp(&self) -> Option<&dyn gantz_plyphon::NodeDsp> {
+            match self {
+                TestN::SinOsc(s) => Some(s),
+                TestN::Out(o) => Some(o),
+                TestN::Pack(p) => Some(p),
+                TestN::Unpack(u) => Some(u),
+                TestN::Inlet | TestN::Outlet | TestN::Ref(..) => None,
+            }
+        }
+    }
+
+    impl gantz_core::Node for TestN {
+        fn expr(&self, _ctx: gantz_core::node::ExprCtx<'_, '_>) -> gantz_core::node::ExprResult {
+            gantz_core::node::parse_expr("'()")
+        }
+        fn inlet(&self, _ctx: gantz_core::node::MetaCtx) -> bool {
+            matches!(self, TestN::Inlet)
+        }
+        fn outlet(&self, _ctx: gantz_core::node::MetaCtx) -> bool {
+            matches!(self, TestN::Outlet)
+        }
+        fn n_inputs(&self, _ctx: gantz_core::node::MetaCtx) -> usize {
+            match self {
+                TestN::Ref(_, n_in, _, _) => *n_in,
+                _ => 0,
+            }
+        }
+        fn n_outputs(&self, _ctx: gantz_core::node::MetaCtx) -> usize {
+            match self {
+                TestN::Ref(_, _, n_out, _) => *n_out,
+                _ => 0,
+            }
+        }
+    }
+
+    /// Flatten a head graph over `map`'s children (refs lower per their
+    /// `inline` flag) and pre-flatten every child for the derivation resolver.
+    #[allow(clippy::type_complexity)]
+    fn flatten_head(
+        g: &gantz_core::node::graph::Graph<TestN>,
+        map: &HashMap<gantz_ca::ContentAddr, gantz_core::node::graph::Graph<TestN>>,
+    ) -> (
+        gantz_core::node::graph::Graph<gantz_plyphon::Flat<TestN>>,
+        HashMap<gantz_ca::ContentAddr, gantz_core::node::graph::Graph<gantz_plyphon::Flat<TestN>>>,
+    ) {
+        use gantz_core::node::graph::Graph;
+        use gantz_plyphon::flatten::{RefKind, flatten};
+        fn resolver<'g>(
+            map: &'g HashMap<gantz_ca::ContentAddr, Graph<TestN>>,
+        ) -> impl Fn(&TestN) -> Option<(gantz_ca::ContentAddr, RefKind, Option<&'g Graph<TestN>>)> + 'g
+        {
+            move |n| match n {
+                TestN::Ref(ca, _, _, inline) => {
+                    let kind = if *inline {
+                        RefKind::Inline
+                    } else {
+                        RefKind::Instance
+                    };
+                    Some((*ca, kind, map.get(ca)))
+                }
+                _ => None,
+            }
+        }
+        let resolve = resolver(map);
+        let flat = flatten(&|_| None, g, &resolve).expect("flatten head");
+        let children = map
+            .iter()
+            .map(|(ca, child)| {
+                let resolve = resolver(map);
+                (
+                    *ca,
+                    flatten(&|_| None, child, &resolve).expect("flatten child"),
+                )
+            })
+            .collect();
+        (flat, children)
+    }
+
+    /// Render `frames` mono frames and return their RMS.
+    fn render_rms(world: &mut plyphon::World, frames: usize) -> f32 {
+        let mut out = vec![0.0f32; frames];
+        for block in out.chunks_mut(64) {
+            world.fill(block, 1);
+        }
+        (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt()
+    }
+
+    /// A self-contained child: `~sinosc -> ~out`.
+    fn sine_out_child() -> gantz_core::node::graph::Graph<TestN> {
+        use gantz_core::edge::Edge;
+        let mut g = gantz_core::node::graph::Graph::<TestN>::default();
+        let s = g.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+        let o = g.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+        g
+    }
+
+    fn test_engine() -> (Controller, Nrt, plyphon::World) {
+        plyphon::engine(plyphon::Options {
+            sample_rate: 48_000.0,
+            output_channels: 1,
+            ..plyphon::Options::default()
+        })
+    }
+
+    /// Two instances of one self-contained child both sound (louder than one),
+    /// sharing ONE installed def with refcount 2.
+    #[test]
+    fn two_instances_of_one_child_both_sound() {
+        use gantz_core::node::graph::Graph;
+
+        let ca = gantz_ca::ContentAddr([7u8; 32]);
+        let map = HashMap::from([(ca, sine_out_child())]);
+
+        // One instance, for the loudness baseline.
+        let mut g1 = Graph::<TestN>::default();
+        g1.add_node(TestN::Ref(ca, 0, 0, false));
+        let (flat1, children) = flatten_head(&g1, &map);
+        let (mut controller, _nrt, mut world) = test_engine();
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g1),
+            &flat1,
+            &children,
+            1,
+            48_000.0,
+        );
+        let rms_one = render_rms(&mut world, 48_000 / 2);
+        assert!(rms_one > 0.05, "one instance must sound: rms={rms_one}");
+
+        // Two instances in a fresh engine.
+        let mut g2 = Graph::<TestN>::default();
+        g2.add_node(TestN::Ref(ca, 0, 0, false));
+        g2.add_node(TestN::Ref(ca, 0, 0, false));
+        let (flat2, children) = flatten_head(&g2, &map);
+        let (mut controller, _nrt, mut world) = test_engine();
+        let mut state = HeadSynths::default();
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g2),
+            &flat2,
+            &children,
+            1,
+            48_000.0,
+        );
+        assert_eq!(state.heads[&entity].parts.len(), 2, "two instance spawns");
+        assert_eq!(
+            state.shared_defs.len(),
+            1,
+            "one shared def: {:?}",
+            state.shared_defs.keys().collect::<Vec<_>>(),
+        );
+        let (rc, _) = state.shared_defs.values().next().unwrap();
+        assert_eq!(*rc, 2, "both instances hold the def");
+        let rms_two = render_rms(&mut world, 48_000 / 2);
+        assert!(
+            rms_two > rms_one * 1.5,
+            "two in-phase instances sum louder: one={rms_one} two={rms_two}",
+        );
+    }
+
+    /// Editing the child respawns exactly its instances: the head's own region
+    /// keeps its synth (node id unchanged) while both instance spawns are
+    /// replaced and the old pair fade out.
+    #[test]
+    fn child_edit_respawns_only_its_instances() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+
+        let ca1 = gantz_ca::ContentAddr([1u8; 32]);
+        // The edited child: structurally different (an extra `~pack` stage).
+        let ca2 = gantz_ca::ContentAddr([2u8; 32]);
+        let mut child2 = Graph::<TestN>::default();
+        let s = child2.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+        let pk = child2.add_node(TestN::Pack(gantz_plyphon::Pack::default()));
+        let o = child2.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        child2.add_edge(s, pk, Edge::new(0.into(), 0.into()));
+        child2.add_edge(pk, o, Edge::new(0.into(), 0.into()));
+        let map = HashMap::from([(ca1, sine_out_child()), (ca2, child2)]);
+
+        // Head: its own region (sin -> out) + two instances of the child.
+        let head = |ca: gantz_ca::ContentAddr| {
+            let mut g = Graph::<TestN>::default();
+            let s = g.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
+            let o = g.add_node(TestN::Out(gantz_plyphon::Out::default()));
+            g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+            g.add_node(TestN::Ref(ca, 0, 0, false));
+            g.add_node(TestN::Ref(ca, 0, 0, false));
+            g
+        };
+
+        let (mut controller, _nrt, _world) = test_engine();
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+        let g1 = head(ca1);
+        let (flat1, children) = flatten_head(&g1, &map);
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g1),
+            &flat1,
+            &children,
+            1,
+            48_000.0,
+        );
+        let before: HashMap<u64, i32> = state.heads[&entity]
+            .parts
+            .iter()
+            .map(|p| (p.key, p.node_id))
+            .collect();
+        assert_eq!(before.len(), 3, "own region + two instances");
+
+        let g2 = head(ca2);
+        let (flat2, children) = flatten_head(&g2, &map);
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g2),
+            &flat2,
+            &children,
+            1,
+            48_000.0,
+        );
+        let after: HashMap<u64, i32> = state.heads[&entity]
+            .parts
+            .iter()
+            .map(|p| (p.key, p.node_id))
+            .collect();
+        assert_eq!(after.len(), 3);
+
+        // Exactly one part survives by key - the head's own region - with its
+        // synth untouched. The instance parts (child CA in their key) are new,
+        // and the two retired spawns are fading.
+        let kept: Vec<_> = after
+            .iter()
+            .filter(|(k, _)| before.contains_key(k))
+            .collect();
+        assert_eq!(kept.len(), 1, "only the head's own region matches by key");
+        let (kept_key, kept_id) = kept[0];
+        assert_eq!(
+            before[kept_key], *kept_id,
+            "the kept region never respawned"
+        );
+        assert_eq!(state.fading.len(), 2, "both old instance spawns fade out");
+    }
+
+    /// Toggling `inline` on the ref switches the lowering live: the instanced
+    /// spawn crossfades to the spliced one, audibly on both sides.
+    #[test]
+    fn inline_toggle_switches_lowering_live() {
+        use gantz_core::node::graph::Graph;
+
+        let ca = gantz_ca::ContentAddr([3u8; 32]);
+        let map = HashMap::from([(ca, sine_out_child())]);
+        let head = |inline: bool| {
+            let mut g = Graph::<TestN>::default();
+            g.add_node(TestN::Ref(ca, 0, 0, inline));
+            g
+        };
+
+        let (mut controller, _nrt, mut world) = test_engine();
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+
+        let g1 = head(false);
+        let (flat1, children) = flatten_head(&g1, &map);
+        assert!(
+            flat1
+                .node_indices()
+                .any(|n| matches!(flat1[n], gantz_plyphon::Flat::Instance { .. })),
+            "instanced by default",
+        );
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g1),
+            &flat1,
+            &children,
+            1,
+            48_000.0,
+        );
+        let rms1 = render_rms(&mut world, 48_000 / 4);
+        assert!(rms1 > 0.05, "instanced lowering sounds: rms={rms1}");
+
+        let g2 = head(true);
+        let (flat2, children) = flatten_head(&g2, &map);
+        assert!(
+            flat2
+                .node_indices()
+                .all(|n| !matches!(flat2[n], gantz_plyphon::Flat::Instance { .. })),
+            "inline splices",
+        );
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g2),
+            &flat2,
+            &children,
+            1,
+            48_000.0,
+        );
+        // Render across the crossfade: the tone stays audible throughout.
+        let rms2 = render_rms(&mut world, 48_000 / 2);
+        assert!(
+            rms2 > 0.05,
+            "inline lowering sounds after the switch: rms={rms2}"
+        );
+        assert_eq!(state.heads[&entity].parts.len(), 1);
+    }
+
+    /// A param edit lands on ONE instance's synth: setting one spawn's freq to
+    /// zero leaves its sibling sounding (the shared def's param index is per
+    /// synth), and the sibling's slot state is untouched.
+    #[test]
+    fn param_edit_on_one_instance_leaves_sibling() {
+        use gantz_core::node::graph::Graph;
+
+        let ca = gantz_ca::ContentAddr([5u8; 32]);
+        let map = HashMap::from([(ca, sine_out_child())]);
+        let mut g = Graph::<TestN>::default();
+        g.add_node(TestN::Ref(ca, 0, 0, false));
+        g.add_node(TestN::Ref(ca, 0, 0, false));
+        let (flat, children) = flatten_head(&g, &map);
+
+        let (mut controller, _nrt, mut world) = test_engine();
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+        structural_sync(
+            &mut controller,
+            &mut state,
+            entity,
+            gantz_ca::graph_addr(&g),
+            &flat,
+            &children,
+            1,
+            48_000.0,
+        );
+        let rms_both = render_rms(&mut world, 48_000 / 2);
+
+        // Silence the FIRST instance's sine via its own synth's freq param
+        // (the same set_control the driver's param sync issues). The slots
+        // pair absolute node paths with def-local indices: both instances
+        // share the index, but each has its own node id.
+        let parts = &state.heads[&entity].parts;
+        assert_eq!(parts.len(), 2);
+        let (a, b) = (&parts[0], &parts[1]);
+        assert_ne!(a.node_id, b.node_id);
+        assert_ne!(a.params[0].node_path, b.params[0].node_path);
+        assert_eq!(a.params[0].index, b.params[0].index, "shared def index");
+        let freq = a
+            .params
+            .iter()
+            .find(|s| s.node_path.len() == 2)
+            .expect("the nested sine's param slot");
+        Embedded::new(&mut controller)
+            .set_control(a.node_id, freq.index, 0.0)
+            .expect("set_control");
+        let rms_one = render_rms(&mut world, 48_000 / 2);
+        assert!(
+            rms_one > 0.05,
+            "the sibling instance still sounds: rms={rms_one}",
+        );
+        assert!(
+            rms_one < rms_both * 0.75,
+            "one silenced instance is quieter: both={rms_both} one={rms_one}",
+        );
+        assert!(
+            b.params[0].last.is_none(),
+            "the sibling's slot is untouched"
         );
     }
 }

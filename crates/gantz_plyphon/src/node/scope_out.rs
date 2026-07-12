@@ -131,15 +131,22 @@ impl NodeDsp for ScopeOut {
         // `ScopeOut.ar(bufnum, ch0, ch1, …)`: stream *every* sample of each of the
         // input signal's channels (interleaved) off the audio thread into a cued
         // scope stream the driver drains into this node's per-channel rings - the
-        // channel count is the input's width. `bufnum` is a placeholder; the
-        // driver allocates a globally-unique cued index and patches it before
-        // installing.
+        // channel count is the input's width. `bufnum` is a no-lag control param;
+        // the driver allocates a globally-unique cued index and sets it via
+        // `set_control` after spawning (no def mutation).
         let signal = inputs.first().cloned().unwrap_or_else(|| Signal::silent(1));
+        let bufnum = b.push_control_param(path, "bufnum");
         let mut scope_inputs = Vec::with_capacity(signal.width() + 1);
-        scope_inputs.push(InputRef::Constant(0.0));
+        scope_inputs.push(InputRef::Param(bufnum));
         scope_inputs.extend(signal.channels());
         let scope_unit = b.push_unit(UnitSpec::new("ScopeOut", Rate::Audio, scope_inputs, 0));
-        b.push_monitor(path, self.size, signal.width(), scope_unit as usize);
+        b.push_monitor(
+            path,
+            self.size,
+            signal.width(),
+            scope_unit as usize,
+            bufnum as usize,
+        );
         vec![]
     }
 }

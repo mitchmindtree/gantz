@@ -5,7 +5,7 @@ use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
     Bus, DeriveError, Lag, NodeDsp, Out, Pack, ScopeOut, SinOsc, ToNodeDsp, derive_synthdef,
-    derive_synthdefs,
+    derive_synthdefs, structural_sig,
 };
 use plyphon::synthdef::InputRef;
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, Rate, World, engine};
@@ -66,7 +66,7 @@ fn sine_bus_out_splits_two_regions() {
     assert_eq!(w.node_path, vec![b.index()]);
     assert_eq!(w.channels, 1);
     assert_eq!(wdef.units[w.unit].name, "Out");
-    assert!(matches!(wdef.units[w.unit].inputs[0], InputRef::Constant(c) if c == 0.0));
+    assert!(matches!(wdef.units[w.unit].inputs[0], InputRef::Param(p) if p == w.param as u32));
     assert_eq!(
         writer.derived.gains.len(),
         1,
@@ -91,7 +91,7 @@ fn sine_bus_out_splits_two_regions() {
     assert_eq!(r.channels, 1);
     assert_eq!(rdef.units[r.unit].name, "In");
     assert_eq!(rdef.units[r.unit].num_outputs, 1);
-    assert!(matches!(rdef.units[r.unit].inputs[0], InputRef::Constant(c) if c == 0.0));
+    assert!(matches!(rdef.units[r.unit].inputs[0], InputRef::Param(p) if p == r.param as u32));
 }
 
 #[test]
@@ -303,11 +303,44 @@ fn no_boundary_graph_matches_single_def() {
 }
 
 #[test]
+fn bus_index_param_is_unlagged_and_sig_stable() {
+    // The bus channel index is a no-lag control param (a lagged bus index would
+    // glide through wrong buses), baked at `0.0` and set per spawn via
+    // `set_control`. The driver never mutates the def, so `structural_sig` is
+    // computed on the final def and is stable across re-derives.
+    let mut g = Graph::<N>::default();
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let b = g.add_node(N::Bus(Bus::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s, b, Edge::new(0.into(), 0.into()));
+    g.add_edge(b, o, Edge::new(0.into(), 0.into()));
+
+    let regions = derive_synthdefs(&g, 1, "head").expect("derive");
+    let writer = &regions[0];
+    let w = &writer.bus_writes[0];
+    let param = &writer.derived.def.params[w.param];
+    assert_eq!(param.default, 0.0, "bus-index defaults to 0.0");
+    assert_eq!(param.lag, None, "bus-index must be unlagged");
+    assert!(
+        !writer.derived.params.iter().any(|b| b.index == w.param),
+        "the bus-index param has no node binding (the driver alone sets it)",
+    );
+
+    let sig = structural_sig(&writer.derived.def);
+    let regions2 = derive_synthdefs(&g, 1, "head").expect("re-derive");
+    assert_eq!(
+        sig,
+        structural_sig(&regions2[0].derived.def),
+        "re-deriving the same graph yields the same sig (no per-spawn patching)",
+    );
+}
+
+#[test]
 fn split_regions_play_through_the_engine() {
-    // `~sinosc -> ~bus -> ~out` end to end offline: patch both bus placeholders
-    // to a real private channel, spawn writer-then-reader, and the tone crosses
-    // the boundary. Reversed spawn order renders silence - `In` reads only
-    // channels written EARLIER in the node tree this block (the ordering
+    // `~sinosc -> ~bus -> ~out` end to end offline: set each region's bus-index
+    // param to a real private channel via `set_control`, spawn writer-then-reader,
+    // and the tone crosses the boundary. Reversed spawn order renders silence -
+    // `In` reads only channels written EARLIER in the node tree this block (the ordering
     // requirement the driver's topo placement exists for).
     let mut g = Graph::<N>::default();
     let s = g.add_node(N::SinOsc(SinOsc::default()));
@@ -324,15 +357,7 @@ fn split_regions_play_through_the_engine() {
     // The first private channel sits after the hardware output + input banks.
     let bus = (opts().output_channels + opts().input_channels) as f32;
 
-    let mut regions = derive_synthdefs(&g, 1, "head").expect("derive");
-    for region in &mut regions {
-        for w in &region.bus_writes {
-            region.derived.def.units[w.unit].inputs[0] = InputRef::Constant(bus);
-        }
-        for r in &region.bus_reads {
-            region.derived.def.units[r.unit].inputs[0] = InputRef::Constant(bus);
-        }
-    }
+    let regions = derive_synthdefs(&g, 1, "head").expect("derive");
     let (writer, reader) = (&regions[0], &regions[1]);
 
     let rms = |s: &[f32]| (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt();
@@ -343,17 +368,45 @@ fn split_regions_play_through_the_engine() {
         }
         out
     };
+    // Wire a region's bus-index param and ramp its fade gains to unity after
+    // spawning (the synth spawns silent behind its baked fade 0.0 default).
+    let wire = |controller: &mut plyphon::Controller,
+                node: i32,
+                bus: &gantz_plyphon::BusBinding,
+                gains: &[gantz_plyphon::GainRef],
+                channel: f32| {
+        controller
+            .set_control(node, bus.param, channel)
+            .expect("set bus");
+        for g in gains {
+            controller.set_control(node, g.index, 1.0).expect("fade in");
+        }
+    };
 
     // Writer before reader: the tone crosses the bus.
     let (mut controller, _nrt, mut world) = engine(opts());
     controller.add_synthdef(writer.derived.def.clone());
     controller.add_synthdef(reader.derived.def.clone());
-    controller
+    let w = controller
         .synth_new(&writer.derived.def.name, ROOT_GROUP_ID, AddAction::Tail)
         .expect("writer");
-    controller
+    let r = controller
         .synth_new(&reader.derived.def.name, ROOT_GROUP_ID, AddAction::Tail)
         .expect("reader");
+    wire(
+        &mut controller,
+        w,
+        &writer.bus_writes[0],
+        &writer.derived.gains,
+        bus,
+    );
+    wire(
+        &mut controller,
+        r,
+        &reader.bus_reads[0],
+        &reader.derived.gains,
+        bus,
+    );
     let out = render(&mut world, SR as usize / 4);
     assert!(
         rms(&out) > 0.05,
@@ -367,12 +420,26 @@ fn split_regions_play_through_the_engine() {
     let (mut controller, _nrt, mut world) = engine(opts());
     controller.add_synthdef(writer.derived.def.clone());
     controller.add_synthdef(reader.derived.def.clone());
-    controller
+    let r = controller
         .synth_new(&reader.derived.def.name, ROOT_GROUP_ID, AddAction::Tail)
         .expect("reader");
-    controller
+    let w = controller
         .synth_new(&writer.derived.def.name, ROOT_GROUP_ID, AddAction::Tail)
         .expect("writer");
+    wire(
+        &mut controller,
+        w,
+        &writer.bus_writes[0],
+        &writer.derived.gains,
+        bus,
+    );
+    wire(
+        &mut controller,
+        r,
+        &reader.bus_reads[0],
+        &reader.derived.gains,
+        bus,
+    );
     let out = render(&mut world, SR as usize / 4);
     assert!(
         rms(&out) < 1e-4,

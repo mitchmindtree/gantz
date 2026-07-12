@@ -25,12 +25,17 @@ pub enum DeriveError {
     /// writer-before-reader order to derive (or run) them in. Deliberate
     /// cross-region feedback (an `InFeedback`-based bus) is a planned follow-up.
     BusCycle,
+    /// An instanced reference's target graph could not be resolved.
+    Unresolved(gantz_ca::ContentAddr),
+    /// Instanced references form a cycle (a graph transitively instancing
+    /// itself), so there is no finite template to derive.
+    RefCycle(gantz_ca::ContentAddr),
 }
 
 /// One side of a `~bus` boundary within a region's def: the bus unit whose
-/// input 0 (the bus channel index) is a `0.0` placeholder the driver patches to
-/// a driver-allocated private bus before installing (the `ScopeOut`-bufnum
-/// idiom, so [`structural_sig`] stays stable across allocations).
+/// input 0 (the bus channel index) is a no-lag control param the driver sets to
+/// a driver-allocated private bus via `set_control` after spawning (no def
+/// mutation, so [`structural_sig`] stays stable across allocations).
 #[derive(Clone, Debug)]
 pub struct BusBinding {
     /// The `~bus` node's path - the driver's bus-allocation key. Consecutive
@@ -40,8 +45,11 @@ pub struct BusBinding {
     /// The bus's channel count - the boundary signal's width.
     pub channels: usize,
     /// The index within the def's `units` of the bus `Out` (write side) or `In`
-    /// (read side) whose input 0 is the patchable placeholder.
+    /// (read side) whose input 0 is the bus-index param.
     pub unit: usize,
+    /// The no-lag control param the driver sets to the allocated bus channel
+    /// via `set_control` after spawning.
+    pub param: usize,
 }
 
 /// One region of a boundary-cut graph: its derived synthdef + bindings, plus
@@ -170,7 +178,7 @@ where
 }
 
 /// Every dsp sink of `graph`: an audio output (`~out`) or a monitor (`~scopeout`).
-fn dsp_sinks<N: ToNodeDsp>(graph: &Graph<N>) -> Vec<NodeIx> {
+pub(crate) fn dsp_sinks<N: ToNodeDsp>(graph: &Graph<N>) -> Vec<NodeIx> {
     graph
         .node_indices()
         .filter(|&n| {
@@ -237,7 +245,7 @@ fn resolved_sources<N: ToNodeDsp>(
 /// Merge each sink's dsp-only pull-eval order into one topological order over
 /// the nodes selected by `keep`, first occurrence wins (a filtered subsequence
 /// of a topological order remains topological for the kept subgraph).
-fn merged_pull_order<N: ToNodeDsp>(
+pub(crate) fn merged_pull_order<N: ToNodeDsp>(
     graph: &Graph<N>,
     seeds: &[NodeIx],
     keep: impl Fn(NodeIx) -> bool,
@@ -264,8 +272,9 @@ fn merged_pull_order<N: ToNodeDsp>(
 /// `~bus` ([`is_boundary`](crate::NodeDsp::is_boundary)): regions are the
 /// connected components of the dsp-reachable subgraph over non-boundary edges,
 /// and a boundary between two regions lowers to an `Out` to a private bus in
-/// the writer's def and an `In` in each reader's - both with placeholder bus
-/// inputs the driver patches post-sig (see [`BusBinding`]). The point: each
+/// the writer's def and an `In` in each reader's - both with a no-lag
+/// bus-index control param the driver sets via `set_control` after spawning
+/// (see [`BusBinding`]). The point: each
 /// region carries its own [`structural_sig`], so an edit respawns only its own
 /// region's synth and every other region's unit state survives untouched.
 ///
@@ -475,16 +484,21 @@ where
                                 .entry(bus)
                                 .or_insert_with(|| {
                                     let channels = bus_width.get(&bus).copied().unwrap_or(1);
+                                    let bus_param = builder.push_control_param(
+                                        &graph[bus].node_path(bus.index()),
+                                        "bus",
+                                    );
                                     let unit = builder.push_unit(UnitSpec::new(
                                         "In",
                                         Rate::Audio,
-                                        vec![InputRef::Constant(0.0)],
+                                        vec![InputRef::Param(bus_param)],
                                         channels,
                                     ));
                                     bus_reads.push(BusBinding {
                                         node_path: graph[bus].node_path(bus.index()),
                                         channels,
                                         unit: unit as usize,
+                                        param: bus_param as usize,
                                     });
                                     (0..channels as u32)
                                         .map(|output| InputRef::Unit { unit, output })
@@ -512,7 +526,7 @@ where
         }
 
         // Emit the region's bus writes: lift each channel to audio, apply the
-        // driver's fade gain, and write to a placeholder bus.
+        // driver's fade gain, and write to a bus-index param.
         let mut bus_writes = Vec::with_capacity(writes.len());
         for b in writes {
             let (src, port) = bus_source(b).expect("writes are sourced");
@@ -522,7 +536,8 @@ where
                 .cloned()
                 .unwrap_or_else(|| Signal::silent(1));
             let fade = builder.push_fade_gain(&graph[b].node_path(b.index()));
-            let mut out_inputs = vec![InputRef::Constant(0.0)];
+            let bus_param = builder.push_control_param(&graph[b].node_path(b.index()), "bus");
+            let mut out_inputs = vec![InputRef::Param(bus_param)];
             for ch in sig.channels() {
                 let ch = builder.ensure_audio(ch);
                 let mul = builder.push_unit(UnitSpec {
@@ -542,6 +557,7 @@ where
                 node_path: graph[b].node_path(b.index()),
                 channels: sig.width(),
                 unit: unit as usize,
+                param: bus_param as usize,
             });
             bus_width.insert(b, sig.width());
         }
@@ -574,6 +590,17 @@ where
         });
     }
     Ok(regions)
+}
+
+/// The content-addressed name for a def with the given [`structural_sig`].
+///
+/// Purely a function of the def's structure - no head or region prefix - so
+/// structurally identical defs derived from different heads (or from many
+/// instances of one referenced child graph) collide by design, and the audio
+/// driver's per-name install refcounting shares one installed def between
+/// them. Names change exactly when the structure does.
+pub fn content_def_name(sig: u64) -> String {
+    format!("gantz-def-{sig:016x}")
 }
 
 /// A hash of a synthdef's *structure* - everything except parameter values.

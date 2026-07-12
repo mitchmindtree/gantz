@@ -23,8 +23,11 @@ pub struct DspRefExt {
     /// Inline the referenced graph's DSP nodes into the parent synthdef,
     /// rather than instancing a shared definition.
     ///
-    /// Inlining is currently the only lowering, so the flag records intent
-    /// until shared-synthdef instancing lands.
+    /// Instancing is the default lowering: the child derives once into shared
+    /// content-named synthdefs, installed once and spawned per instance with
+    /// bus wiring set per synth. Inlining splices the child's units into the
+    /// parent's def instead - each copy compiles its own units, buying full
+    /// cross-boundary fusion at N-times the unit count.
     pub inline: bool,
 }
 
@@ -42,16 +45,30 @@ where
     N: ToNodeDsp + AsRefNode,
 {
     let mut memo: HashMap<CommitAddr, bool> = HashMap::new();
-    let mut stack: Vec<CommitAddr> = Vec::new();
     registry
         .commits()
         .keys()
         .copied()
         .collect::<Vec<_>>()
         .into_iter()
-        .filter(|&ca| is_dsp(registry, ca, &mut memo, &mut stack))
+        .filter(|&ca| is_dsp_commit(registry, ca, &mut memo))
         .map(ContentAddr::from)
         .collect()
+}
+
+/// Whether the graph committed at `ca` contains a DSP node, directly or
+/// transitively through references. Memoized in `memo` so repeated probes over
+/// one registry (e.g. per ref during a flatten) stay linear overall.
+pub(crate) fn is_dsp_commit<N>(
+    registry: &gantz_ca::Registry<Graph<N>>,
+    ca: CommitAddr,
+    memo: &mut HashMap<CommitAddr, bool>,
+) -> bool
+where
+    N: ToNodeDsp + AsRefNode,
+{
+    let mut stack: Vec<CommitAddr> = Vec::new();
+    is_dsp(registry, ca, memo, &mut stack)
 }
 
 /// Whether the graph at `ca` contains a DSP node, directly or transitively

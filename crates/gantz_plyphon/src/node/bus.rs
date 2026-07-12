@@ -43,8 +43,9 @@ impl gantz_core::Node for Bus {
 
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
         // Steel-inert: the boundary exists only at synthdef derivation. A
-        // placeholder output feeds the inert dsp output edge.
-        gantz_core::node::parse_expr("0")
+        // non-numeric placeholder output feeds the inert dsp output edge (see
+        // the `NodeDsp` docs).
+        gantz_core::node::parse_expr("'()")
     }
 }
 

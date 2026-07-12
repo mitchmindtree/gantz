@@ -63,9 +63,10 @@ impl gantz_core::Node for Pack {
     }
 
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
-        // Steel-inert: the packing happens at synthdef derivation. A placeholder
-        // output feeds the inert dsp output edge.
-        gantz_core::node::parse_expr("0")
+        // Steel-inert: the packing happens at synthdef derivation. A non-numeric
+        // placeholder output feeds the inert dsp output edge (see the `NodeDsp`
+        // docs).
+        gantz_core::node::parse_expr("'()")
     }
 }
 

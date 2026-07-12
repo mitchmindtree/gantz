@@ -114,6 +114,14 @@ impl FromIterator<InputRef> for Signal {
 /// the synthdef under construction. A node is "DSP" simply by implementing this
 /// trait (and being discoverable via [`ToNodeDsp`]). The same gantz graph is
 /// compiled by both backends independently.
+///
+/// **Steel placeholder contract:** a dsp node's `Node::expr` output for a dsp
+/// output port must not evaluate to a number (use `'()` or similar). Hybrid
+/// control inputs ([`control_input_expr`](crate::param::control_input_expr))
+/// distinguish a control value from an inert dsp edge with a `number?` guard, so
+/// a numeric placeholder would be mistaken for a control value and stomp the
+/// downstream node's param state. Nodes with no dsp outputs (e.g. `~scopeout`)
+/// are exempt - their Steel outputs never feed a dsp edge.
 pub trait NodeDsp {
     /// The number of DSP (signal) input *ports* - the leading inputs that carry
     /// signals, wired into the synthdef. A node's [`gantz_core::Node::n_inputs`]

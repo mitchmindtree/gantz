@@ -70,9 +70,9 @@ impl gantz_core::Node for Lag {
 
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
         // Steel-inert: the audio engine smooths the signal; the duration lives in
-        // state and is applied via `set_control`. A placeholder output feeds the
-        // inert dsp output edge.
-        gantz_core::node::parse_expr("0")
+        // state and is applied via `set_control`. A non-numeric placeholder
+        // output feeds the inert dsp output edge (see the `NodeDsp` docs).
+        gantz_core::node::parse_expr("'()")
     }
 }
 

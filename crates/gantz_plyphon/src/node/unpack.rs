@@ -66,12 +66,13 @@ impl gantz_core::Node for Unpack {
     }
 
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
-        // Steel-inert: the splitting happens at synthdef derivation. Placeholder
-        // outputs feed the inert dsp output edges - a single value for one
-        // output, a list of values otherwise (the multi-output expr contract).
+        // Steel-inert: the splitting happens at synthdef derivation. Non-numeric
+        // placeholder outputs feed the inert dsp output edges (see the `NodeDsp`
+        // docs) - a single value for one output, a list of values otherwise (the
+        // multi-output expr contract).
         let src = match self.count {
-            1 => "0".to_string(),
-            n => format!("(list {})", vec!["0"; n].join(" ")),
+            1 => "'()".to_string(),
+            n => format!("(list {})", vec!["'()"; n].join(" ")),
         };
         gantz_core::node::parse_expr(&src)
     }

@@ -16,9 +16,11 @@ pub use elem::{
     Grid, Key, Label, Matrix, Plot, PlotMode, PlotStyle, RESERVED_TAGS, RefGui, Rgba, Row, Scope,
     Sep, Space, Toggle, Value,
 };
+pub use encode::encode;
 pub use sexpr::{SExpr, summary};
 
 pub mod decode;
 pub mod diag;
 pub mod elem;
+pub mod encode;
 pub mod sexpr;

@@ -5,7 +5,7 @@ use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, input_or_silent};
 
 /// Concatenate `count` input signals into one channel group (like Max's
 /// `mc.pack~` or a VCV merge): the output's width is the sum of the input
@@ -63,9 +63,10 @@ impl gantz_core::Node for Pack {
     }
 
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
-        // Steel-inert: the packing happens at synthdef derivation. A placeholder
-        // output feeds the inert dsp output edge.
-        gantz_core::node::parse_expr("0")
+        // Steel-inert: the packing happens at synthdef derivation. A non-numeric
+        // placeholder output feeds the inert dsp output edge (see the `NodeDsp`
+        // docs).
+        gantz_core::node::parse_expr("'()")
     }
 }
 
@@ -78,10 +79,17 @@ impl NodeDsp for Pack {
         1
     }
 
-    fn ugens(&self, _path: &[usize], inputs: &[Signal], _b: &mut DspBuilder) -> Vec<Signal> {
+    fn ugens(
+        &self,
+        _path: &[usize],
+        inputs: &[Option<Signal>],
+        _b: &mut DspBuilder,
+    ) -> Vec<Signal> {
         // Pure re-grouping: no units, just the concatenation of every input's
-        // channels (unconnected inputs are already mono silence).
-        vec![Signal::concat(inputs.iter().cloned())]
+        // channels (an unconnected input contributes mono silence).
+        vec![Signal::concat(
+            (0..inputs.len()).map(|i| input_or_silent(inputs, i)),
+        )]
     }
 }
 

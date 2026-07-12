@@ -5,7 +5,7 @@ use gantz_core::node::{ExprCtx, ExprResult, MetaCtx};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, input_or_silent};
 
 /// A synthdef *boundary*: drop it on a signal wire to cut the derived synthdef
 /// there. The upstream region ends in an `Out` to a driver-allocated private
@@ -43,8 +43,9 @@ impl gantz_core::Node for Bus {
 
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
         // Steel-inert: the boundary exists only at synthdef derivation. A
-        // placeholder output feeds the inert dsp output edge.
-        gantz_core::node::parse_expr("0")
+        // non-numeric placeholder output feeds the inert dsp output edge (see
+        // the `NodeDsp` docs).
+        gantz_core::node::parse_expr("'()")
     }
 }
 
@@ -61,11 +62,16 @@ impl NodeDsp for Bus {
         true
     }
 
-    fn ugens(&self, _path: &[usize], inputs: &[Signal], _b: &mut DspBuilder) -> Vec<Signal> {
+    fn ugens(
+        &self,
+        _path: &[usize],
+        inputs: &[Option<Signal>],
+        _b: &mut DspBuilder,
+    ) -> Vec<Signal> {
         // Only reached when both sides share a region (the boundary was not a
         // cut): a plain wire. The cut case is lowered by the compiler itself
         // (`derive_synthdefs`), which emits the bus `Out`/`In` pair.
-        vec![inputs.first().cloned().unwrap_or_else(|| Signal::silent(1))]
+        vec![input_or_silent(inputs, 0)]
     }
 }
 

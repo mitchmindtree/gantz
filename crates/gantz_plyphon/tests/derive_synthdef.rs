@@ -231,31 +231,211 @@ fn control_edge_on_root_does_not_panic() {
 }
 
 #[test]
-fn dsp_chain_into_control_input_emits_no_units() {
-    // `~lag -> ~sinosc`'s freq (a *control* input - sinosc has no dsp inputs) with
-    // `~sinosc -> ~out`: the lag feeds no sink through dsp inputs, so it must not
-    // land in the def. Interior nodes are pull-traversed over ALL incoming edges,
-    // so without the dsp-reachable intersection the lag would emit a dead `Lag`
-    // unit (wasted audio CPU) with a live `dur` param (driven by the driver, and
-    // hashed into `structural_sig` - a spurious respawn on control-wiring edits).
+fn dsp_wire_into_freq_drives_fm() {
+    // `~lag -> ~sinosc.freq -> ~out`: freq is a *hybrid* dsp input, so the
+    // connected chain emits units and the `Lag`'s output wire drives the
+    // oscillator's freq input directly. The freq fallback param must NOT be
+    // baked - the wire wins, and an undriven param would land in the def (and
+    // `structural_sig`) with nothing draining its state.
     let mut g = Graph::<N>::default();
     let l = g.add_node(N::Lag(Lag::default()));
     let s = g.add_node(N::SinOsc(SinOsc::default()));
     let o = g.add_node(N::Out(Out::default()));
-    g.add_edge(l, s, Edge::new(0.into(), 0.into())); // ~lag -> sinosc freq (control)
+    g.add_edge(l, s, Edge::new(0.into(), 0.into())); // ~lag -> sinosc freq (dsp)
     g.add_edge(s, o, Edge::new(0.into(), 0.into())); // sinosc -> ~out (dsp)
 
     let derived = derive_synthdef(&g, 1, "t").expect("derive");
-    assert_eq!(
-        derived.def.units.len(),
-        4,
-        "SinOsc + level/channel muls + Out, no Lag"
-    );
-    assert!(derived.def.units.iter().all(|u| u.name != "Lag"));
+    let def = &derived.def;
+    // Units: Lag(0), SinOsc(1), level-mul, channel-mul, Out.
+    assert_eq!(def.units.len(), 5);
+    assert_eq!(def.units[0].name, "Lag");
+    assert_eq!(def.units[1].name, "SinOsc");
     assert!(
-        derived.def.params.iter().all(|p| !p.name.ends_with("/dur")),
-        "the unreachable lag's dur param must not be driven",
+        matches!(
+            def.units[1].inputs[0],
+            InputRef::Unit { unit: 0, output: 0 }
+        ),
+        "the SinOsc freq input reads the lag's output wire",
     );
+    assert!(
+        def.params.iter().all(|p| !p.name.ends_with("/freq")),
+        "a wired freq bakes no fallback param",
+    );
+    assert!(
+        derived
+            .params
+            .iter()
+            .all(|b| b.node_path != vec![s.index()]),
+        "no binding drives the wired sinosc",
+    );
+    // The lag's own dur param is unaffected.
+    assert!(def.params.iter().any(|p| p.name.ends_with("/dur")));
+}
+
+#[test]
+fn kr_modulator_fm_keeps_its_own_freq_param() {
+    // `~sinosc(kr) -> ~sinosc.freq -> ~out` (vibrato duty): the modulator's own
+    // freq input is unconnected so it keeps its fallback param, while the
+    // carrier's freq is the kr wire (no param).
+    let mut modulator = SinOsc::default();
+    modulator.set_rate(NodeRate::Control);
+    let mut g = Graph::<N>::default();
+    let m = g.add_node(N::SinOsc(modulator));
+    let c = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(m, c, Edge::new(0.into(), 0.into()));
+    g.add_edge(c, o, Edge::new(0.into(), 0.into()));
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let def = &derived.def;
+    let oscs: Vec<_> = def.units.iter().filter(|u| u.name == "SinOsc").collect();
+    assert_eq!(oscs.len(), 2);
+    assert!(matches!(oscs[0].rate, Rate::Control));
+    assert!(
+        matches!(oscs[0].inputs[0], InputRef::Param(_)),
+        "the modulator's freq falls back to its param",
+    );
+    assert!(matches!(oscs[1].rate, Rate::Audio));
+    assert!(
+        matches!(oscs[1].inputs[0], InputRef::Unit { .. }),
+        "the carrier's freq reads the kr wire",
+    );
+    assert_eq!(
+        def.params
+            .iter()
+            .filter(|p| p.name.ends_with("/freq"))
+            .count(),
+        1,
+        "one freq param: the modulator's",
+    );
+    assert_eq!(
+        derived
+            .params
+            .iter()
+            .filter(|b| b.node_path == vec![m.index()])
+            .count(),
+        1,
+        "the freq binding maps to the modulator",
+    );
+}
+
+#[test]
+fn multichannel_freq_expands_an_osc_per_channel() {
+    // `~pack`(2) (unconnected: a 2-wide silent group) -> `~sinosc.freq` -> `~out`
+    // on a 2-channel device: the oscillator expands to one SinOsc per freq
+    // channel and its output group is 2 wide.
+    let mut g = Graph::<N>::default();
+    let pk = g.add_node(N::Pack(Pack::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(pk, s, Edge::new(0.into(), 0.into()));
+    g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+
+    let def = derive_synthdef(&g, 2, "t").expect("derive").def;
+    let oscs: Vec<_> = def.units.iter().filter(|u| u.name == "SinOsc").collect();
+    assert_eq!(oscs.len(), 2, "one SinOsc per freq channel");
+    assert!(
+        oscs.iter()
+            .all(|u| matches!(u.inputs[0], InputRef::Constant(c) if c == 0.0)),
+        "each osc reads its own (silent) freq channel",
+    );
+    assert!(def.params.iter().all(|p| !p.name.ends_with("/freq")));
+    let out = def.units.iter().find(|u| u.name == "Out").expect("Out");
+    assert_eq!(
+        out.inputs.len(),
+        1 + 2,
+        "the 2-wide group reaches both device channels",
+    );
+}
+
+#[test]
+fn freq_wire_changes_structural_sig() {
+    // Connecting a dsp wire into freq swaps the freq param for the wire (and
+    // pulls the modulator chain into the def), so the structural sig changes
+    // and the driver respawns (crossfaded).
+    let def = |fm: bool| {
+        let mut g = Graph::<N>::default();
+        let m = g.add_node(N::SinOsc(SinOsc::default()));
+        let s = g.add_node(N::SinOsc(SinOsc::default()));
+        let o = g.add_node(N::Out(Out::default()));
+        if fm {
+            g.add_edge(m, s, Edge::new(0.into(), 0.into()));
+        }
+        g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+        derive_synthdef(&g, 1, "t").expect("derive").def
+    };
+    assert_ne!(
+        structural_sig(&def(false)),
+        structural_sig(&def(true)),
+        "a freq connect/disconnect must change the structural signature",
+    );
+}
+
+#[test]
+fn dangling_unpack_port_into_freq_keeps_the_param() {
+    // A stale `~unpack` edge (output 1 of a count-1 unpack) into `~sinosc.freq`:
+    // the summand materializes no signal, so freq must fall back to its param.
+    // (The Steel side cannot see the port is dangling and keeps queueing state
+    // updates; only a def-present param is drained by the driver.)
+    let mut unpack = Unpack::default();
+    unpack.set_count(1);
+    let mut g = Graph::<N>::default();
+    let src = g.add_node(N::SinOsc(SinOsc::default()));
+    let up = g.add_node(N::Unpack(unpack));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(src, up, Edge::new(0.into(), 0.into()));
+    g.add_edge(up, s, Edge::new(1.into(), 0.into())); // stale: output 1 of 1
+    g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let def = &derived.def;
+    // Both the upstream source's and the carrier's freq params are baked.
+    assert_eq!(
+        def.params
+            .iter()
+            .filter(|p| p.name.ends_with("/freq"))
+            .count(),
+        2,
+        "the dangling-port freq falls back to its param",
+    );
+    // The carrier (emitted after the source) reads a param, not a wire.
+    let carrier = def
+        .units
+        .iter()
+        .filter(|u| u.name == "SinOsc")
+        .last()
+        .expect("carrier SinOsc");
+    assert!(matches!(carrier.inputs[0], InputRef::Param(_)));
+}
+
+#[test]
+fn scopeout_output_into_freq_keeps_the_param() {
+    // `~scopeout` output 1 (its Steel channel-count output - the node has NO dsp
+    // outputs) wired into `~sinosc.freq`: the summand materializes no signal, so
+    // freq must fall back to its param. Guards the "None iff nothing
+    // materialized" rule: keying on raw summands would bake silence here while
+    // the node's Steel expr queues the (numeric) channel count into a param
+    // absent from the def, growing `pending` unboundedly.
+    let mut g = Graph::<N>::default();
+    let t = g.add_node(N::ScopeOut(ScopeOut::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(t, s, Edge::new(1.into(), 0.into())); // scope channel count -> freq
+    g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let def = &derived.def;
+    assert!(
+        def.params.iter().any(|p| p.name.ends_with("/freq")),
+        "freq falls back to its param",
+    );
+    let osc = def
+        .units
+        .iter()
+        .find(|u| u.name == "SinOsc")
+        .expect("SinOsc");
+    assert!(matches!(osc.inputs[0], InputRef::Param(_)));
 }
 
 #[test]
@@ -332,7 +512,7 @@ fn scopeout_taps_a_multichannel_signal() {
         InputRef::Unit { unit: 7, output: 0 },
         InputRef::Unit { unit: 8, output: 0 },
     );
-    let outs = ScopeOut::default().ugens(&[2], &[sig], &mut b);
+    let outs = ScopeOut::default().ugens(&[2], &[Some(sig)], &mut b);
     assert!(outs.is_empty(), "a tap sink has no dsp outputs");
 
     let (def, _params, monitors, _gains) = b.finish("t");
@@ -358,7 +538,7 @@ fn lag_smooths_each_channel() {
     // single `dur` param (params broadcast across the group); width in = width out.
     let mut b = DspBuilder::new(1);
     let sig = stereo(InputRef::Constant(0.25), InputRef::Constant(0.5));
-    let outs = Lag::default().ugens(&[0], &[sig], &mut b);
+    let outs = Lag::default().ugens(&[0], &[Some(sig)], &mut b);
     assert_eq!(outs.len(), 1, "one dsp output port");
     assert_eq!(outs[0].width(), 2, "width flows through");
 
@@ -382,7 +562,7 @@ fn out_writes_multichannel_channel_per_bus() {
     // fan-out - the two written wires stay distinct).
     let mut b = DspBuilder::new(2);
     let sig = stereo(InputRef::Constant(0.25), InputRef::Constant(0.5));
-    let outs = Out::default().ugens(&[0], &[sig], &mut b);
+    let outs = Out::default().ugens(&[0], &[Some(sig)], &mut b);
     assert!(outs.is_empty());
 
     let (def, ..) = b.finish("t");
@@ -425,7 +605,7 @@ fn out_drops_excess_channels() {
         Signal::mono(InputRef::Constant(0.2)),
         Signal::mono(InputRef::Constant(0.3)),
     ]);
-    Out::default().ugens(&[0], &[sig], &mut b);
+    Out::default().ugens(&[0], &[Some(sig)], &mut b);
 
     let (def, ..) = b.finish("t");
     let n_muls = def
@@ -781,6 +961,52 @@ fn derived_synth_plays_expected_tone() {
     assert!(
         m220 > 5.0 * m440,
         "expected 220 Hz dominant: m220={m220}, m440={m440}"
+    );
+}
+
+#[test]
+fn audio_rate_fm_renders_through_the_wire() {
+    // `~sinosc(ar) -> ~sinosc.freq -> ~out` rendered offline: the carrier's freq
+    // is the modulator's raw [-1, 1] Hz signal, so the output is the faint
+    // phase-wobble tone at the modulator's 220 Hz (the carrier's own 220 Hz
+    // *param* default must NOT sound - the wire wins). Proves the audio-rate
+    // freq path end to end through the real engine.
+    let mut g = Graph::<N>::default();
+    let m = g.add_node(N::SinOsc(SinOsc::default()));
+    let s = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(m, s, Edge::new(0.into(), 0.into()));
+    g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+
+    let (mut controller, _nrt, mut world) = engine(Options {
+        sample_rate: SR as f64,
+        output_channels: 1,
+        ..Options::default()
+    });
+    controller.add_synthdef(derived.def);
+    let node = controller
+        .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
+        .expect("synth_new");
+    {
+        let mut backend = Embedded::new(&mut controller);
+        for gain in &derived.gains {
+            backend.set_control(node, gain.index, 1.0).expect("fade in");
+        }
+    }
+
+    let a = render(&mut world, SR as usize / 2);
+    assert!(
+        a.iter().all(|s| s.is_finite() && s.abs() <= 1.001),
+        "output must stay finite and within full scale",
+    );
+    // A ±1 Hz freq wobbles the phase by ~1/(2*pi*220), so the tone at 220 Hz has
+    // a tiny but clearly-detectable magnitude - and 330 Hz carries nothing.
+    let (m220, m330) = (goertzel(&a, 220.0), goertzel(&a, 330.0));
+    assert!(m220 > 1e-6, "expected the 220 Hz wobble: m220={m220}");
+    assert!(
+        m220 > 5.0 * m330,
+        "220 Hz must dominate: m220={m220}, m330={m330}",
     );
 }
 

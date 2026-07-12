@@ -773,6 +773,52 @@ mod tests {
         );
     }
 
+    /// The hybrid side of `~sinosc`'s freq input: a *dsp* source pushed through
+    /// it must NOT touch the param state - dsp placeholder outputs are
+    /// non-numeric by contract, so the `number?` guard skips the write. (The
+    /// derived def reads the wire instead, so a queued update would have no
+    /// param to drain into and `pending` would grow unboundedly.)
+    #[test]
+    fn dsp_wire_into_freq_leaves_param_state_untouched() {
+        use gantz_core::compile::push_pull_entrypoints;
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_core::steel::SteelVal;
+        type G = Graph<Box<dyn Node>>;
+
+        // number -> ~lag (dsp input) -> ~sinosc.freq: pushing the number fires
+        // the whole chain, so the lag's placeholder reaches the freq input.
+        let mut g: G = Graph::default();
+        let num = g.add_node(Box::new(gantz_std::Number::default()) as Box<dyn Node>);
+        let lag = g.add_node(Box::new(gantz_plyphon::Lag::default()) as Box<dyn Node>);
+        let sine = g.add_node(Box::new(gantz_plyphon::SinOsc::default()) as Box<dyn Node>);
+        g.add_edge(num, lag, Edge::new(0.into(), 0.into()));
+        g.add_edge(lag, sine, Edge::new(0.into(), 0.into()));
+
+        let get_node = |_: &gantz_ca::ContentAddr| -> Option<&dyn gantz_core::Node> { None };
+        let config = gantz_core::compile::Config::default();
+        let eps = push_pull_entrypoints(&get_node, &g);
+        let (mut vm, _compiled) = gantz_core::vm::init(&get_node, &g, &eps, &config)
+            .expect("compile number -> ~lag -> ~sinosc");
+
+        vm.update_value(gantz_core::ARGS, gantz_core::args::time(1.25));
+        gantz_core::node::state::update_value(&mut vm, &[num.index()], SteelVal::NumV(440.0))
+            .expect("set number state");
+        fire_push(&mut vm, &eps, num.index());
+
+        let (value, pending) = gantz_plyphon::param::drain_param(&mut vm, &[sine.index()])
+            .expect("~sinosc param state present");
+        assert_eq!(
+            value,
+            f64::from(gantz_plyphon::SinOsc::DEFAULT_FREQ),
+            "a dsp wire must not overwrite the param value",
+        );
+        assert!(
+            pending.is_empty(),
+            "a dsp wire must not queue param updates",
+        );
+    }
+
     /// `~scopeout`'s control side: firing its trigger input outputs the per-channel
     /// ring-buffer state (which the dsp driver fills) as a list of rings on
     /// output 0, and the channel count - the number of rings - on output 1. Here

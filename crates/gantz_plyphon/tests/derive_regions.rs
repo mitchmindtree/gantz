@@ -250,6 +250,52 @@ fn two_buses_between_the_same_regions() {
 }
 
 #[test]
+fn fm_across_a_bus_boundary() {
+    // `~sinosc -> ~bus -> ~sinosc.freq -> ~out`: the modulator crosses the
+    // boundary, so the reader region's carrier reads its freq from the bus `In`
+    // wire and bakes no freq fallback param (the writer's own freq param is
+    // unaffected).
+    let mut g = Graph::<N>::default();
+    let m = g.add_node(N::SinOsc(SinOsc::default()));
+    let b = g.add_node(N::Bus(Bus::default()));
+    let c = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(m, b, Edge::new(0.into(), 0.into()));
+    g.add_edge(b, c, Edge::new(0.into(), 0.into()));
+    g.add_edge(c, o, Edge::new(0.into(), 0.into()));
+
+    let regions = derive_synthdefs(&g, 1, "head").expect("derive");
+    assert_eq!(regions.len(), 2, "modulator region + carrier region");
+    let (writer, reader) = (&regions[0], &regions[1]);
+    assert!(
+        writer
+            .derived
+            .def
+            .params
+            .iter()
+            .any(|p| p.name.ends_with("/freq")),
+        "the modulator keeps its own freq param",
+    );
+    let rdef = &reader.derived.def;
+    assert_eq!(reader.bus_reads.len(), 1);
+    let in_unit = reader.bus_reads[0].unit;
+    assert_eq!(rdef.units[in_unit].name, "In");
+    let osc = rdef
+        .units
+        .iter()
+        .find(|u| u.name == "SinOsc")
+        .expect("carrier SinOsc");
+    assert!(
+        matches!(osc.inputs[0], InputRef::Unit { unit, .. } if unit as usize == in_unit),
+        "the carrier's freq reads the bus In wire",
+    );
+    assert!(
+        !rdef.params.iter().any(|p| p.name.ends_with("/freq")),
+        "the wired carrier bakes no freq param",
+    );
+}
+
+#[test]
 fn bus_cycle_is_rejected() {
     // Two regions reading each other's buses: no writer-before-reader order
     // exists, so derivation reports the cycle (deliberate feedback is a planned

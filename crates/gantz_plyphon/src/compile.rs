@@ -133,9 +133,13 @@ pub struct Derived {
 /// falls outside the traversal - it is a Steel/state concern, not part of the dsp
 /// signal graph. The same rule applies at *interior* nodes: only nodes that feed a
 /// sink transitively through dsp inputs contribute units, so a dsp chain wired into
-/// a control input (e.g. a `~lag` into `~sinosc`'s freq) emits nothing rather than
-/// dead units whose params the driver would drive and whose presence would force
-/// spurious respawns (they'd land in [`structural_sig`]).
+/// a control input emits nothing rather than dead units whose params the driver
+/// would drive and whose presence would force spurious respawns (they'd land in
+/// [`structural_sig`]). A *hybrid* dsp input (e.g. `~sinosc`'s freq, see
+/// [`NodeDsp::n_dsp_inputs`](crate::NodeDsp::n_dsp_inputs)) IS part of the
+/// traversal: a dsp chain wired into it emits units and drives the input
+/// directly (audio-rate FM), and the input's fallback param is only baked while
+/// no dsp source is connected.
 ///
 /// Nested graphs are supported via a pre-derivation pass: [`flatten`](crate::flatten())
 /// resolves graph refs and splices their nodes into a single flat graph (each
@@ -180,15 +184,17 @@ where
         let Some(dsp) = graph[n].to_node_dsp() else {
             continue;
         };
-        let inputs: Vec<Signal> = sources[&n]
+        let inputs: Vec<Option<Signal>> = sources[&n]
             .iter()
             .map(|summands| {
                 let sigs: Vec<Signal> = summands
                     .iter()
                     .filter_map(|&(s, port)| outputs.get(&s).and_then(|o| o.get(port)).cloned())
                     .collect();
-                // An unconnected input sums to mono silence.
-                sum_signals(&mut builder, &sigs)
+                // `None` iff no summand materialized a signal (unconnected, or
+                // e.g. a dangling `~unpack` port), so hybrid inputs fall back
+                // to their param exactly when the Steel side keeps it driven.
+                (!sigs.is_empty()).then(|| sum_signals(&mut builder, &sigs))
             })
             .collect();
         let outs = dsp.ugens(&graph[n].node_path(n.index()), &inputs, &mut builder);
@@ -552,7 +558,7 @@ where
             };
             // Each input sums its summands: a plain summand wires directly, a
             // boundary summand lowers to its buses - in-region wires or `In`s.
-            let mut inputs: Vec<Signal> = Vec::with_capacity(sources[&n].len());
+            let mut inputs: Vec<Option<Signal>> = Vec::with_capacity(sources[&n].len());
             for summands in &sources[&n] {
                 let mut sigs: Vec<Signal> = Vec::new();
                 for &(s, port) in summands {
@@ -592,18 +598,16 @@ where
                                     .clone();
                                 sigs.push(sig);
                             }
-                            _ => sigs.push(
-                                outputs
-                                    .get(&src)
-                                    .and_then(|o| o.get(sport))
-                                    .cloned()
-                                    .unwrap_or_else(|| Signal::silent(1)),
-                            ),
+                            // A dangling port materializes nothing.
+                            _ => sigs.extend(outputs.get(&src).and_then(|o| o.get(sport)).cloned()),
                         }
                     }
                 }
-                // An unconnected (or unsourced-boundary) input sums to silence.
-                inputs.push(sum_signals(&mut builder, &sigs));
+                // `None` iff no summand materialized a signal (unconnected, an
+                // unsourced boundary, or a dangling port), so hybrid inputs
+                // fall back to their param exactly when the Steel side keeps
+                // it driven.
+                inputs.push((!sigs.is_empty()).then(|| sum_signals(&mut builder, &sigs)));
             }
             let outs = dsp.ugens(&graph[n].node_path(n.index()), &inputs, &mut builder);
             debug_assert_eq!(

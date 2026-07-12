@@ -6,7 +6,7 @@ use gantz_nodetag::NodeTag;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, NodeRate, Signal, ToNodeDsp, cahash_rate};
+use crate::dsp::{DspBuilder, NodeDsp, NodeRate, Signal, ToNodeDsp, cahash_rate, input_or_silent};
 use crate::param::{param_name, param_state, plyphon_param};
 
 /// A one-pole lag (smoother). Emits a `Lag` UGen per input channel at the
@@ -70,9 +70,9 @@ impl gantz_core::Node for Lag {
 
     fn expr(&self, _ctx: ExprCtx<'_, '_>) -> ExprResult {
         // Steel-inert: the audio engine smooths the signal; the duration lives in
-        // state and is applied via `set_control`. A placeholder output feeds the
-        // inert dsp output edge.
-        gantz_core::node::parse_expr("0")
+        // state and is applied via `set_control`. A non-numeric placeholder
+        // output feeds the inert dsp output edge (see the `NodeDsp` docs).
+        gantz_core::node::parse_expr("'()")
     }
 }
 
@@ -85,8 +85,8 @@ impl NodeDsp for Lag {
         1
     }
 
-    fn ugens(&self, path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
-        let signal = inputs.first().cloned().unwrap_or_else(|| Signal::silent(1));
+    fn ugens(&self, path: &[usize], inputs: &[Option<Signal>], b: &mut DspBuilder) -> Vec<Signal> {
+        let signal = input_or_silent(inputs, 0);
         // The lag time is a settable control param (nominal default here; the
         // driver applies the live state value via `set_control`), shared by every
         // channel's `Lag` unit (params broadcast across the group).

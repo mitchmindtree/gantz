@@ -9,7 +9,7 @@ use plyphon::Rate;
 use plyphon::synthdef::{InputRef, UnitSpec};
 use serde::{Deserialize, Serialize};
 
-use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
+use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, input_or_silent};
 
 /// A signal *tap*: streams every sample of its input signal into per-channel
 /// ring buffers held in VM state (the audio driver writes them, draining a
@@ -127,14 +127,14 @@ impl NodeDsp for ScopeOut {
         true
     }
 
-    fn ugens(&self, path: &[usize], inputs: &[Signal], b: &mut DspBuilder) -> Vec<Signal> {
+    fn ugens(&self, path: &[usize], inputs: &[Option<Signal>], b: &mut DspBuilder) -> Vec<Signal> {
         // `ScopeOut.ar(bufnum, ch0, ch1, …)`: stream *every* sample of each of the
         // input signal's channels (interleaved) off the audio thread into a cued
         // scope stream the driver drains into this node's per-channel rings - the
         // channel count is the input's width. `bufnum` is a no-lag control param;
         // the driver allocates a globally-unique cued index and sets it via
         // `set_control` after spawning (no def mutation).
-        let signal = inputs.first().cloned().unwrap_or_else(|| Signal::silent(1));
+        let signal = input_or_silent(inputs, 0);
         let bufnum = b.push_control_param(path, "bufnum");
         let mut scope_inputs = Vec::with_capacity(signal.width() + 1);
         scope_inputs.push(InputRef::Param(bufnum));

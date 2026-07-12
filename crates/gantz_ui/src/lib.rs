@@ -9,6 +9,14 @@
 //! The full v1 vocabulary reference lives here at the crate level and grows
 //! alongside the modules below.
 
+pub use diag::{ErrorReason, TreePath, Warning, WarningKind};
+pub use elem::{
+    ATTRS_MARKER, Align, BindPath, Button, Col, Dialer, DialerStyle, Element, ErrorElem, Frame,
+    Grid, Key, Label, Matrix, Plot, PlotMode, PlotStyle, RESERVED_TAGS, RefGui, Rgba, Row, Scope,
+    Sep, Space, Toggle, Value,
+};
 pub use sexpr::{SExpr, summary};
 
+pub mod diag;
+pub mod elem;
 pub mod sexpr;

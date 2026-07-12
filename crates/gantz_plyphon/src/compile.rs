@@ -13,7 +13,9 @@ use gantz_core::compile::pull_eval_order;
 use gantz_core::node::Conns;
 use gantz_core::node::graph::{Graph, NodeIx};
 
-use crate::dsp::{DspBuilder, GainRef, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp};
+use crate::dsp::{
+    DspBuilder, GainRef, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp, sum_signals,
+};
 
 /// An error deriving a synthdef from a graph.
 #[derive(Debug)]
@@ -41,6 +43,9 @@ pub struct BusBinding {
     /// The `~bus` node's path - the driver's bus-allocation key. Consecutive
     /// buses alias (a `~bus` fed directly by another `~bus` shares the upstream
     /// bus), so reads name the *effective* upstream node's path.
+    ///
+    /// For an implicit endpoint bus (see [`output`](Self::output)) this is the
+    /// endpoint *source* node's path instead.
     pub node_path: Vec<usize>,
     /// The bus's channel count - the boundary signal's width.
     pub channels: usize,
@@ -50,6 +55,23 @@ pub struct BusBinding {
     /// The no-lag control param the driver sets to the allocated bus channel
     /// via `set_control` after spawning.
     pub param: usize,
+    /// `None` for a classic single-writer `~bus` (keyed by the effective bus
+    /// node). `Some(port)` for an *implicit endpoint bus*: when a boundary's
+    /// source chain fans out (several summands feed it), the `~bus` keeps only
+    /// its cut role and each transitive endpoint gets its own single-writer
+    /// bus, keyed by the endpoint source's path + output port. Readers emit
+    /// one `In` per endpoint and sum them.
+    pub output: Option<usize>,
+}
+
+/// A cross-region bus identity within [`derive_synthdefs`]: a classic
+/// single-writer `~bus` chain (keyed by the effective bus node), or an
+/// implicit per-endpoint bus where the chain fans out (keyed by the endpoint
+/// source node + output port). See [`BusBinding::output`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RegionBus {
+    Bus(NodeIx),
+    Src(NodeIx, usize),
 }
 
 /// One region of a boundary-cut graph: its derived synthdef + bindings, plus
@@ -120,8 +142,15 @@ pub struct Derived {
 /// carrying its original nested path via [`ToNodeDsp::node_path`]) before
 /// derivation runs.
 ///
-/// Phase-1 limitations: a single edge per DSP input (no summing) and acyclic
-/// graphs only (no feedback).
+/// Multiple edges into one dsp input *sum*: the input's value is the
+/// unity-gain mix of every incoming edge ([`sum_signals`]) - the result is as
+/// wide as the widest summand, a mono summand broadcasts across every channel
+/// and a narrower one contributes silence past its own width. Summands take a
+/// canonical order (sorted by source node path + output port), so the derived
+/// def is independent of edge insertion order. A single edge passes through
+/// unit-free.
+///
+/// Phase-1 limitation: acyclic graphs only (no feedback).
 pub fn derive_synthdef<N>(
     graph: &Graph<N>,
     out_channels: usize,
@@ -153,10 +182,13 @@ where
         };
         let inputs: Vec<Signal> = sources[&n]
             .iter()
-            .map(|src| {
-                src.and_then(|(s, port)| outputs.get(&s).and_then(|o| o.get(port)).cloned())
-                    // Unconnected inputs default to mono silence.
-                    .unwrap_or_else(|| Signal::silent(1))
+            .map(|summands| {
+                let sigs: Vec<Signal> = summands
+                    .iter()
+                    .filter_map(|&(s, port)| outputs.get(&s).and_then(|o| o.get(port)).cloned())
+                    .collect();
+                // An unconnected input sums to mono silence.
+                sum_signals(&mut builder, &sigs)
             })
             .collect();
         let outs = dsp.ugens(&graph[n].node_path(n.index()), &inputs, &mut builder);
@@ -210,32 +242,31 @@ fn dsp_reachable<N: ToNodeDsp>(graph: &Graph<N>, sinks: &[NodeIx]) -> HashSet<No
     reachable
 }
 
-/// The winning `(source node, output port)` per dsp input of every reachable
-/// node: only reachable dsp sources contribute, and the *first-added* edge to
-/// an input wins (no summing of multiple sources yet) - `edges_directed`
-/// iterates newest-edge-first, so the reversed pass makes the oldest edge
-/// authoritative.
+/// The summand `(source node, output port)`s per dsp input of every reachable
+/// node: only reachable dsp sources contribute, every edge into an input is a
+/// summand (an empty list = unconnected), and summands take a canonical order
+/// (sorted by source node path + output port, duplicates kept) so the derived
+/// def is independent of edge insertion order.
 #[allow(clippy::type_complexity)]
 fn resolved_sources<N: ToNodeDsp>(
     graph: &Graph<N>,
     reachable: &HashSet<NodeIx>,
-) -> HashMap<NodeIx, Vec<Option<(NodeIx, usize)>>> {
+) -> HashMap<NodeIx, Vec<Vec<(NodeIx, usize)>>> {
     reachable
         .iter()
         .map(|&n| {
             let n_dsp_in = graph[n].to_node_dsp().map_or(0, |d| d.n_dsp_inputs());
-            let mut inputs: Vec<Option<(NodeIx, usize)>> = vec![None; n_dsp_in];
-            let edges: Vec<_> = graph.edges_directed(n, Direction::Incoming).collect();
-            for e in edges.into_iter().rev() {
+            let mut inputs: Vec<Vec<(NodeIx, usize)>> = vec![Vec::new(); n_dsp_in];
+            for e in graph.edges_directed(n, Direction::Incoming) {
                 let input_ix = e.weight().input.0 as usize;
                 let s = e.source();
-                if input_ix < n_dsp_in
-                    && inputs[input_ix].is_none()
-                    && reachable.contains(&s)
-                    && graph[s].to_node_dsp().is_some()
+                if input_ix < n_dsp_in && reachable.contains(&s) && graph[s].to_node_dsp().is_some()
                 {
-                    inputs[input_ix] = Some((s, e.weight().output.0 as usize));
+                    inputs[input_ix].push((s, e.weight().output.0 as usize));
                 }
+            }
+            for summands in &mut inputs {
+                summands.sort_by_cached_key(|&(s, port)| (graph[s].node_path(s.index()), port));
             }
             (n, inputs)
         })
@@ -280,11 +311,15 @@ pub(crate) fn merged_pull_order<N: ToNodeDsp>(
 ///
 /// A boundary whose two sides share a region lowers to a plain wire. A
 /// boundary fed directly by another boundary *aliases* it (no relay def, no
-/// extra latency). An unconnected boundary reads as mono silence. A region is
-/// derived only if it feeds a sink transitively. Bus writes are lifted to audio
-/// rate ([`DspBuilder::ensure_audio`]) and fade-gained (the crossfade lever,
-/// [`DspBuilder::push_fade_gain`]). Widths flow forward across boundaries -
-/// hence the topological derivation order. Defs are named
+/// extra latency). An unconnected boundary reads as mono silence. A boundary
+/// fed by *several* summands keeps only its cut role: each transitive endpoint
+/// writes its own implicit single-writer bus ([`BusBinding::output`]) and
+/// every reader emits one `In` per endpoint, summing after the reads
+/// ([`sum_signals`] - so mono-broadcast reconciles on materialized signals). A
+/// region is derived only if it feeds a sink transitively. Bus writes are
+/// lifted to audio rate ([`DspBuilder::ensure_audio`]) and fade-gained (the
+/// crossfade lever, [`DspBuilder::push_fade_gain`]). Widths flow forward
+/// across boundaries - hence the topological derivation order. Defs are named
 /// `<name_prefix>-<region key>`.
 pub fn derive_synthdefs<N>(
     graph: &Graph<N>,
@@ -304,7 +339,7 @@ where
         |n: NodeIx| -> bool { graph[n].to_node_dsp().is_some_and(|d| d.is_boundary()) };
 
     // Regions: connected components of the reachable NON-boundary nodes over
-    // their winning dsp edges (edges into or out of a boundary never join).
+    // their dsp edges (edges into or out of a boundary never join).
     let mut comp: HashMap<NodeIx, usize> = HashMap::new();
     let mut n_comps = 0;
     for start in graph.node_indices() {
@@ -316,21 +351,24 @@ where
         comp.insert(start, id);
         let mut stack = vec![start];
         while let Some(n) = stack.pop() {
-            // Upstream: this node's winning sources.
+            // Upstream: this node's summand sources.
             for &(s, _) in sources[&n].iter().flatten() {
                 if !is_boundary(s) && comp.insert(s, id).is_none() {
                     stack.push(s);
                 }
             }
-            // Downstream: reachable non-boundary consumers whose winning source
-            // for that input is this node.
+            // Downstream: reachable non-boundary consumers with this node
+            // among that input's summands.
             for e in graph.edges_directed(n, Direction::Outgoing) {
                 let t = e.target();
                 if !reachable.contains(&t) || is_boundary(t) || comp.contains_key(&t) {
                     continue;
                 }
                 let input_ix = e.weight().input.0 as usize;
-                if sources[&t].get(input_ix).copied().flatten().map(|(s, _)| s) == Some(n) {
+                let among = sources[&t]
+                    .get(input_ix)
+                    .is_some_and(|ss| ss.iter().any(|&(s, _)| s == n));
+                if among {
                     comp.insert(t, id);
                     stack.push(t);
                 }
@@ -338,8 +376,14 @@ where
         }
     }
 
-    // Each boundary's *effective* bus (consecutive boundaries alias) and that
-    // bus's winning source. A pure boundary cycle degrades to an unsourced bus.
+    // Boundary lowering. A *pure* single-summand chain of boundaries keeps the
+    // classic single-writer bus identity: consecutive buses alias, keyed by the
+    // *effective* (top-most) bus node. A boundary whose chain fans out keeps
+    // only its cut role: each transitive non-boundary endpoint gets its own
+    // implicit single-writer bus and readers sum after their `In`s (width
+    // reconciliation needs locally materialized signals - a writer cannot know
+    // the sum's final width at its own derive time). A pure boundary cycle
+    // degrades to an unsourced (silent) bus.
     let boundaries: Vec<NodeIx> = graph
         .node_indices()
         .filter(|&n| reachable.contains(&n) && is_boundary(n))
@@ -347,7 +391,7 @@ where
     let effective = |b: NodeIx| -> NodeIx {
         let mut cur = b;
         let mut visited = HashSet::new();
-        while let Some(&(s, _)) = sources[&cur].first().and_then(|o| o.as_ref()) {
+        while let Some(&[(s, _)]) = sources[&cur].first().map(|v| v.as_slice()) {
             if !is_boundary(s) || !visited.insert(cur) {
                 break;
             }
@@ -355,18 +399,51 @@ where
         }
         cur
     };
-    // The effective bus's source, unless it is itself a boundary (a cycle).
-    let bus_source = |b: NodeIx| -> Option<(NodeIx, usize)> {
-        sources[&effective(b)]
-            .first()
-            .copied()
-            .flatten()
-            .filter(|&(s, _)| !is_boundary(s))
+    // The classic case: the effective bus's lone summand is a non-boundary
+    // source (every hop of the chain had exactly one). `None` = the chain fans
+    // out somewhere, is unsourced, or is a pure bus cycle.
+    let classic_source = |b: NodeIx| -> Option<(NodeIx, usize)> {
+        match sources[&effective(b)].first().map(|v| v.as_slice()) {
+            Some(&[(s, port)]) if !is_boundary(s) => Some((s, port)),
+            _ => None,
+        }
+    };
+    // Every transitive non-boundary endpoint feeding `b`, canonical order,
+    // duplicates kept (each is a summand). Empty = unsourced (silence).
+    let bus_endpoints = |b: NodeIx| -> Vec<(NodeIx, usize)> {
+        let mut endpoints = Vec::new();
+        let mut visited = HashSet::new();
+        let mut stack = vec![b];
+        while let Some(cur) = stack.pop() {
+            if !visited.insert(cur) {
+                continue;
+            }
+            for &(s, port) in sources[&cur].iter().flatten() {
+                match is_boundary(s) {
+                    true => stack.push(s),
+                    false => endpoints.push((s, port)),
+                }
+            }
+        }
+        endpoints.sort_by_cached_key(|&(s, port)| (graph[s].node_path(s.index()), port));
+        endpoints
+    };
+    // The buses a boundary lowers to, each with its writing source.
+    let region_buses = |b: NodeIx| -> Vec<(RegionBus, (NodeIx, usize))> {
+        match classic_source(b) {
+            Some(src) => vec![(RegionBus::Bus(effective(b)), src)],
+            None => bus_endpoints(b)
+                .into_iter()
+                .map(|(s, port)| (RegionBus::Src(s, port), (s, port)))
+                .collect(),
+        }
     };
 
-    // Cross-region reads: (reader component, effective bus), from every winning
-    // boundary-sourced input whose bus originates in another component.
-    let mut cross_reads: HashSet<(usize, NodeIx)> = HashSet::new();
+    // Cross-region reads - (reader component, bus), from every boundary
+    // summand whose bus originates in another component - and each bus's
+    // writing source.
+    let mut cross_reads: HashSet<(usize, RegionBus)> = HashSet::new();
+    let mut bus_writer: HashMap<RegionBus, (NodeIx, usize)> = HashMap::new();
     for (&n, srcs) in &sources {
         if is_boundary(n) {
             continue;
@@ -375,9 +452,10 @@ where
             if !is_boundary(s) {
                 continue;
             }
-            if let Some((src, _)) = bus_source(s) {
+            for (bus, (src, port)) in region_buses(s) {
+                bus_writer.insert(bus, (src, port));
                 if comp[&src] != comp[&n] {
-                    cross_reads.insert((comp[&n], effective(s)));
+                    cross_reads.insert((comp[&n], bus));
                 }
             }
         }
@@ -390,9 +468,8 @@ where
         let mut grew = false;
         for &(reader, bus) in &cross_reads {
             if needed.contains(&reader) {
-                if let Some((src, _)) = bus_source(bus) {
-                    grew |= needed.insert(comp[&src]);
-                }
+                let (src, _) = bus_writer[&bus];
+                grew |= needed.insert(comp[&src]);
             }
         }
         if !grew {
@@ -407,11 +484,10 @@ where
         if !needed.contains(&reader) {
             continue;
         }
-        if let Some((src, _)) = bus_source(bus) {
-            let writer = comp[&src];
-            if writer != reader {
-                deps.entry(reader).or_default().insert(writer);
-            }
+        let (src, _) = bus_writer[&bus];
+        let writer = comp[&src];
+        if writer != reader {
+            deps.entry(reader).or_default().insert(writer);
         }
     }
     let mut topo: Vec<usize> = Vec::with_capacity(needed.len());
@@ -437,85 +513,98 @@ where
 
     // Derive each region in topo order; widths flow forward via `bus_width`.
     let mut regions = Vec::with_capacity(topo.len());
-    let mut bus_width: HashMap<NodeIx, usize> = HashMap::new();
+    let mut bus_width: HashMap<RegionBus, usize> = HashMap::new();
     for c in topo {
-        // The region's roots: its sinks, plus the buses it writes (an effective
-        // bus sourced here and read from another needed component).
+        // The region's roots: its sinks, plus the sources of the buses it
+        // writes (a bus sourced here and read from another needed component).
+        // Boundary node-index order keeps the write order deterministic.
+        let mut writes: Vec<(RegionBus, (NodeIx, usize))> = Vec::new();
+        for &b in &boundaries {
+            for (bus, src) in region_buses(b) {
+                if comp[&src.0] == c
+                    && cross_reads
+                        .iter()
+                        .any(|&(r, rb)| rb == bus && needed.contains(&r))
+                    && !writes.iter().any(|&(wb, _)| wb == bus)
+                {
+                    writes.push((bus, src));
+                }
+            }
+        }
         let region_sinks: Vec<NodeIx> = sinks.iter().copied().filter(|s| comp[s] == c).collect();
-        let writes: Vec<NodeIx> = boundaries
+
+        let seeds: Vec<NodeIx> = region_sinks
             .iter()
             .copied()
-            .filter(|&b| effective(b) == b)
-            .filter(|&b| bus_source(b).is_some_and(|(s, _)| comp[&s] == c))
-            .filter(|&b| {
-                cross_reads
-                    .iter()
-                    .any(|&(r, bus)| bus == b && needed.contains(&r))
-            })
+            .chain(writes.iter().map(|&(_, (s, _))| s))
             .collect();
-
-        let seeds: Vec<NodeIx> = region_sinks.iter().chain(writes.iter()).copied().collect();
         let order = merged_pull_order(graph, &seeds, |n| comp.get(&n) == Some(&c));
 
         let mut builder = DspBuilder::new(out_channels);
         let mut outputs: HashMap<NodeIx, Vec<Signal>> = HashMap::new();
         let mut bus_reads: Vec<BusBinding> = Vec::new();
         // One `In` per bus read, shared by every consumer in the region.
-        let mut in_signals: HashMap<NodeIx, Signal> = HashMap::new();
+        let mut in_signals: HashMap<RegionBus, Signal> = HashMap::new();
 
         for n in order {
             let Some(dsp) = graph[n].to_node_dsp() else {
                 continue;
             };
-            let inputs: Vec<Signal> = sources[&n]
-                .iter()
-                .map(|src| match src {
-                    // A boundary source: a wire within the region, an `In` from
-                    // another region's bus, or silence when unsourced.
-                    Some((s, _)) if is_boundary(*s) => match bus_source(*s) {
-                        Some((src, port)) if comp[&src] == c => outputs
-                            .get(&src)
-                            .and_then(|o| o.get(port))
-                            .cloned()
-                            .unwrap_or_else(|| Signal::silent(1)),
-                        Some(_) => {
-                            let bus = effective(*s);
-                            in_signals
-                                .entry(bus)
-                                .or_insert_with(|| {
-                                    let channels = bus_width.get(&bus).copied().unwrap_or(1);
-                                    let bus_param = builder.push_control_param(
-                                        &graph[bus].node_path(bus.index()),
-                                        "bus",
-                                    );
-                                    let unit = builder.push_unit(UnitSpec::new(
-                                        "In",
-                                        Rate::Audio,
-                                        vec![InputRef::Param(bus_param)],
-                                        channels,
-                                    ));
-                                    bus_reads.push(BusBinding {
-                                        node_path: graph[bus].node_path(bus.index()),
-                                        channels,
-                                        unit: unit as usize,
-                                        param: bus_param as usize,
-                                    });
-                                    (0..channels as u32)
-                                        .map(|output| InputRef::Unit { unit, output })
-                                        .collect()
-                                })
-                                .clone()
+            // Each input sums its summands: a plain summand wires directly, a
+            // boundary summand lowers to its buses - in-region wires or `In`s.
+            let mut inputs: Vec<Signal> = Vec::with_capacity(sources[&n].len());
+            for summands in &sources[&n] {
+                let mut sigs: Vec<Signal> = Vec::new();
+                for &(s, port) in summands {
+                    let lowered: Vec<(Option<RegionBus>, (NodeIx, usize))> = match is_boundary(s) {
+                        true => region_buses(s)
+                            .into_iter()
+                            .map(|(bus, src)| (Some(bus), src))
+                            .collect(),
+                        false => vec![(None, (s, port))],
+                    };
+                    for (bus, (src, sport)) in lowered {
+                        match bus {
+                            Some(bus) if comp[&src] != c => {
+                                let sig = in_signals
+                                    .entry(bus)
+                                    .or_insert_with(|| {
+                                        let channels = bus_width.get(&bus).copied().unwrap_or(1);
+                                        let (path, label, output) = bus_param_at(graph, bus);
+                                        let bus_param = builder.push_control_param(&path, &label);
+                                        let unit = builder.push_unit(UnitSpec::new(
+                                            "In",
+                                            Rate::Audio,
+                                            vec![InputRef::Param(bus_param)],
+                                            channels,
+                                        ));
+                                        bus_reads.push(BusBinding {
+                                            node_path: path,
+                                            channels,
+                                            unit: unit as usize,
+                                            param: bus_param as usize,
+                                            output,
+                                        });
+                                        (0..channels as u32)
+                                            .map(|output| InputRef::Unit { unit, output })
+                                            .collect()
+                                    })
+                                    .clone();
+                                sigs.push(sig);
+                            }
+                            _ => sigs.push(
+                                outputs
+                                    .get(&src)
+                                    .and_then(|o| o.get(sport))
+                                    .cloned()
+                                    .unwrap_or_else(|| Signal::silent(1)),
+                            ),
                         }
-                        None => Signal::silent(1),
-                    },
-                    Some((s, port)) => outputs
-                        .get(s)
-                        .and_then(|o| o.get(*port))
-                        .cloned()
-                        .unwrap_or_else(|| Signal::silent(1)),
-                    None => Signal::silent(1),
-                })
-                .collect();
+                    }
+                }
+                // An unconnected (or unsourced-boundary) input sums to silence.
+                inputs.push(sum_signals(&mut builder, &sigs));
+            }
             let outs = dsp.ugens(&graph[n].node_path(n.index()), &inputs, &mut builder);
             debug_assert_eq!(
                 outs.len(),
@@ -526,17 +615,21 @@ where
         }
 
         // Emit the region's bus writes: lift each channel to audio, apply the
-        // driver's fade gain, and write to a bus-index param.
+        // driver's fade gain (one per param path), and write to a bus-index
+        // param.
+        let mut fades: HashMap<Vec<usize>, u32> = HashMap::new();
         let mut bus_writes = Vec::with_capacity(writes.len());
-        for b in writes {
-            let (src, port) = bus_source(b).expect("writes are sourced");
+        for (bus, (src, port)) in writes {
             let sig = outputs
                 .get(&src)
                 .and_then(|o| o.get(port))
                 .cloned()
                 .unwrap_or_else(|| Signal::silent(1));
-            let fade = builder.push_fade_gain(&graph[b].node_path(b.index()));
-            let bus_param = builder.push_control_param(&graph[b].node_path(b.index()), "bus");
+            let (path, label, output) = bus_param_at(graph, bus);
+            let fade = *fades
+                .entry(path.clone())
+                .or_insert_with(|| builder.push_fade_gain(&path));
+            let bus_param = builder.push_control_param(&path, &label);
             let mut out_inputs = vec![InputRef::Param(bus_param)];
             for ch in sig.channels() {
                 let ch = builder.ensure_audio(ch);
@@ -554,24 +647,33 @@ where
             }
             let unit = builder.push_unit(UnitSpec::new("Out", Rate::Audio, out_inputs, 0));
             bus_writes.push(BusBinding {
-                node_path: graph[b].node_path(b.index()),
+                node_path: path,
                 channels: sig.width(),
                 unit: unit as usize,
                 param: bus_param as usize,
+                output,
             });
-            bus_width.insert(b, sig.width());
+            bus_width.insert(bus, sig.width());
         }
 
-        // A stable region identity: its sink and boundary roles + node paths.
+        // A stable region identity: its sink and boundary roles + node paths
+        // (an endpoint bus also hashes its output port; a classic bus hashes
+        // nothing extra, so pre-summing region keys survive).
         let mut h = DefaultHasher::new();
         for s in &region_sinks {
             (0u8, graph[*s].node_path(s.index())).hash(&mut h);
         }
         for w in &bus_writes {
             (1u8, &w.node_path).hash(&mut h);
+            if let Some(o) = w.output {
+                o.hash(&mut h);
+            }
         }
         for r in &bus_reads {
             (2u8, &r.node_path).hash(&mut h);
+            if let Some(o) = r.output {
+                o.hash(&mut h);
+            }
         }
         let key = h.finish();
 
@@ -590,6 +692,24 @@ where
         });
     }
     Ok(regions)
+}
+
+/// The param path, label and endpoint port of a region bus: a classic bus is
+/// keyed by the effective `~bus` node with the plain `"bus"` label, an
+/// endpoint bus by its source node with a port-suffixed `"bus{port}"` label
+/// (matching the instancing pipeline's `Src` convention).
+fn bus_param_at<N: ToNodeDsp>(
+    graph: &Graph<N>,
+    bus: RegionBus,
+) -> (Vec<usize>, String, Option<usize>) {
+    match bus {
+        RegionBus::Bus(b) => (graph[b].node_path(b.index()), "bus".to_string(), None),
+        RegionBus::Src(s, port) => (
+            graph[s].node_path(s.index()),
+            format!("bus{port}"),
+            Some(port),
+        ),
+    }
 }
 
 /// The content-addressed name for a def with the given [`structural_sig`].

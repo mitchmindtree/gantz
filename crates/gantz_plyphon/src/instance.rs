@@ -428,7 +428,13 @@ where
                 let sig = structural_sig(&def);
                 def.name = content_def_name(sig);
                 let to_template = |b: crate::compile::BusBinding| TemplateBus {
-                    key: BusKey::Bus(b.node_path),
+                    key: match b.output {
+                        None => BusKey::Bus(b.node_path),
+                        Some(output) => BusKey::Src {
+                            path: b.node_path,
+                            output,
+                        },
+                    },
                     channels: b.channels,
                     unit: b.unit,
                     param: b.param,

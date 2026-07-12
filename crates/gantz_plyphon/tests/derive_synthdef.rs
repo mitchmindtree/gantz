@@ -8,7 +8,7 @@ use gantz_plyphon::{
     Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, NodeRate, Out, Pack, ScopeOut,
     Signal, SinOsc, ToNodeDsp, Unpack, derive_synthdef, structural_sig,
 };
-use plyphon::synthdef::InputRef;
+use plyphon::synthdef::{InputRef, SynthDef, UnitSpec};
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, Rate, World, engine};
 
 const SR: f32 = 48_000.0;
@@ -1176,5 +1176,221 @@ fn kr_source_reaches_output() {
     assert!(
         m220 > 3.0 * m440,
         "expected 220 Hz dominant: m220={m220}, m440={m440}",
+    );
+}
+
+/// The summing units of a def: `Sum3`/`Sum4` and add-selector `BinaryOpUGen`s
+/// (`special_index` 0 - the gain muls select 2).
+fn sum_units(def: &SynthDef) -> Vec<&UnitSpec> {
+    def.units
+        .iter()
+        .filter(|u| {
+            u.name == "Sum3"
+                || u.name == "Sum4"
+                || (u.name == "BinaryOpUGen" && u.special_index == 0)
+        })
+        .collect()
+}
+
+/// The `(unit, output)` wires among a unit's inputs.
+fn unit_refs(u: &UnitSpec) -> Vec<(u32, u32)> {
+    u.inputs
+        .iter()
+        .filter_map(|i| match i {
+            InputRef::Unit { unit, output } => Some((*unit, *output)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn single_edge_input_sums_unit_free() {
+    // A lone summand passes through: no summing units, so a single-edge patch
+    // derives exactly as before implicit summing existed.
+    let g = sine_to_out();
+    let def = derive_synthdef(&g, 1, "t").expect("derive").def;
+    assert!(sum_units(&def).is_empty());
+}
+
+#[test]
+fn two_edges_into_one_input_sum() {
+    // Two `~sinosc` into one `~out` input: the input is their unity-gain mix
+    // via a single audio-rate add, and both sines land in the def (neither
+    // edge is dropped).
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s0, o, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, o, Edge::new(0.into(), 0.into()));
+    let def = derive_synthdef(&g, 1, "t").expect("derive").def;
+
+    assert_eq!(def.units.iter().filter(|u| u.name == "SinOsc").count(), 2);
+    let adds = sum_units(&def);
+    assert_eq!(adds.len(), 1, "one binary add for two summands");
+    assert_eq!(adds[0].name, "BinaryOpUGen");
+    assert!(matches!(adds[0].rate, Rate::Audio));
+    // The add reads both sines.
+    assert_eq!(unit_refs(adds[0]).len(), 2);
+}
+
+#[test]
+fn summands_tile_sum3_and_sum4() {
+    // Three summands lower to one `Sum3`; five to a `Sum4` fed back into a
+    // binary add.
+    for (n, expected) in [(3, vec!["Sum3"]), (5, vec!["Sum4", "BinaryOpUGen"])] {
+        let mut g = Graph::<N>::default();
+        let o = g.add_node(N::Out(Out::default()));
+        for _ in 0..n {
+            let s = g.add_node(N::SinOsc(SinOsc::default()));
+            g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+        }
+        let def = derive_synthdef(&g, 1, "t").expect("derive").def;
+        let names: Vec<&str> = sum_units(&def).iter().map(|u| u.name.as_str()).collect();
+        assert_eq!(names, expected, "{n} summands");
+    }
+}
+
+#[test]
+fn summand_order_is_canonical() {
+    // The same two-source graph with its edges added in either order derives
+    // the same def: summands sort canonically, so `structural_sig` (and the
+    // content def name) is independent of edge insertion order.
+    let build = |flip: bool| {
+        let mut g = Graph::<N>::default();
+        let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+        let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+        let o = g.add_node(N::Out(Out::default()));
+        let (a, b) = if flip { (s1, s0) } else { (s0, s1) };
+        g.add_edge(a, o, Edge::new(0.into(), 0.into()));
+        g.add_edge(b, o, Edge::new(0.into(), 0.into()));
+        derive_synthdef(&g, 1, "t").expect("derive").def
+    };
+    assert_eq!(structural_sig(&build(false)), structural_sig(&build(true)));
+}
+
+#[test]
+fn mono_broadcasts_across_a_summed_stereo() {
+    // A mono `~sinosc` summed with a stereo `~pack` into `~out` on a 2-channel
+    // device: the sum is stereo (one add per channel) and the mono summand
+    // feeds BOTH adds (broadcast, not left-only).
+    let mut g = Graph::<N>::default();
+    let m = g.add_node(N::SinOsc(SinOsc::default()));
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let pk = g.add_node(N::Pack(Pack::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s0, pk, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, pk, Edge::new(0.into(), 1.into()));
+    g.add_edge(m, o, Edge::new(0.into(), 0.into()));
+    g.add_edge(pk, o, Edge::new(0.into(), 0.into()));
+    let def = derive_synthdef(&g, 2, "t").expect("derive").def;
+
+    let adds = sum_units(&def);
+    assert_eq!(adds.len(), 2, "one add per summed channel");
+    let (a, b) = (unit_refs(adds[0]), unit_refs(adds[1]));
+    let shared: Vec<_> = a.iter().filter(|r| b.contains(r)).collect();
+    assert_eq!(shared.len(), 1, "the mono summand feeds both channels");
+    // The `~out` writes both summed channels.
+    let out = def.units.iter().find(|u| u.name == "Out").expect("Out");
+    assert_eq!(out.inputs.len(), 1 + 2);
+}
+
+#[test]
+fn narrower_summand_pads_with_silence() {
+    // A stereo `~pack` summed with a 3-wide `~pack`: channels 0 and 1 sum a
+    // pair each, channel 2 passes the wide summand's own channel through
+    // unsummed (the narrower summand contributes silence there, which folds
+    // away).
+    let mut g = Graph::<N>::default();
+    let mut wide = Pack::default();
+    wide.set_count(3);
+    let p2 = g.add_node(N::Pack(Pack::default()));
+    let p3 = g.add_node(N::Pack(wide));
+    let o = g.add_node(N::Out(Out::default()));
+    for i in 0..5 {
+        let s = g.add_node(N::SinOsc(SinOsc::default()));
+        let (pk, input) = if i < 2 { (p2, i) } else { (p3, i - 2) };
+        g.add_edge(s, pk, Edge::new(0.into(), (input as u16).into()));
+    }
+    g.add_edge(p2, o, Edge::new(0.into(), 0.into()));
+    g.add_edge(p3, o, Edge::new(0.into(), 0.into()));
+    let def = derive_synthdef(&g, 3, "t").expect("derive").def;
+
+    assert_eq!(sum_units(&def).len(), 2, "adds on channels 0 and 1 only");
+    let out = def.units.iter().find(|u| u.name == "Out").expect("Out");
+    assert_eq!(out.inputs.len(), 1 + 3, "all three channels written");
+}
+
+#[test]
+fn summed_rate_is_audio_iff_any_summand_is() {
+    let build = |rates: [NodeRate; 2]| {
+        let mut g = Graph::<N>::default();
+        let o = g.add_node(N::Out(Out::default()));
+        for rate in rates {
+            let mut sine = SinOsc::default();
+            sine.set_rate(rate);
+            let s = g.add_node(N::SinOsc(sine));
+            g.add_edge(s, o, Edge::new(0.into(), 0.into()));
+        }
+        derive_synthdef(&g, 1, "t").expect("derive").def
+    };
+    let kk = build([NodeRate::Control, NodeRate::Control]);
+    assert!(matches!(sum_units(&kk)[0].rate, Rate::Control));
+    let ka = build([NodeRate::Control, NodeRate::Audio]);
+    assert!(matches!(sum_units(&ka)[0].rate, Rate::Audio));
+}
+
+#[test]
+fn summed_sines_are_both_audible() {
+    // Two sines summed into one `~out` input, the second re-tuned to 330 Hz:
+    // the rendered audio carries BOTH tones - the end-to-end proof that no
+    // edge is dropped.
+    let mut g = Graph::<N>::default();
+    let s0 = g.add_node(N::SinOsc(SinOsc::default()));
+    let s1 = g.add_node(N::SinOsc(SinOsc::default()));
+    let o = g.add_node(N::Out(Out::default()));
+    g.add_edge(s0, o, Edge::new(0.into(), 0.into()));
+    g.add_edge(s1, o, Edge::new(0.into(), 0.into()));
+    let derived = derive_synthdef(&g, 1, "t").expect("derive");
+    let s1_freq = derived
+        .params
+        .iter()
+        .find(|b| b.node_path == [s1.index()])
+        .expect("sine1 freq binding")
+        .index;
+
+    let (mut controller, _nrt, mut world) = engine(Options {
+        sample_rate: SR as f64,
+        output_channels: 1,
+        ..Options::default()
+    });
+    controller.add_synthdef(derived.def);
+    let node = controller
+        .synth_new("t", ROOT_GROUP_ID, AddAction::Tail)
+        .expect("synth_new");
+    {
+        let mut backend = Embedded::new(&mut controller);
+        for gain in &derived.gains {
+            backend.set_control(node, gain.index, 1.0).expect("fade in");
+        }
+        backend
+            .set_control(node, s1_freq, 330.0)
+            .expect("re-tune sine1");
+    }
+
+    let out = render(&mut world, SR as usize / 2);
+    assert!(
+        out.iter().all(|s| s.abs() <= 1.001),
+        "output exceeded full scale"
+    );
+    let (m220, m330, m550) = (
+        goertzel(&out, 220.0),
+        goertzel(&out, 330.0),
+        goertzel(&out, 550.0),
+    );
+    assert!(
+        m220 > 5.0 * m550 && m330 > 5.0 * m550,
+        "both summands must be audible: m220={m220}, m330={m330}, m550={m550}",
     );
 }

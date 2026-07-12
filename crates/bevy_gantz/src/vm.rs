@@ -175,6 +175,74 @@ where
     gantz_core::vm::compile(get_node, graph, vm, entrypoints, config)
 }
 
+/// The node-identity mapping for navigating a head from the `from` commit to
+/// the `to` commit: old node index -> new node index.
+///
+/// Prefers chain-tracked identity (see [`gantz_ca::diff::matching`]) in
+/// whichever direction has a first-parent chain - `to` descending from
+/// `from` (redo) or `from` descending from `to` (undo, inverted) - falling
+/// back to direct content matching for divergent navigation (e.g. across
+/// history-pane jumps). `None` only when an endpoint commit or graph is
+/// missing from the registry.
+pub fn navigation_matching<N>(
+    registry: &ca::Registry<Graph<N>>,
+    from: ca::CommitAddr,
+    to: ca::CommitAddr,
+) -> Option<ca::Matching>
+where
+    N: ca::CaHash,
+{
+    let commits = registry.commits();
+    if ca::history::first_parent_chain_to(commits, to, from).is_some() {
+        ca::diff::matching(registry, from, to)
+    } else if ca::history::first_parent_chain_to(commits, from, to).is_some() {
+        // The chain runs the other way: track identity along it and invert
+        // (matchings are injective).
+        let matching = ca::diff::matching(registry, to, from)?;
+        Some(matching.into_iter().map(|(t, f)| (f, t)).collect())
+    } else {
+        let from_g = registry.commit_graph_ref(&from)?;
+        let to_g = registry.commit_graph_ref(&to)?;
+        Some(ca::diff::match_nodes(from_g, to_g))
+    }
+}
+
+/// Migrate a navigating head's VM node state from the `from` commit's graph
+/// to the `to` commit's, keeping the VM so that every node present on both
+/// sides retains its state (`vm::sync` re-registers the new graph over the
+/// kept VM, initialising only the nodes without state).
+///
+/// The VM is dropped - falling back to a fresh init - only when no mapping
+/// can be derived or the state fails to remap.
+pub fn migrate_vm_state<N>(
+    registry: &ca::Registry<Graph<N>>,
+    vms: &mut head::HeadVms,
+    entity: Entity,
+    from: Option<ca::CommitAddr>,
+    to: Option<ca::CommitAddr>,
+) where
+    N: ca::CaHash,
+{
+    let (Some(from), Some(to)) = (from, to) else {
+        vms.remove(&entity);
+        return;
+    };
+    let Some(vm) = vms.get_mut(&entity) else {
+        return;
+    };
+    match navigation_matching(registry, from, to) {
+        Some(mapping) => {
+            if let Err(e) = gantz_core::node::state::remap_root(vm, &mapping) {
+                log::error!("navigation: failed to remap node state: {e}; reinitialising");
+                vms.remove(&entity);
+            }
+        }
+        None => {
+            vms.remove(&entity);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Observers
 // ---------------------------------------------------------------------------
@@ -361,5 +429,64 @@ pub fn validate_committed<N>(
                 committed.map(|c| c.display_short().to_string()),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A minimal registry: base `[10, 20, 30]`, then a child commit deleting
+    /// index 1 (swap-removal: `[10, 30]`).
+    fn base_and_child() -> (ca::Registry<Graph<u32>>, ca::CommitAddr, ca::CommitAddr) {
+        let mut reg = ca::Registry::default();
+        let mut g = Graph::<u32>::default();
+        for w in [10u32, 20, 30] {
+            g.add_node(w);
+        }
+        let base_ca = ca::graph_addr(&g);
+        let base = reg.commit_graph(Duration::from_secs(1), None, base_ca, || g);
+        let mut g = Graph::<u32>::default();
+        for w in [10u32, 30] {
+            g.add_node(w);
+        }
+        let child_ca = ca::graph_addr(&g);
+        let child = reg.commit_graph(Duration::from_secs(2), Some(base), child_ca, || g);
+        (reg, base, child)
+    }
+
+    #[test]
+    fn navigation_matching_tracks_redo_along_the_chain() {
+        let (reg, base, child) = base_and_child();
+        // Redo direction: base -> child. Index 2 swap-moved to 1; 1 deleted.
+        let m = navigation_matching(&reg, base, child).unwrap();
+        assert_eq!(m, ca::Matching::from([(0, 0), (2, 1)]));
+    }
+
+    #[test]
+    fn navigation_matching_inverts_for_undo() {
+        let (reg, base, child) = base_and_child();
+        // Undo direction: child -> base. The chain runs the other way, so
+        // the tracked matching is inverted: child index 1 returns to 2.
+        let m = navigation_matching(&reg, child, base).unwrap();
+        assert_eq!(m, ca::Matching::from([(0, 0), (1, 2)]));
+    }
+
+    #[test]
+    fn navigation_matching_falls_back_to_content_for_divergent_commits() {
+        let mut reg = ca::Registry::<Graph<u32>>::default();
+        let mut g = Graph::<u32>::default();
+        g.add_node(7);
+        let a_ca = ca::graph_addr(&g);
+        let a = reg.commit_graph(Duration::from_secs(1), None, a_ca, || g);
+        let mut g = Graph::<u32>::default();
+        g.add_node(9);
+        g.add_node(7);
+        let b_ca = ca::graph_addr(&g);
+        let b = reg.commit_graph(Duration::from_secs(2), None, b_ca, || g);
+        // Unrelated commits: direct content matching pairs the equal node.
+        let m = navigation_matching(&reg, a, b).unwrap();
+        assert_eq!(m, ca::Matching::from([(0, 1)]));
     }
 }

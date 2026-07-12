@@ -21,6 +21,7 @@
 //! value unchanged (like [`super::Inspect`]), so a value can be observed without
 //! breaking the chain it flows through.
 
+use super::size_sync::{self, fitted_size};
 use crate::widget::node_inspector;
 use crate::widget::node_inspector::radio_option;
 use crate::{
@@ -504,42 +505,59 @@ impl NodeUi for Plot {
         // Read the series once, up-front (only borrows `ctx`).
         let ys = series(&ctx);
 
+        let size_sync_id = node_egui_id.with("size_sync");
         let framed = uictx.framed_with(frame, |ui, _sockets| {
-            // `Resize` registers its corner under this salt; reading last frame's
-            // response tells us whether it is being actively dragged.
-            let corner_id = resize_id.with("__resize_corner");
-            let resizing = ui
-                .ctx()
-                .read_response(corner_id)
-                .is_some_and(|r| r.dragged());
-            if resizing {
-                ui.ctx().request_repaint();
-            }
+            let size_sync::Decisions {
+                resizing,
+                push_external,
+                drag_released,
+            } = size_sync::begin(ui, size_sync_id, resize_id, [self.width, self.height]);
 
-            // Both axes are user-resizable while the node is selected.
-            let resizable = egui::Vec2b::new(interaction.selected, interaction.selected);
-            egui::containers::Resize::default()
+            let resize = egui::containers::Resize::default()
                 .id(resize_id)
-                .resizable(resizable)
-                .default_size(default_size)
-                .min_size(min_size)
-                .with_stroke(false)
-                .show(ui, |ui| {
-                    let avail = ui.available_size();
+                .with_stroke(false);
+            let resize = if push_external {
+                // One-frame push of the committed size into the displayed
+                // resize state (see `node::size_sync`): overrides persisted
+                // state and cancels any in-flight drag - external wins.
+                ui.ctx().request_repaint();
+                let w = (self.width as f32).max(min_size.x);
+                let h = (self.height as f32).max(min_size.y);
+                resize.fixed_size(egui::vec2(w, h))
+            } else {
+                // Both axes are user-resizable while the node is selected.
+                let resizable = egui::Vec2b::new(interaction.selected, interaction.selected);
+                resize
+                    .resizable(resizable)
+                    .default_size(default_size)
+                    .min_size(min_size)
+            };
+            let inner = resize.show(ui, |ui| {
+                let avail = ui.available_size();
 
-                    // `size` is part of the content address, so only commit it
-                    // once *settled* - never mid-drag, which would churn a commit
-                    // every frame.
-                    let new_w = avail.x.max(min_size.x).round() as u16;
-                    let new_h = avail.y.max(min_size.y).round() as u16;
-                    if !resizing && (self.width != new_w || self.height != new_h) {
-                        self.width = new_w;
-                        self.height = new_h;
-                        changed = true;
-                    }
+                // `size` is part of the content address, so it is written
+                // only on a settled corner-drag release - never mid-drag
+                // (a commit per drag frame), and never merely because the
+                // rendered size differs (which would clobber external
+                // changes from undo/collab sync and mint spurious commits).
+                let fitted = fitted_size(avail.x.max(min_size.x), avail.y.max(min_size.y));
+                if drag_released && [self.width, self.height] != fitted {
+                    [self.width, self.height] = fitted;
+                    changed = true;
+                }
 
-                    self.plot_body(&ys, plot_id, avail, ui)
-                })
+                self.plot_body(&ys, plot_id, avail, ui)
+            });
+
+            size_sync::store(
+                ui,
+                size_sync_id,
+                [self.width, self.height],
+                push_external,
+                resizing,
+            );
+
+            inner
         });
 
         let mut resp = NodeUiResponse::new(framed);

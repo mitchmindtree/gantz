@@ -71,6 +71,9 @@ pub struct GraphScene<'a, N> {
     /// The supplied extension panes, for the "Panes" submenu's checkboxes
     /// (see [`panes_config`][super::panes_config()]).
     ext_panes: &'a [crate::widget::ExtPaneEntry],
+    /// The supplied domain edge stylers along with the viewed head they key
+    /// their styling by (see [`EdgeStyle`][crate::widget::EdgeStyle]).
+    edge_styles: Option<(&'a gantz_ca::Head, &'a [&'a dyn crate::widget::EdgeStyle])>,
 }
 
 /// State associated with the [`GraphScene`] widget that can be useful to access
@@ -130,6 +133,7 @@ where
             immutable: false,
             view_toggles: None,
             ext_panes: &[],
+            edge_styles: None,
         }
     }
 
@@ -181,6 +185,21 @@ where
     /// lists them alongside the built-in panes, matching Settings -> Panes.
     pub fn ext_panes(mut self, ext_panes: &'a [crate::widget::ExtPaneEntry]) -> Self {
         self.ext_panes = ext_panes;
+        self
+    }
+
+    /// Provide the domain edge stylers, along with the viewed head whose
+    /// root graph this scene shows (the stylers key their styling by it).
+    ///
+    /// Each edge is styled by the first styler returning `Some` - see
+    /// [`EdgeStyle`][crate::widget::EdgeStyle]. Edges no styler claims keep
+    /// the default egui-visuals styling.
+    pub fn edge_styles(
+        mut self,
+        head: &'a gantz_ca::Head,
+        styles: &'a [&'a dyn crate::widget::EdgeStyle],
+    ) -> Self {
+        self.edge_styles = Some((head, styles));
         self
     }
 
@@ -276,7 +295,15 @@ where
                     );
                 })
                 .edges(ui, |ectx, ui| {
-                    edges(self.graph, ectx, state, &mut responses, &mut changed, ui)
+                    edges(
+                        self.graph,
+                        ectx,
+                        state,
+                        &mut responses,
+                        &mut changed,
+                        self.edge_styles,
+                        ui,
+                    )
                 });
             });
 
@@ -864,6 +891,7 @@ fn edges<N>(
     state: &mut GraphSceneState,
     responses: &mut Vec<DynResponse>,
     changed: &mut bool,
+    edge_styles: Option<(&gantz_ca::Head, &[&dyn crate::widget::EdgeStyle])>,
     ui: &mut egui::Ui,
 ) {
     // Track whether any edge has a context menu open this frame.
@@ -880,8 +908,24 @@ fn edges<N>(
         let a = egui_graph::NodeId::from_u64(na.index() as u64);
         let b = egui_graph::NodeId::from_u64(nb.index() as u64);
         let mut selected = state.interaction.selection.edges.contains(&e);
-        let response =
-            egui_graph::edge::Edge::new((a, output), (b, input), &mut selected).show(ectx, ui);
+
+        // Ask the domain stylers for this edge's styling (first `Some` wins).
+        let styling = edge_styles.and_then(|(head, styles)| {
+            let ctx =
+                crate::widget::EdgeStyleCtx::new(head, (na.index(), output), (nb.index(), input));
+            crate::widget::edge_style::edge_styling(styles, &ctx)
+        });
+
+        let edge = egui_graph::edge::Edge::new((a, output), (b, input), &mut selected);
+        let response = match &styling {
+            None => edge.show(ectx, ui),
+            Some(styling) => edge.show_with(ectx, ui, |ui, pctx| {
+                paint_styled_edge(styling, &pctx, ui);
+            }),
+        };
+        if let Some(text) = styling.and_then(|s| s.hover_text) {
+            (*response).clone().on_hover_text(text);
+        }
 
         if response.deleted() {
             to_delete.push(e);
@@ -960,6 +1004,136 @@ fn edges<N>(
     if let Some(edge) = ectx.in_progress(ui) {
         edge.show(ui, egui_graph::bezier::Cubic::DEFAULT_CURVATURE);
     }
+}
+
+/// The most parallel strands a styled edge paints: a wider channel count
+/// still draws this many strands (the full band width), overlaid with
+/// diagonal wrap stripes reading as a thick bound bundle rather than adding
+/// ever-thinner strands. The exact count is left to the hover tooltip.
+const STRAND_CAP: usize = 4;
+
+/// Extra width the notch overlay adds over the base stroke so its opaque core
+/// swallows the base line's anti-aliased edge (see [`EdgeStyling::notch`]).
+/// Without it, a continuous base line and the dashed overlay rasterize onto
+/// slightly different pixels at some sub-pixel positions, leaving a faint
+/// fringe of the base colour beside each notch.
+const NOTCH_COVER: f32 = 1.0;
+
+/// The wrap stripes marking a bundle wider than [`STRAND_CAP`]: their spacing
+/// along the edge, how far each stripe overshoots the band (total, split
+/// across both sides, so it reads as wrapping around) and their lean off
+/// perpendicular (radians, a forward diagonal), all in graph units.
+const WRAP_SPACING: f32 = 7.0;
+const WRAP_OVERHANG: f32 = 4.0;
+const WRAP_LEAN: f32 = 0.7;
+
+/// Paint one edge according to its domain-supplied styling.
+///
+/// The custom colour applies to the default state only - hovered and
+/// selected edges keep the theme strokes resolved by the widget so those
+/// affordances read the same on every edge. The width multiplier, strand
+/// layout and notches apply in every state so an edge keeps its look when
+/// interacted.
+fn paint_styled_edge(
+    styling: &crate::widget::EdgeStyling,
+    pctx: &egui_graph::edge::EdgePaintCtx,
+    ui: &egui::Ui,
+) {
+    let mut stroke = pctx.stroke;
+    if !(pctx.selected || pctx.hovered) {
+        if let Some(color) = styling.color {
+            stroke.color = color;
+        }
+    }
+    stroke.width *= styling.width_scale;
+    let spacing = stroke.width + 1.5;
+    // A wider channel count still draws the full `STRAND_CAP` band; the wrap
+    // stripes below mark it as a larger bundle.
+    let strands = styling.strands.max(1).min(STRAND_CAP);
+    let strand_lines = egui_graph::paint::parallel_polylines(pctx.points, strands, spacing);
+    for points in &strand_lines {
+        paint_strand(ui, points, stroke, styling.dash);
+    }
+    // Notched-cord texture: even dashes overpainted in the theme's extreme
+    // background colour, so each strand reads as regularly notched. The
+    // overlay is a hair wider than the base ([`NOTCH_COVER`]) so it fully
+    // covers the base line's anti-aliased edge.
+    if let Some(notch) = styling.notch {
+        let notch_stroke = egui::Stroke {
+            width: stroke.width + NOTCH_COVER,
+            color: ui.style().visuals.extreme_bg_color,
+        };
+        for points in &strand_lines {
+            ui.painter()
+                .extend(egui::Shape::dashed_line(points, notch_stroke, notch, notch));
+        }
+    }
+    // A bundle wider than the band draws diagonal wrap stripes across it, so
+    // it reads as many channels bound together rather than exactly four.
+    if styling.strands > STRAND_CAP {
+        let band = spacing * (STRAND_CAP as f32 - 1.0);
+        for [a, b] in wrap_stripes(pctx.points, WRAP_SPACING, band + WRAP_OVERHANG, WRAP_LEAN) {
+            ui.painter().add(egui::Shape::line(vec![a, b], stroke));
+        }
+    }
+}
+
+/// Paint a single strand along `points`, solid or dashed per `dash`.
+fn paint_strand(
+    ui: &egui::Ui,
+    points: &[egui::Pos2],
+    stroke: egui::Stroke,
+    dash: Option<(f32, f32)>,
+) {
+    match dash {
+        None => {
+            ui.painter().add(egui::Shape::line(points.to_vec(), stroke));
+        }
+        Some((dash, gap)) => {
+            ui.painter()
+                .extend(egui::Shape::dashed_line(points, stroke, dash, gap));
+        }
+    }
+}
+
+/// Diagonal stripe segments crossing `points` every `spacing` graph units,
+/// each `length` long, centred on the path and leaning `lean` radians off
+/// perpendicular (toward the direction of travel). Used to "wrap" a
+/// multi-strand band into one bundle. The first stripe sits half a `spacing`
+/// in, so stripes never crowd the sockets.
+fn wrap_stripes(
+    points: &[egui::Pos2],
+    spacing: f32,
+    length: f32,
+    lean: f32,
+) -> Vec<[egui::Pos2; 2]> {
+    let mut stripes = Vec::new();
+    if points.len() < 2 || spacing <= 0.0 {
+        return stripes;
+    }
+    let half = length * 0.5;
+    let (sin, cos) = lean.sin_cos();
+    let mut acc = 0.0;
+    let mut next = spacing * 0.5;
+    for w in points.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let seg = b - a;
+        let seg_len = seg.length();
+        if seg_len <= f32::EPSILON {
+            continue;
+        }
+        let dir = seg / seg_len;
+        // The path normal (90 deg CCW), leaned toward the travel direction.
+        let perp = egui::vec2(-dir.y, dir.x);
+        let stripe = perp * cos + dir * sin;
+        while next <= acc + seg_len {
+            let center = a + seg * ((next - acc) / seg_len);
+            stripes.push([center - stripe * half, center + stripe * half]);
+            next += spacing;
+        }
+        acc += seg_len;
+    }
+    stripes
 }
 
 /// The id of the node to flag at the viewed level for a diagnostic path: the
@@ -1047,7 +1221,29 @@ pub fn paint_diagnostics(
 
 #[cfg(test)]
 mod tests {
-    use super::diagnostic_node_at_level;
+    use super::{diagnostic_node_at_level, wrap_stripes};
+
+    #[test]
+    fn wrap_stripes_space_and_span() {
+        // A rightward band, length 30. First stripe at spacing/2 = 5, then
+        // every 10, so at 5, 15, 25 - three stripes, each `length` across.
+        let pts = [egui::pos2(0.0, 0.0), egui::pos2(30.0, 0.0)];
+        let stripes = wrap_stripes(&pts, 10.0, 8.0, 0.0);
+        assert_eq!(stripes.len(), 3);
+        for (i, [a, b]) in stripes.iter().enumerate() {
+            let x = 5.0 + i as f32 * 10.0;
+            // A square stripe (lean 0) is perpendicular here: vertical,
+            // centred on the path, `length` tall.
+            assert!((a.x - x).abs() < 1e-4 && (b.x - x).abs() < 1e-4);
+            assert!(((b.y - a.y).abs() - 8.0).abs() < 1e-4);
+        }
+        // A forward lean tilts the stripe toward the travel direction.
+        let leaned = wrap_stripes(&pts, 10.0, 8.0, 0.7);
+        assert!(leaned[0][1].x > leaned[0][0].x);
+        // Degenerate inputs yield nothing.
+        assert!(wrap_stripes(&pts, 0.0, 8.0, 0.0).is_empty());
+        assert!(wrap_stripes(&pts[..1], 10.0, 8.0, 0.0).is_empty());
+    }
 
     #[test]
     fn diagnostic_level_resolution() {

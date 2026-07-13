@@ -2,6 +2,7 @@
 use time::{OffsetDateTime, UtcOffset, format_description};
 
 pub use checkbox_enabled::CheckboxEnabled;
+pub use edge_style::{EdgeStyle, EdgeStyleCtx, EdgeStyling};
 pub use ext_pane::{ExtPane, ExtPaneCtx, ExtPaneEntry};
 pub use gantz::{
     AlignConfig, BaseSourcesCtx, Gantz, GantzState, GridConfig, LayoutConfig, NodeViewPane, Pane,
@@ -29,6 +30,7 @@ pub use style_config::style_config;
 pub use tab::{Tab, TabResponse};
 
 pub mod checkbox_enabled;
+pub mod edge_style;
 pub mod ext_pane;
 pub mod gantz;
 pub mod global_config;

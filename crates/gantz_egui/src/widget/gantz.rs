@@ -1447,6 +1447,9 @@ where
             // We'll use this to position the floating sidebar toggle.
             let rect = ui.available_rect_before_wrap();
 
+            // Extension-pane toggle entries for the graph-area context menu.
+            let ext_panes = ext_pane_entries(gantz);
+
             // Retrieve the inner graph tree from persistent storage, or create empty.
             let graph_tree_id = egui::Id::new(GRAPH_TREE_ID);
             let mut graph_tree: egui_tiles::Tree<GraphPane> =
@@ -1477,6 +1480,7 @@ where
                 reindexes: &mut gantz_response.node_view_reindexes,
                 base_names,
                 base_immutable: gantz.base_immutable,
+                ext_panes: &ext_panes,
             };
             graph_tree.ui(&mut graph_behaviour, ui);
 
@@ -1836,17 +1840,7 @@ where
         Pane::Settings => {
             let compile_config = gantz.compile_config;
             let validate_change_tracking = gantz.validate_change_tracking;
-            let ext_panes: Vec<(String, String, String)> = gantz
-                .ext_panes
-                .iter()
-                .map(|p| {
-                    (
-                        p.key().to_string(),
-                        p.title().to_string(),
-                        p.description().to_string(),
-                    )
-                })
-                .collect();
+            let ext_panes = ext_pane_entries(gantz);
             let ext_tabs = &mut *gantz.settings_tabs;
             let res = pane_ui(ui, |ui| {
                 widget::settings(
@@ -1904,6 +1898,9 @@ where
     reindexes: &'a mut Vec<(gantz_ca::Head, crate::ops::Reindex)>,
     base_names: &'a gantz_ca::registry::Names,
     base_immutable: bool,
+    /// Extension-pane toggle entries for the scene's "Panes" context submenu
+    /// (see [`ext_pane_entries`]).
+    ext_panes: &'a [(String, String, String)],
 }
 
 impl<'a, Access> egui_tiles::Behavior<GraphPane> for GraphTreeBehaviour<'a, Access>
@@ -2120,6 +2117,7 @@ where
                 pane_head,
                 head_state,
                 view_toggles,
+                self.ext_panes,
                 data.view,
                 layout_params,
                 scene_config,
@@ -2646,6 +2644,24 @@ fn linear_child_points(
     (total > 0.0).then(|| available * l.shares[child] / total)
 }
 
+/// The supplied extension panes as `(key, title, description)` entries - the
+/// single source both pane-toggle UIs (Settings -> Panes and the graph-area
+/// context menu's "panes" submenu) render their checkboxes from, so a new
+/// pane cannot appear in one and not the other.
+fn ext_pane_entries(gantz: &Gantz) -> Vec<(String, String, String)> {
+    gantz
+        .ext_panes
+        .iter()
+        .map(|p| {
+            (
+                p.key().to_string(),
+                p.title().to_string(),
+                p.description().to_string(),
+            )
+        })
+        .collect()
+}
+
 /// Whether a tab's pane can be hidden via its right-click menu. The main graph
 /// scene is not hideable; node views are closed (removed), not hidden.
 fn pane_is_hideable(pane: &Pane) -> bool {
@@ -3049,6 +3065,7 @@ fn graph_scene<N>(
     head: &gantz_ca::Head,
     head_state: &mut OpenHeadState,
     view_toggles: &mut ViewToggles,
+    ext_panes: &[(String, String, String)],
     head_view: &mut crate::SceneView,
     layout_params: egui_graph::LayoutParams,
     scene_config: SceneConfig,
@@ -3096,6 +3113,7 @@ where
         .scene_config(scene_config)
         .immutable(immutable)
         .view_toggles(view_toggles)
+        .ext_panes(ext_panes)
         .show(head_view, &mut head_state.scene, vm, ui);
 
     graph_scene::paint_diagnostics(diagnostics, &[], &response, ui);

@@ -68,6 +68,9 @@ pub struct GraphScene<'a, N> {
     /// When set, the background context menu gains a "Panes" submenu of
     /// pane-visibility checkboxes.
     view_toggles: Option<&'a mut crate::widget::gantz::ViewToggles>,
+    /// The supplied extension panes, for the "Panes" submenu's checkboxes
+    /// (see [`panes_config`][super::panes_config()]).
+    ext_panes: &'a [crate::widget::ExtPaneEntry],
 }
 
 /// State associated with the [`GraphScene`] widget that can be useful to access
@@ -126,6 +129,7 @@ where
             scene_config: Default::default(),
             immutable: false,
             view_toggles: None,
+            ext_panes: &[],
         }
     }
 
@@ -170,6 +174,13 @@ where
     /// background (graph-area) context menu. Available even in immutable mode.
     pub fn view_toggles(mut self, view_toggles: &'a mut crate::widget::gantz::ViewToggles) -> Self {
         self.view_toggles = Some(view_toggles);
+        self
+    }
+
+    /// Provide the extension-pane entries so the "Panes" context submenu
+    /// lists them alongside the built-in panes, matching Settings -> Panes.
+    pub fn ext_panes(mut self, ext_panes: &'a [crate::widget::ExtPaneEntry]) -> Self {
+        self.ext_panes = ext_panes;
         self
     }
 
@@ -310,6 +321,7 @@ where
         // submenu for toggling pane visibility (available even when immutable).
         let immutable = self.immutable;
         let view_toggles = self.view_toggles;
+        let ext_panes = self.ext_panes;
         let mut reset_layout = false;
         let mut request_layout = false;
         let mut request_center = false;
@@ -357,7 +369,7 @@ where
                 }
                 if let Some(view) = view_toggles {
                     ui.menu_button("panes", |ui| {
-                        crate::widget::panes_config(view, ui);
+                        crate::widget::panes_config(view, ext_panes, ui);
                         ui.separator();
                         if crate::widget::reset_layout_button(ui) {
                             reset_layout = true;

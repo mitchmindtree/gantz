@@ -76,7 +76,8 @@ use crate::compile::{
     DeriveError, content_def_name, derive_synthdefs, dsp_sinks, merged_pull_order, structural_sig,
 };
 use crate::dsp::{
-    DspBuilder, GainRef, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp, sum_signals,
+    DspBuilder, GainRef, ParamBinding, PortShapes, ScopeOutBinding, Signal, ToNodeDsp,
+    record_port_shapes, sum_signals,
 };
 use crate::flatten::Flat;
 
@@ -182,6 +183,9 @@ pub struct TemplateRegion {
     pub bus_writes: Vec<TemplateBus>,
     /// The buses this region's def reads.
     pub bus_reads: Vec<TemplateBus>,
+    /// The width and rate each dsp output port carried (template-relative
+    /// node paths), for diagnostics.
+    pub shapes: PortShapes,
 }
 
 /// One part of a [`GraphTemplate`].
@@ -281,6 +285,9 @@ pub struct ResolvedPart {
     pub bus_writes: Vec<ResolvedBus>,
     /// The buses this part's synth reads (absolute keys).
     pub bus_reads: Vec<ResolvedBus>,
+    /// The width and rate each dsp output port carried (absolute node paths),
+    /// for diagnostics.
+    pub shapes: PortShapes,
 }
 
 /// A [`TemplateBus`] with its key made absolute.
@@ -478,6 +485,7 @@ where
                     gains: r.derived.gains,
                     bus_writes: r.bus_writes.into_iter().map(to_template).collect(),
                     bus_reads: r.bus_reads.into_iter().map(to_template).collect(),
+                    shapes: r.derived.shapes,
                 })
             })
             .collect();
@@ -1099,6 +1107,7 @@ where
 
     let mut builder = DspBuilder::new(out_channels);
     let mut outputs: HashMap<NodeIx, Vec<Signal>> = HashMap::new();
+    let mut shapes = PortShapes::new();
     let mut bus_reads: Vec<TemplateBus> = Vec::new();
     // One `In` per read key, shared by every consumer in the region.
     let mut in_signals: HashMap<BusKey, Signal> = HashMap::new();
@@ -1165,6 +1174,7 @@ where
             dsp.n_dsp_outputs(),
             "a node must return one Signal per dsp output port",
         );
+        record_port_shapes(&mut shapes, &builder, path, &outs);
         outputs.insert(n, outs);
     }
 
@@ -1239,6 +1249,7 @@ where
         gains,
         bus_writes,
         bus_reads,
+        shapes,
     })
 }
 
@@ -1460,6 +1471,11 @@ fn instantiate_into(
                     gains: r.gains.clone(),
                     bus_writes: r.bus_writes.iter().map(abs_bus).collect(),
                     bus_reads: r.bus_reads.iter().map(abs_bus).collect(),
+                    shapes: r
+                        .shapes
+                        .iter()
+                        .map(|((path, port), shape)| ((prefixed(path), *port), *shape))
+                        .collect(),
                 });
             }
             Part::Instance(ip) => {

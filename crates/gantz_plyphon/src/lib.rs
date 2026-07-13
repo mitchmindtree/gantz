@@ -22,10 +22,11 @@ pub use compile::{
     BusBinding, DeriveError, Derived, RegionDerived, content_def_name, derive_synthdef,
     derive_synthdefs, structural_sig,
 };
-pub use config::{Config, Status};
+pub use config::{Config, DeriveStatus, Status};
+pub use describe::describe_parts;
 pub use dsp::{
-    DspBuilder, FADE_LAG, GainRef, NodeDsp, NodeRate, ParamBinding, ScopeOutBinding, Signal,
-    ToNodeDsp, node_dsp_of,
+    DspBuilder, FADE_LAG, GainRef, NodeDsp, NodeRate, ParamBinding, PortShape, PortShapes,
+    ScopeOutBinding, Signal, ToNodeDsp, node_dsp_of, signal_rate,
 };
 pub use flatten::{
     AsRefNode, Flat, FlattenError, RefKind, flatten, flatten_from_registry,
@@ -40,12 +41,13 @@ pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, dsp_commits};
 pub use sugar::PlyphonSugar;
 // `self::` disambiguates from the extern `egui` crate at the crate root.
 #[cfg(feature = "egui")]
-pub use self::egui::{DspRefExtUi, DspSettingsTab};
+pub use self::egui::{DSP_PANE_KEY, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab};
 
 pub mod backend;
 pub mod builtin;
 pub mod compile;
 pub mod config;
+pub mod describe;
 pub mod dsp;
 #[cfg(feature = "egui")]
 pub mod egui;

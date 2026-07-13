@@ -149,6 +149,7 @@ where
             .init_resource::<Demos>()
             .init_resource::<WindowedPanesRequested>()
             .init_resource::<SettingsTabs>()
+            .init_resource::<ExtPanes>()
             .init_resource::<RefExtUis>()
             // GUI state observers
             .add_observer(on_head_opened::<N>)
@@ -205,11 +206,16 @@ where
     }
 }
 
-/// Empty the domain-provided GUI collections ([`SettingsTabs`],
+/// Empty the domain-provided GUI collections ([`SettingsTabs`], [`ExtPanes`],
 /// [`RefExtUis`]) so domain providers refill them with fresh snapshots each
 /// frame (see the resource docs for the schedule contract).
-fn clear_ui_providers(mut tabs: ResMut<SettingsTabs>, mut ref_ext_uis: ResMut<RefExtUis>) {
+fn clear_ui_providers(
+    mut tabs: ResMut<SettingsTabs>,
+    mut ext_panes: ResMut<ExtPanes>,
+    mut ref_ext_uis: ResMut<RefExtUis>,
+) {
     tabs.0.clear();
+    ext_panes.0.clear();
     ref_ext_uis.0.clear();
 }
 
@@ -300,6 +306,16 @@ pub struct ImportTask(bevy_tasks::Task<Option<Vec<u8>>>);
 /// payloads its tab emitted on the previous frame.
 #[derive(Default, Resource)]
 pub struct SettingsTabs(pub Vec<Box<dyn gantz_egui::widget::SettingsTab + Send + Sync>>);
+
+/// Top-level panes contributed by domains (see
+/// [`ExtPane`][gantz_egui::widget::ExtPane]).
+///
+/// Same provider contract as [`SettingsTabs`]: cleared each frame in `First`,
+/// refilled by domain provider systems in `PreUpdate`, consumed by both GUI
+/// render paths. A provider typically pushes a fresh snapshot of its domain's
+/// per-head data.
+#[derive(Default, Resource)]
+pub struct ExtPanes(pub Vec<Box<dyn gantz_egui::widget::ExtPane + Send + Sync>>);
 
 /// `NamedRef` inspector extensions contributed by domains (see
 /// [`RefExtUi`][gantz_egui::node::RefExtUi]).
@@ -1779,6 +1795,7 @@ pub fn update<N>(
         mut compile_config,
         mut change_validation,
         mut settings_tabs,
+        mut ext_panes,
         ref_ext_uis,
         mut requested,
         host_native,
@@ -1791,6 +1808,7 @@ pub fn update<N>(
         ResMut<CompileConfig>,
         ResMut<bevy_gantz::ValidateCommitted>,
         ResMut<SettingsTabs>,
+        ResMut<ExtPanes>,
         Res<RefExtUis>,
         ResMut<WindowedPanesRequested>,
         Option<Res<HostNativePaneWindows>>,
@@ -1872,6 +1890,11 @@ where
                 .iter_mut()
                 .map(|t| &mut **t as &mut dyn gantz_egui::widget::SettingsTab)
                 .collect();
+            let mut panes: Vec<&mut dyn gantz_egui::widget::ExtPane> = ext_panes
+                .0
+                .iter_mut()
+                .map(|p| &mut **p as &mut dyn gantz_egui::widget::ExtPane)
+                .collect();
             let exts: Vec<&dyn gantz_egui::node::RefExtUi> = ref_ext_uis
                 .0
                 .iter()
@@ -1886,6 +1909,7 @@ where
                 .perf_captures(&mut perf_vm.0, &mut perf_gui.0)
                 .pane_window_mode(pane_window_mode)
                 .settings_tabs(&mut tabs)
+                .ext_panes(&mut panes)
                 .ref_ext_uis(&exts);
             // Base-source authoring context, present only where the
             // per-source write-back runs (`update-base` inserts ExportPaths),

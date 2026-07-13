@@ -339,6 +339,20 @@ fn ref_cycle_and_unresolved_are_errors() {
 }
 
 #[test]
+fn flatten_error_displays_readably() {
+    // Flatten failures surface in the UI, so each variant formats as a
+    // readable message rather than a `Debug` dump.
+    assert_eq!(
+        FlattenError::RefCycle(ca(9)).to_string(),
+        format!("graph reference resolves through itself: {}", ca(9)),
+    );
+    assert_eq!(
+        FlattenError::Unresolved(ca(9)).to_string(),
+        format!("unresolved graph reference: {}", ca(9)),
+    );
+}
+
+#[test]
 fn boundary_wiring_cycle_dissolves() {
     // Two pass-through refs wired into a loop (sharing one committed child -
     // no *ref* cycle). Resolution terminates and the consumer dissolves

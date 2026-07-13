@@ -588,6 +588,35 @@ fn recursive_instantiate_prefixes_paths() {
 }
 
 #[test]
+fn describe_parts_renders_readably() {
+    // Substring checks only - the exact layout is free to iterate.
+    let (template, cache) = derive(&sine_out_child(), &HashMap::new()).expect("derive");
+    let resolved = instantiate(&template, &cache);
+    let text = gantz_plyphon::describe_parts(&resolved);
+    assert!(text.contains(&resolved[0].def.name), "def name:\n{text}");
+    assert!(text.contains("SinOsc ar"), "unit lines:\n{text}");
+    assert!(text.contains("freq"), "param names:\n{text}");
+    assert!(text.contains("[0].0: 1ch ar"), "port shapes:\n{text}");
+}
+
+#[test]
+fn resolved_part_shapes_are_instance_prefixed() {
+    // head -> I1(child: sine -> out): the child's osc port shape resolves at
+    // the absolute path [I1, sine].
+    let map = HashMap::from([(ca(1), sine_out_child())]);
+    let mut g = Graph::<N>::default();
+    let i1 = g.add_node(N::Ref(ca(1), 0, 0));
+
+    let (template, cache) = derive(&g, &map).expect("derive");
+    let resolved = instantiate(&template, &cache);
+    assert_eq!(resolved.len(), 1);
+    let shapes = &resolved[0].shapes;
+    assert_eq!(shapes.len(), 1, "only the osc has a dsp output port");
+    let shape = shapes[&(vec![i1.index(), 0], 0)];
+    assert_eq!((shape.width, shape.rate), (1, plyphon::Rate::Audio));
+}
+
+#[test]
 fn instance_to_instance_shares_one_bus() {
     // I1's consumed outlet feeds I2's inlet: both sides resolve to ONE
     // absolute bus (the bus carrying I1's child outlet signal) - no relay.

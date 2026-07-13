@@ -53,8 +53,11 @@ type UnitRegistrar = Box<dyn Fn(&mut plyphon::UnitRegistry) + Send + Sync>;
 
 use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
 use bevy_gantz::{EntrypointSet, EvalEpoch, Registry, VmSet};
-use bevy_gantz_egui::{RefExtUis, RegisterResponseExt, SettingsTabs};
-use gantz_plyphon::{Config, DspRefExtUi, DspSettingsTab, Status, dsp_commits};
+use bevy_gantz_egui::{ExtPanes, RefExtUis, RegisterResponseExt, SettingsTabs};
+use gantz_plyphon::{
+    Config, DeriveStatus, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab, Status,
+    describe_parts, dsp_commits,
+};
 
 /// Editable DSP settings: the domain's [`Config`] as a bevy resource.
 /// Runtime-only - not persisted, so it resets to the defaults each session.
@@ -70,6 +73,21 @@ pub struct DspStatus(pub Status);
 /// [`Config`]), buffered for the settings-sync system to apply next frame.
 #[derive(Message)]
 pub struct DspSettingsChanged(pub Config);
+
+/// Per-head DSP derive status plus a readable rendering of the derived
+/// program - the DSP analogue of `bevy_gantz`'s `Module`/`Diagnostics` head
+/// components. Written by the synth driver on each structural sync, i.e. only
+/// when the head's committed graph changes. Heads the driver never reaches
+/// (no dsp engine) carry no `DspHead`; readers treat a missing component as
+/// [`DeriveStatus::Pending`].
+#[derive(Clone, Component, Debug, Default)]
+pub struct DspHead {
+    /// The most recent derivation's outcome.
+    pub status: DeriveStatus,
+    /// The derived program rendered as text ([`describe_parts`]), or the
+    /// failure message.
+    pub view: std::sync::Arc<str>,
+}
 
 /// OSC/NTP fixed-point units per second (OSC time is 32.32 fixed point: 2^32).
 const OSC_UNITS_PER_SEC: f64 = 4_294_967_296.0;
@@ -181,10 +199,18 @@ where
         // `init_resource` calls are idempotent and keep the providers valid
         // without the egui plugin.
         app.init_resource::<SettingsTabs>()
+            .init_resource::<ExtPanes>()
             .init_resource::<RefExtUis>()
             .add_message::<DspSettingsChanged>()
             .register_response_with::<Config>(dispatch_dsp_settings)
-            .add_systems(PreUpdate, (sync_dsp_settings, provide_dsp_ref_ext::<N>));
+            .add_systems(
+                PreUpdate,
+                (
+                    sync_dsp_settings,
+                    provide_dsp_pane,
+                    provide_dsp_ref_ext::<N>,
+                ),
+            );
         // The DSP domain's base graphs (see `bevy_gantz_egui::base`).
         app.world_mut()
             .get_resource_or_init::<bevy_gantz_egui::base::BaseSources>()
@@ -522,14 +548,50 @@ fn sync_dsp_settings(
     mut msgs: MessageReader<DspSettingsChanged>,
     mut config: ResMut<DspConfig>,
     status: Res<DspStatus>,
+    tab_order: Res<bevy_gantz::head::HeadTabOrder>,
+    heads: Query<(&HeadRef, Option<&DspHead>), With<OpenHead>>,
     mut tabs: ResMut<SettingsTabs>,
 ) {
     if let Some(msg) = msgs.read().last() {
         config.0 = msg.0.clone();
     }
+    let heads = tab_order
+        .iter()
+        .filter_map(|&e| heads.get(e).ok())
+        .map(|(head_ref, dsp)| {
+            let status = dsp.map(|d| d.status.clone()).unwrap_or_default();
+            (head_ref.0.to_string(), status)
+        })
+        .collect();
     tabs.0.push(Box::new(DspSettingsTab {
         config: config.0.clone(),
         status: status.0.clone(),
+        heads,
+    }));
+}
+
+/// Provide this frame's DSP pane: each open head's [`DspHead`] snapshot plus
+/// the engine's presence (see [`ExtPanes`] for the First/PreUpdate schedule
+/// contract). Heads without a [`DspHead`] read as [`DeriveStatus::Pending`].
+fn provide_dsp_pane(
+    status: Res<DspStatus>,
+    heads: Query<(&HeadRef, Option<&DspHead>), With<OpenHead>>,
+    mut panes: ResMut<ExtPanes>,
+) {
+    let heads = heads
+        .iter()
+        .map(|(head_ref, dsp)| {
+            let dsp = dsp.cloned().unwrap_or_default();
+            let head = DspPaneHead {
+                status: dsp.status,
+                view: dsp.view,
+            };
+            (head_ref.0.clone(), head)
+        })
+        .collect();
+    panes.0.push(Box::new(DspPane {
+        present: status.0.present,
+        heads,
     }));
 }
 
@@ -578,6 +640,7 @@ fn drive_synths<N>(
     state: NonSendMut<HeadSynths>,
     mut vms: NonSendMut<HeadVms>,
     heads: Query<(Entity, &HeadRef, &WorkingGraph<N>), With<OpenHead>>,
+    mut cmds: Commands,
 ) where
     N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Clone + Send + Sync,
 {
@@ -623,6 +686,7 @@ fn drive_synths<N>(
         // flatten error (a ref cycle or an unresolvable ref, both forbidden
         // upstream): keep the previous synths, parking the head at this graph
         // address so the error logs once per commit rather than every frame.
+        // Either way the outcome lands on the head as a `DspHead` for the GUI.
         let stale = state
             .heads
             .get(&entity)
@@ -632,7 +696,7 @@ fn drive_synths<N>(
                 let children = flatten_instance_children(&flat, &registry)?;
                 Ok((flat, children))
             });
-            match flat_children {
+            let dsp_head = match flat_children {
                 Ok((flat, children)) => structural_sync(
                     &mut dsp.controller,
                     state,
@@ -645,12 +709,17 @@ fn drive_synths<N>(
                 ),
                 Err(e) => {
                     log::error!(
-                        "bevy_gantz_plyphon: flattening nested graphs failed ({e:?}), \
+                        "bevy_gantz_plyphon: flattening nested graphs failed ({e}), \
                          keeping the previous synths"
                     );
                     park_head(state, entity, graph_ca);
+                    DspHead {
+                        status: DeriveStatus::FlattenError(e.to_string()),
+                        view: format!("{e} - keeping the previous synths").into(),
+                    }
                 }
-            }
+            };
+            cmds.entity(entity).insert(dsp_head);
         }
 
         // Param sync: drain each param's queued control updates and schedule
@@ -803,6 +872,8 @@ fn park_head(state: &mut HeadSynths, entity: Entity, graph_ca: ca::GraphAddr) {
 /// later in topo order (bus readers hear only writers computed earlier in the
 /// node tree), else at the tail. On install/spawn failure the old synth is left
 /// playing - strictly better than going silent.
+///
+/// Returns the sync's outcome as the head's [`DspHead`], for the GUI.
 fn structural_sync<N>(
     controller: &mut Controller,
     state: &mut HeadSynths,
@@ -812,7 +883,8 @@ fn structural_sync<N>(
     children: &HashMap<gantz_ca::ContentAddr, Graph<gantz_plyphon::Flat<N>>>,
     out_channels: usize,
     sample_rate: f64,
-) where
+) -> DspHead
+where
     N: ToNodeDsp,
 {
     let now = Instant::now();
@@ -843,26 +915,29 @@ fn structural_sync<N>(
                     parts: Vec::new(),
                 },
             );
-            return;
+            return DspHead {
+                status: DeriveStatus::Silent,
+                view: "no dsp sink (`~out` / `~scopeout`) - silent".into(),
+            };
         }
-        // A cycle between parts (`~bus` regions or instances) has no runnable
-        // writer-before-reader order: keep the previous synths, recording the
-        // graph address so the error logs once per commit rather than every
-        // frame.
-        Err(gantz_plyphon::DeriveError::BusCycle) => {
-            log::error!("bevy_gantz_plyphon: bus cycle between parts, keeping the previous synths");
+        // A part cycle (`~bus` regions or instances with no runnable
+        // writer-before-reader order) or an instanced-reference failure: keep
+        // the previous synths, parking the head so the error logs once per
+        // commit rather than every frame.
+        Err(e) => {
+            log::error!("bevy_gantz_plyphon: {e}, keeping the previous synths");
             park_head(state, entity, graph_ca);
-            return;
-        }
-        // Instanced-reference failures: keep the previous synths, parking the
-        // head so the error logs once per commit rather than every frame.
-        Err(e @ gantz_plyphon::DeriveError::Unresolved(_))
-        | Err(e @ gantz_plyphon::DeriveError::RefCycle(_)) => {
-            log::error!("bevy_gantz_plyphon: {e:?}, keeping the previous synths");
-            park_head(state, entity, graph_ca);
-            return;
+            return DspHead {
+                status: DeriveStatus::DeriveError(e.to_string()),
+                view: format!("{e} - keeping the previous synths").into(),
+            };
         }
     };
+
+    // The GUI's readable rendering, taken before the planning loop below
+    // consumes `derived`.
+    let view: std::sync::Arc<str> = describe_parts(&derived).into();
+    let n_parts = derived.len();
 
     // Release bus runs whose keys are gone from the derivation.
     let live_buses: HashSet<BusKey> = derived
@@ -986,6 +1061,11 @@ fn structural_sync<N>(
             parts,
         },
     );
+
+    DspHead {
+        status: DeriveStatus::Ok { parts: n_parts },
+        view,
+    }
 }
 
 /// Why a part failed to spawn.
@@ -1041,6 +1121,7 @@ fn spawn_part(
         gains,
         bus_writes,
         bus_reads,
+        shapes: _,
     } = part;
 
     // Allocate buses and cue scope streams up front so their indices are known

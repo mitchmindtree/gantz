@@ -19,6 +19,34 @@ pub struct Config {
     pub enabled: bool,
 }
 
+/// The outcome of a head's most recent DSP derivation, written by the DSP
+/// runtime for the GUI to display (the per-head analogue of [`Status`]).
+///
+/// The error variants carry the rendered error message rather than the error
+/// value, keeping the type cheap to clone and the GUI decoupled from the
+/// error enums.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DeriveStatus {
+    /// Nothing has been derived for the head yet (or no DSP engine is
+    /// running).
+    #[default]
+    Pending,
+    /// The graph has no dsp sink, so it is intentionally silent - not an
+    /// error.
+    Silent,
+    /// Derived and running.
+    Ok {
+        /// The number of resolved parts (synths) the head derived to.
+        parts: usize,
+    },
+    /// Flattening the head's nested graphs failed
+    /// (a rendered [`FlattenError`][crate::FlattenError]).
+    FlattenError(String),
+    /// Deriving the synthdef template failed
+    /// (a rendered [`DeriveError`][crate::DeriveError]).
+    DeriveError(String),
+}
+
 /// Read-only DSP status, written by the DSP runtime for the GUI to display.
 #[derive(Clone, Debug, Default)]
 pub struct Status {

@@ -7,7 +7,7 @@ use crate::{
 };
 use gantz_core::{Node, node};
 use petgraph::visit::{IntoNodeReferences, NodeRef};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use steel::steel_vm::engine::Engine;
 
 /// A file dropped onto a gantz pane.
@@ -63,6 +63,7 @@ pub struct Gantz<'a> {
     compile_config: Option<gantz_core::compile::Config>,
     validate_change_tracking: Option<bool>,
     settings_tabs: &'a mut [&'a mut dyn widget::SettingsTab],
+    ext_panes: &'a mut [&'a mut dyn widget::ExtPane],
     ref_ext_uis: &'a [&'a dyn crate::node::RefExtUi],
     base_sources: Option<BaseSourcesCtx<'a>>,
     pane_window_mode: PaneWindowMode,
@@ -390,6 +391,10 @@ impl SceneConfig {
 /// A pane within the outer tree.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum Pane {
+    /// An application-supplied pane, identified by its provider's stable key
+    /// (see [`ExtPane::key`][widget::ExtPane::key]). Renders a placeholder
+    /// while no provider supplies the key.
+    Ext(String),
     GraphConfig,
     /// Contains the inner graph tree with all open graph tabs.
     GraphScene,
@@ -670,6 +675,10 @@ pub struct ViewToggles {
     pub perf_vm: bool,
     pub steel: bool,
     pub graph_config: bool,
+    /// Per-[`Pane::Ext`] visibility, keyed by the provider key. A missing
+    /// entry means hidden (matching the tray panes' default). Keys of
+    /// long-gone providers linger harmlessly.
+    pub ext: BTreeMap<String, bool>,
 }
 
 impl Default for ViewToggles {
@@ -689,6 +698,7 @@ impl Default for ViewToggles {
             perf_vm: false,
             steel: false,
             graph_config: true,
+            ext: BTreeMap::new(),
         }
     }
 }
@@ -779,6 +789,7 @@ impl<'a> Gantz<'a> {
             compile_config: None,
             validate_change_tracking: None,
             settings_tabs: &mut [],
+            ext_panes: &mut [],
             ref_ext_uis: &[],
             base_sources: None,
             pane_window_mode: PaneWindowMode::default(),
@@ -820,6 +831,14 @@ impl<'a> Gantz<'a> {
     /// [`GantzResponse::responses`].
     pub fn settings_tabs(mut self, tabs: &'a mut [&'a mut dyn widget::SettingsTab]) -> Self {
         self.settings_tabs = tabs;
+        self
+    }
+
+    /// Provide extension top-level panes (see [`ExtPane`][widget::ExtPane]).
+    /// One tray tile appears per entry, and any payloads a pane emits are
+    /// reported via [`GantzResponse::responses`] tagged with the focused head.
+    pub fn ext_panes(mut self, panes: &'a mut [&'a mut dyn widget::ExtPane]) -> Self {
+        self.ext_panes = panes;
         self
     }
 
@@ -919,6 +938,10 @@ impl<'a> Gantz<'a> {
 
         // The set of panes popped out into windows, persisted alongside the tree.
         let mut windowed: Vec<Pane> = load_ron(ui.ctx(), windowed_panes_id()).unwrap_or_default();
+
+        // Ensure every supplied extension pane has a tile.
+        let ext_keys: Vec<&str> = self.ext_panes.iter().map(|p| p.key()).collect();
+        sync_ext_panes(&mut tree, &ext_keys);
 
         // Check the `view_toggles` match the pane visibility.
         set_tile_visibility(&mut tree, &state.view_toggles);
@@ -1320,6 +1343,43 @@ where
         response: gantz_response,
     } = cx;
     match pane {
+        Pane::Ext(key) => {
+            let focused = access.heads().get(*focused_head).cloned();
+            // The focused head's selection, as sorted root-level node ids
+            // (mirroring the Steel pane's span-highlight input).
+            let mut selection: Vec<node::Id> = focused
+                .as_ref()
+                .and_then(|h| state.open_heads.get(h))
+                .map(|hs| {
+                    hs.scene
+                        .interaction
+                        .selection
+                        .nodes
+                        .iter()
+                        .map(|n| n.index())
+                        .collect()
+                })
+                .unwrap_or_default();
+            selection.sort_unstable();
+            match gantz.ext_panes.iter_mut().find(|p| p.key() == *key) {
+                Some(p) => {
+                    let cx = widget::ExtPaneCtx {
+                        focused: focused.as_ref(),
+                        selection: &selection,
+                    };
+                    let res = pane_ui(ui, |ui| p.ui(cx, ui));
+                    let mut ext_responses = res.inner;
+                    gantz_response
+                        .responses
+                        .extend(focused.as_ref(), ext_responses.drain().map(|(_, d)| d));
+                }
+                None => {
+                    ui.centered_and_justified(|ui| {
+                        ui.weak(format!("'{key}' pane unavailable (no provider)"));
+                    });
+                }
+            }
+        }
         Pane::GraphConfig => match access.heads().get(*focused_head).cloned() {
             Some(head) => {
                 let merge_resolutions = &mut state.merge_resolutions;
@@ -1407,6 +1467,9 @@ where
             // We'll use this to position the floating sidebar toggle.
             let rect = ui.available_rect_before_wrap();
 
+            // Extension-pane toggle entries for the graph-area context menu.
+            let ext_panes = ext_pane_entries(gantz);
+
             // Retrieve the inner graph tree from persistent storage, or create empty.
             let graph_tree_id = egui::Id::new(GRAPH_TREE_ID);
             let mut graph_tree: egui_tiles::Tree<GraphPane> =
@@ -1437,6 +1500,7 @@ where
                 reindexes: &mut gantz_response.node_view_reindexes,
                 base_names,
                 base_immutable: gantz.base_immutable,
+                ext_panes: &ext_panes,
             };
             graph_tree.ui(&mut graph_behaviour, ui);
 
@@ -1796,6 +1860,7 @@ where
         Pane::Settings => {
             let compile_config = gantz.compile_config;
             let validate_change_tracking = gantz.validate_change_tracking;
+            let ext_panes = ext_pane_entries(gantz);
             let ext_tabs = &mut *gantz.settings_tabs;
             let res = pane_ui(ui, |ui| {
                 widget::settings(
@@ -1806,6 +1871,7 @@ where
                     &mut state.scene_config,
                     &mut state.keymap,
                     ext_tabs,
+                    &ext_panes,
                     ui,
                 )
             });
@@ -1852,6 +1918,9 @@ where
     reindexes: &'a mut Vec<(gantz_ca::Head, crate::ops::Reindex)>,
     base_names: &'a gantz_ca::registry::Names,
     base_immutable: bool,
+    /// Extension-pane toggle entries for the scene's "Panes" context submenu
+    /// (see [`ext_pane_entries`]).
+    ext_panes: &'a [widget::ExtPaneEntry],
 }
 
 impl<'a, Access> egui_tiles::Behavior<GraphPane> for GraphTreeBehaviour<'a, Access>
@@ -2068,6 +2137,7 @@ where
                 pane_head,
                 head_state,
                 view_toggles,
+                self.ext_panes,
                 data.view,
                 layout_params,
                 scene_config,
@@ -2141,6 +2211,10 @@ where
         None => label.to_string(),
     };
     match pane {
+        Pane::Ext(key) => match gantz.ext_panes.iter().find(|p| p.key() == *key) {
+            Some(p) => with_head(p.title()),
+            None => key.clone(),
+        },
         Pane::GraphConfig => with_head("Graph"),
         Pane::GraphScene => "Graphs".to_string(),
         Pane::Graphs => "Graphs".to_string(),
@@ -2301,6 +2375,28 @@ fn add_node_view_pane(
     match container {
         Some(c) => tree.move_tile_to_container(pane_id, c, usize::MAX, true),
         None => tree.root = Some(pane_id),
+    }
+}
+
+/// Ensure a [`Pane::Ext`] tile exists for each supplied provider key, adding
+/// missing ones to the tray (hidden until toggled, like Logs/Steel). Tiles
+/// whose provider is absent are left in place: they render a placeholder and
+/// keep their spot in the layout for when the provider returns.
+fn sync_ext_panes(tree: &mut egui_tiles::Tree<Pane>, keys: &[&str]) {
+    for &key in keys {
+        let exists = tree
+            .tiles
+            .iter()
+            .any(|(_, tile)| matches!(tile, egui_tiles::Tile::Pane(Pane::Ext(k)) if k == key));
+        if exists {
+            continue;
+        }
+        let pane_id = tree.tiles.insert_pane(Pane::Ext(key.to_string()));
+        let container = layout_anchors(tree).map(|a| a.tray).or_else(|| tree.root());
+        match container {
+            Some(c) => tree.move_tile_to_container(pane_id, c, usize::MAX, true),
+            None => tree.root = Some(pane_id),
+        }
     }
 }
 
@@ -2568,6 +2664,22 @@ fn linear_child_points(
     (total > 0.0).then(|| available * l.shares[child] / total)
 }
 
+/// The supplied extension panes' checkbox entries - the single source both
+/// pane-toggle UIs (Settings -> Panes and the graph-area context menu's
+/// "panes" submenu) render from, so a new pane cannot appear in one and not
+/// the other.
+fn ext_pane_entries(gantz: &Gantz) -> Vec<widget::ExtPaneEntry> {
+    gantz
+        .ext_panes
+        .iter()
+        .map(|p| widget::ExtPaneEntry {
+            key: p.key().to_string(),
+            title: p.title().to_string(),
+            description: p.description().to_string(),
+        })
+        .collect()
+}
+
 /// Whether a tab's pane can be hidden via its right-click menu. The main graph
 /// scene is not hideable; node views are closed (removed), not hidden.
 fn pane_is_hideable(pane: &Pane) -> bool {
@@ -2577,6 +2689,9 @@ fn pane_is_hideable(pane: &Pane) -> bool {
 /// Set a pane's visibility toggle. No-op for panes without one.
 fn set_pane_visible(view: &mut ViewToggles, pane: &Pane, visible: bool) {
     match pane {
+        Pane::Ext(key) => {
+            view.ext.insert(key.clone(), visible);
+        }
         Pane::Graphs => view.graphs = visible,
         Pane::History => view.history = visible,
         Pane::Settings => view.settings = visible,
@@ -2595,6 +2710,7 @@ fn set_pane_visible(view: &mut ViewToggles, pane: &Pane, visible: bool) {
 /// (the graph scene and node views) are always considered visible.
 fn pane_is_visible(view: &ViewToggles, pane: &Pane) -> bool {
     match pane {
+        Pane::Ext(key) => view.ext.get(key).copied().unwrap_or(false),
         Pane::Graphs => view.graphs,
         Pane::History => view.history,
         Pane::Settings => view.settings,
@@ -2621,6 +2737,7 @@ fn pane_is_poppable(pane: &Pane) -> bool {
 /// ([`GantzState::windowed_geometry`]) by the same identity.
 pub fn pane_key(pane: &Pane) -> String {
     match pane {
+        Pane::Ext(key) => format!("ext:{key}"),
         Pane::GraphConfig => "graph-config".to_string(),
         Pane::GraphScene => "graph-scene".to_string(),
         Pane::Graphs => "graphs".to_string(),
@@ -2774,6 +2891,7 @@ fn set_tile_visibility(tree: &mut egui_tiles::Tree<Pane>, view: &ViewToggles) {
         if let Some(pane) = tree.tiles.get_pane(&id) {
             match pane {
                 Pane::GraphScene => (),
+                Pane::Ext(key) => tree.set_visible(id, view.ext.get(key).copied().unwrap_or(false)),
                 Pane::Settings => tree.set_visible(id, open && view.settings),
                 Pane::GraphConfig => tree.set_visible(id, open && view.graph_config),
                 Pane::Graphs => tree.set_visible(id, open && view.graphs),
@@ -2965,6 +3083,7 @@ fn graph_scene<N>(
     head: &gantz_ca::Head,
     head_state: &mut OpenHeadState,
     view_toggles: &mut ViewToggles,
+    ext_panes: &[widget::ExtPaneEntry],
     head_view: &mut crate::SceneView,
     layout_params: egui_graph::LayoutParams,
     scene_config: SceneConfig,
@@ -3012,6 +3131,7 @@ where
         .scene_config(scene_config)
         .immutable(immutable)
         .view_toggles(view_toggles)
+        .ext_panes(ext_panes)
         .show(head_view, &mut head_state.scene, vm, ui);
 
     graph_scene::paint_diagnostics(diagnostics, &[], &response, ui);

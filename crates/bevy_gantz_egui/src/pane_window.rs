@@ -18,7 +18,7 @@
 //! `egui::Window`s instead.
 
 use crate::{
-    BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, Demos, GuiState, HeadAccess,
+    BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, Demos, ExtPanes, GuiState, HeadAccess,
     HostNativePaneWindows, ImportTask, OpenHeadViews, PerfGui, PerfVm, RefExtUis, Registry,
     ResponseDispatchers, SettingsTabs, TraceCapture, WindowedPanesRequested, handle_gantz_response,
     head, registry_ref,
@@ -192,6 +192,7 @@ fn render_windowed_panes<N: PaneNode>(
         mut compile_config,
         mut change_validation,
         mut settings_tabs,
+        mut ext_panes,
         ref_ext_uis,
         mut demos,
         dispatchers,
@@ -204,6 +205,7 @@ fn render_windowed_panes<N: PaneNode>(
         ResMut<CompileConfig>,
         ResMut<bevy_gantz::ValidateCommitted>,
         ResMut<SettingsTabs>,
+        ResMut<ExtPanes>,
         Res<RefExtUis>,
         ResMut<Demos>,
         Res<ResponseDispatchers>,
@@ -256,6 +258,11 @@ fn render_windowed_panes<N: PaneNode>(
                 .iter_mut()
                 .map(|t| &mut **t as &mut dyn gantz_egui::widget::SettingsTab)
                 .collect();
+            let mut panes: Vec<&mut dyn gantz_egui::widget::ExtPane> = ext_panes
+                .0
+                .iter_mut()
+                .map(|p| &mut **p as &mut dyn gantz_egui::widget::ExtPane)
+                .collect();
             let exts: Vec<&dyn gantz_egui::node::RefExtUi> = ref_ext_uis
                 .0
                 .iter()
@@ -269,6 +276,7 @@ fn render_windowed_panes<N: PaneNode>(
                 .trace_capture(trace_capture.0.clone(), level)
                 .perf_captures(&mut perf_vm.0, &mut perf_gui.0)
                 .settings_tabs(&mut tabs)
+                .ext_panes(&mut panes)
                 .ref_ext_uis(&exts);
             // Base-source authoring context (mirrors `update`).
             if let Some(paths) = &export_paths {

@@ -14,23 +14,28 @@ use gantz_core::node::Conns;
 use gantz_core::node::graph::{Graph, NodeIx};
 
 use crate::dsp::{
-    DspBuilder, GainRef, ParamBinding, ScopeOutBinding, Signal, ToNodeDsp, sum_signals,
+    DspBuilder, GainRef, ParamBinding, PortShapes, ScopeOutBinding, Signal, ToNodeDsp,
+    record_port_shapes, sum_signals,
 };
 
 /// An error deriving a synthdef from a graph.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DeriveError {
     /// The graph has no dsp *sink* (no `~out` output and no `~scopeout` monitor), so
     /// there is nothing to root a synthdef at.
+    #[error("no dsp sink (no `~out` output and no `~scopeout` monitor)")]
     NoSink,
     /// The `~bus` boundaries form a cycle between regions, so there is no
     /// writer-before-reader order to derive (or run) them in. Deliberate
     /// cross-region feedback (an `InFeedback`-based bus) is a planned follow-up.
+    #[error("`~bus`/instance boundaries form a cycle between parts")]
     BusCycle,
     /// An instanced reference's target graph could not be resolved.
+    #[error("unresolved instanced reference: {0}")]
     Unresolved(gantz_ca::ContentAddr),
     /// Instanced references form a cycle (a graph transitively instancing
     /// itself), so there is no finite template to derive.
+    #[error("instanced references form a cycle through {0}")]
     RefCycle(gantz_ca::ContentAddr),
 }
 
@@ -105,6 +110,8 @@ pub struct Derived {
     /// The params that gate the def's whole output (e.g. `~out`'s gain), which
     /// the driver fades through on a crossfaded replacement.
     pub gains: Vec<GainRef>,
+    /// The width and rate each dsp output port carried, for diagnostics.
+    pub shapes: PortShapes,
 }
 
 /// Derive a [`SynthDef`] named `name` from a graph's DSP subgraph, fanning the
@@ -179,6 +186,7 @@ where
     // Each processed node's per-port output signals, for its consumers to
     // reference. A whole channel group flows across an edge.
     let mut outputs: HashMap<NodeIx, Vec<Signal>> = HashMap::new();
+    let mut shapes = PortShapes::new();
 
     for n in order {
         let Some(dsp) = graph[n].to_node_dsp() else {
@@ -197,12 +205,14 @@ where
                 (!sigs.is_empty()).then(|| sum_signals(&mut builder, &sigs))
             })
             .collect();
-        let outs = dsp.ugens(&graph[n].node_path(n.index()), &inputs, &mut builder);
+        let path = graph[n].node_path(n.index());
+        let outs = dsp.ugens(&path, &inputs, &mut builder);
         debug_assert_eq!(
             outs.len(),
             dsp.n_dsp_outputs(),
             "a node must return one Signal per dsp output port",
         );
+        record_port_shapes(&mut shapes, &builder, &path, &outs);
         outputs.insert(n, outs);
     }
 
@@ -212,6 +222,7 @@ where
         params,
         monitors,
         gains,
+        shapes,
     })
 }
 
@@ -548,6 +559,7 @@ where
 
         let mut builder = DspBuilder::new(out_channels);
         let mut outputs: HashMap<NodeIx, Vec<Signal>> = HashMap::new();
+        let mut shapes = PortShapes::new();
         let mut bus_reads: Vec<BusBinding> = Vec::new();
         // One `In` per bus read, shared by every consumer in the region.
         let mut in_signals: HashMap<RegionBus, Signal> = HashMap::new();
@@ -609,12 +621,14 @@ where
                 // it driven.
                 inputs.push((!sigs.is_empty()).then(|| sum_signals(&mut builder, &sigs)));
             }
-            let outs = dsp.ugens(&graph[n].node_path(n.index()), &inputs, &mut builder);
+            let path = graph[n].node_path(n.index());
+            let outs = dsp.ugens(&path, &inputs, &mut builder);
             debug_assert_eq!(
                 outs.len(),
                 dsp.n_dsp_outputs(),
                 "a node must return one Signal per dsp output port",
             );
+            record_port_shapes(&mut shapes, &builder, &path, &outs);
             outputs.insert(n, outs);
         }
 
@@ -690,6 +704,7 @@ where
                 params,
                 monitors,
                 gains,
+                shapes,
             },
             bus_writes,
             bus_reads,

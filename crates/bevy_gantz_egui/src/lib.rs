@@ -151,6 +151,7 @@ where
             .init_resource::<SettingsTabs>()
             .init_resource::<ExtPanes>()
             .init_resource::<RefExtUis>()
+            .init_resource::<EdgeStyles>()
             // GUI state observers
             .add_observer(on_head_opened::<N>)
             .add_observer(on_head_changed::<N>)
@@ -207,16 +208,18 @@ where
 }
 
 /// Empty the domain-provided GUI collections ([`SettingsTabs`], [`ExtPanes`],
-/// [`RefExtUis`]) so domain providers refill them with fresh snapshots each
-/// frame (see the resource docs for the schedule contract).
+/// [`RefExtUis`], [`EdgeStyles`]) so domain providers refill them with fresh
+/// snapshots each frame (see the resource docs for the schedule contract).
 fn clear_ui_providers(
     mut tabs: ResMut<SettingsTabs>,
     mut ext_panes: ResMut<ExtPanes>,
     mut ref_ext_uis: ResMut<RefExtUis>,
+    mut edge_styles: ResMut<EdgeStyles>,
 ) {
     tabs.0.clear();
     ext_panes.0.clear();
     ref_ext_uis.0.clear();
+    edge_styles.0.clear();
 }
 
 // ----------------------------------------------------------------------------
@@ -326,6 +329,17 @@ pub struct ExtPanes(pub Vec<Box<dyn gantz_egui::widget::ExtPane + Send + Sync>>)
 /// shared.
 #[derive(Default, Resource)]
 pub struct RefExtUis(pub Vec<Box<dyn gantz_egui::node::RefExtUi + Send + Sync>>);
+
+/// Graph-scene edge stylers contributed by domains (see
+/// [`EdgeStyle`][gantz_egui::widget::EdgeStyle]).
+///
+/// Same provider contract as [`SettingsTabs`]: cleared each frame in `First`,
+/// refilled by domain provider systems in `PreUpdate`, consumed by both GUI
+/// render paths. Stylers take `&self`, so consumers borrow the resource
+/// shared. A provider typically pushes a styler holding precomputed per-head
+/// classifications, since the erased GUI registry hides concrete node types.
+#[derive(Default, Resource)]
+pub struct EdgeStyles(pub Vec<Box<dyn gantz_egui::widget::EdgeStyle + Send + Sync>>);
 
 // ----------------------------------------------------------------------------
 // Events
@@ -1797,6 +1811,7 @@ pub fn update<N>(
         mut settings_tabs,
         mut ext_panes,
         ref_ext_uis,
+        edge_styles,
         mut requested,
         host_native,
         export_paths,
@@ -1810,6 +1825,7 @@ pub fn update<N>(
         ResMut<SettingsTabs>,
         ResMut<ExtPanes>,
         Res<RefExtUis>,
+        Res<EdgeStyles>,
         ResMut<WindowedPanesRequested>,
         Option<Res<HostNativePaneWindows>>,
         Option<Res<base::ExportPaths>>,
@@ -1900,6 +1916,11 @@ where
                 .iter()
                 .map(|e| &**e as &dyn gantz_egui::node::RefExtUi)
                 .collect();
+            let stylers: Vec<&dyn gantz_egui::widget::EdgeStyle> = edge_styles
+                .0
+                .iter()
+                .map(|s| &**s as &dyn gantz_egui::widget::EdgeStyle)
+                .collect();
             let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .demos(&demos.0)
@@ -1910,7 +1931,8 @@ where
                 .pane_window_mode(pane_window_mode)
                 .settings_tabs(&mut tabs)
                 .ext_panes(&mut panes)
-                .ref_ext_uis(&exts);
+                .ref_ext_uis(&exts)
+                .edge_styles(&stylers);
             // Base-source authoring context, present only where the
             // per-source write-back runs (`update-base` inserts ExportPaths),
             // so the main app never shows a non-durable source dropdown.

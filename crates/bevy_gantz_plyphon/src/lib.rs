@@ -141,9 +141,10 @@ fn osc(secs: f64) -> u64 {
 ///   `insert_resource`, which would clobber earlier contributions.
 /// - GUI surfaces are provided by per-frame systems in `PreUpdate`
 ///   (here `sync_dsp_settings` and `provide_dsp_ref_ext`) pushing into the
-///   `First`-cleared collections ([`SettingsTabs`], [`RefExtUis`]), whose
-///   `init_resource` calls are idempotent on purpose so the plugin works
-///   with or without `GantzEguiPlugin`.
+///   `First`-cleared collections ([`SettingsTabs`], [`RefExtUis`],
+///   [`EdgeStyles`][bevy_gantz_egui::EdgeStyles]), whose `init_resource`
+///   calls are idempotent on purpose so the plugin works with or without
+///   `GantzEguiPlugin`.
 /// - The domain's own extension points (here
 ///   [`with_units`](Self::with_units)) hang off the plugin itself.
 pub struct PlyphonPlugin<N> {

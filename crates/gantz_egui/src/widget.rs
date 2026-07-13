@@ -2,7 +2,7 @@
 use time::{OffsetDateTime, UtcOffset, format_description};
 
 pub use checkbox_enabled::CheckboxEnabled;
-pub use ext_pane::ExtPane;
+pub use ext_pane::{ExtPane, ExtPaneCtx, ExtPaneEntry};
 pub use gantz::{
     AlignConfig, BaseSourcesCtx, Gantz, GantzState, GridConfig, LayoutConfig, NodeViewPane, Pane,
     PaneWindowGeometry, PaneWindowMode, SceneConfig, SnapConfig, SnapMode, WindowedPane,

@@ -52,9 +52,8 @@ pub struct SettingsResponse {
 /// Render the Settings pane: a subtab selector over Global / Style / Keybinds /
 /// Panes and any supplied extension subtabs.
 ///
-/// `ext_panes` lists the supplied extension panes as
-/// `(key, title, description)` for the Panes subtab's visibility checkboxes
-/// (see [`panes_config`][super::panes_config()]).
+/// `ext_panes` lists the supplied extension panes for the Panes subtab's
+/// visibility checkboxes (see [`panes_config`][super::panes_config()]).
 pub fn settings(
     view: &mut ViewToggles,
     compile_config: Option<gantz_core::compile::Config>,
@@ -63,7 +62,7 @@ pub fn settings(
     scene_config: &mut SceneConfig,
     keymap: &mut Keymap,
     ext_tabs: &mut [&mut dyn SettingsTab],
-    ext_panes: &[(String, String, String)],
+    ext_panes: &[super::ExtPaneEntry],
     ui: &mut egui::Ui,
 ) -> SettingsResponse {
     let id = ui.id().with("settings_subtab");

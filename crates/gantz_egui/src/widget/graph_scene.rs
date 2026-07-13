@@ -68,9 +68,9 @@ pub struct GraphScene<'a, N> {
     /// When set, the background context menu gains a "Panes" submenu of
     /// pane-visibility checkboxes.
     view_toggles: Option<&'a mut crate::widget::gantz::ViewToggles>,
-    /// The supplied extension panes as `(key, title, description)`, for the
-    /// "Panes" submenu's checkboxes (see [`panes_config`][super::panes_config()]).
-    ext_panes: &'a [(String, String, String)],
+    /// The supplied extension panes, for the "Panes" submenu's checkboxes
+    /// (see [`panes_config`][super::panes_config()]).
+    ext_panes: &'a [crate::widget::ExtPaneEntry],
 }
 
 /// State associated with the [`GraphScene`] widget that can be useful to access
@@ -177,10 +177,9 @@ where
         self
     }
 
-    /// Provide the extension-pane entries (`(key, title, description)`) so the
-    /// "Panes" context submenu lists them alongside the built-in panes,
-    /// matching Settings -> Panes.
-    pub fn ext_panes(mut self, ext_panes: &'a [(String, String, String)]) -> Self {
+    /// Provide the extension-pane entries so the "Panes" context submenu
+    /// lists them alongside the built-in panes, matching Settings -> Panes.
+    pub fn ext_panes(mut self, ext_panes: &'a [crate::widget::ExtPaneEntry]) -> Self {
         self.ext_panes = ext_panes;
         self
     }

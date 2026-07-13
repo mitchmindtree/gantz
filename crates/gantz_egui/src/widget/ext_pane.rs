@@ -1,6 +1,7 @@
 //! Application-supplied top-level panes (see [`ExtPane`]).
 
 use crate::Responses;
+use gantz_core::node;
 
 /// An application-supplied top-level pane - the pane analogue of
 /// [`SettingsTab`][super::SettingsTab].
@@ -31,7 +32,33 @@ pub trait ExtPane {
         ""
     }
 
-    /// Render the pane's contents given the currently focused head (if any),
-    /// returning any change payloads.
-    fn ui(&mut self, focused: Option<&gantz_ca::Head>, ui: &mut egui::Ui) -> Responses;
+    /// Render the pane's contents, returning any change payloads.
+    fn ui(&mut self, cx: ExtPaneCtx, ui: &mut egui::Ui) -> Responses;
+}
+
+/// The context handed to [`ExtPane::ui`] - what the widget knows about the
+/// focused head that a pane might want to follow (the built-in Steel pane's
+/// inputs, roughly).
+///
+/// `#[non_exhaustive]` so future context reaches panes without breaking
+/// implementors: only the widget constructs one.
+#[non_exhaustive]
+pub struct ExtPaneCtx<'a> {
+    /// The currently focused head, if any.
+    pub focused: Option<&'a gantz_ca::Head>,
+    /// The focused head's selected nodes (root-level indices), sorted.
+    pub selection: &'a [node::Id],
+}
+
+/// One supplied extension pane's identity and labels, for the pane-visibility
+/// checkbox UIs (Settings -> Panes and the graph-area context menu's "panes"
+/// submenu - see [`panes_config`][super::panes_config()]).
+#[derive(Clone, Debug)]
+pub struct ExtPaneEntry {
+    /// The pane's stable identity ([`ExtPane::key`]).
+    pub key: String,
+    /// The checkbox label ([`ExtPane::title`]).
+    pub title: String,
+    /// The checkbox hover text ([`ExtPane::description`]).
+    pub description: String,
 }

@@ -49,14 +49,14 @@ impl gantz_egui::widget::ExtPane for DspPane {
         "The focused graph's DSP derive status and derived program."
     }
 
-    fn ui(&mut self, focused: Option<&gantz_ca::Head>, ui: &mut egui::Ui) -> Responses {
+    fn ui(&mut self, cx: gantz_egui::widget::ExtPaneCtx, ui: &mut egui::Ui) -> Responses {
         if !self.present {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
                 "No DSP output device - running silent.",
             );
         }
-        let Some(head) = focused else {
+        let Some(head) = cx.focused else {
             ui.weak("no focused graph");
             return Responses::default();
         };

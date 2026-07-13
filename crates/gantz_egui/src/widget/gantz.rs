@@ -1345,9 +1345,29 @@ where
     match pane {
         Pane::Ext(key) => {
             let focused = access.heads().get(*focused_head).cloned();
+            // The focused head's selection, as sorted root-level node ids
+            // (mirroring the Steel pane's span-highlight input).
+            let mut selection: Vec<node::Id> = focused
+                .as_ref()
+                .and_then(|h| state.open_heads.get(h))
+                .map(|hs| {
+                    hs.scene
+                        .interaction
+                        .selection
+                        .nodes
+                        .iter()
+                        .map(|n| n.index())
+                        .collect()
+                })
+                .unwrap_or_default();
+            selection.sort_unstable();
             match gantz.ext_panes.iter_mut().find(|p| p.key() == *key) {
                 Some(p) => {
-                    let res = pane_ui(ui, |ui| p.ui(focused.as_ref(), ui));
+                    let cx = widget::ExtPaneCtx {
+                        focused: focused.as_ref(),
+                        selection: &selection,
+                    };
+                    let res = pane_ui(ui, |ui| p.ui(cx, ui));
                     let mut ext_responses = res.inner;
                     gantz_response
                         .responses
@@ -1900,7 +1920,7 @@ where
     base_immutable: bool,
     /// Extension-pane toggle entries for the scene's "Panes" context submenu
     /// (see [`ext_pane_entries`]).
-    ext_panes: &'a [(String, String, String)],
+    ext_panes: &'a [widget::ExtPaneEntry],
 }
 
 impl<'a, Access> egui_tiles::Behavior<GraphPane> for GraphTreeBehaviour<'a, Access>
@@ -2644,20 +2664,18 @@ fn linear_child_points(
     (total > 0.0).then(|| available * l.shares[child] / total)
 }
 
-/// The supplied extension panes as `(key, title, description)` entries - the
-/// single source both pane-toggle UIs (Settings -> Panes and the graph-area
-/// context menu's "panes" submenu) render their checkboxes from, so a new
-/// pane cannot appear in one and not the other.
-fn ext_pane_entries(gantz: &Gantz) -> Vec<(String, String, String)> {
+/// The supplied extension panes' checkbox entries - the single source both
+/// pane-toggle UIs (Settings -> Panes and the graph-area context menu's
+/// "panes" submenu) render from, so a new pane cannot appear in one and not
+/// the other.
+fn ext_pane_entries(gantz: &Gantz) -> Vec<widget::ExtPaneEntry> {
     gantz
         .ext_panes
         .iter()
-        .map(|p| {
-            (
-                p.key().to_string(),
-                p.title().to_string(),
-                p.description().to_string(),
-            )
+        .map(|p| widget::ExtPaneEntry {
+            key: p.key().to_string(),
+            title: p.title().to_string(),
+            description: p.description().to_string(),
         })
         .collect()
 }
@@ -3065,7 +3083,7 @@ fn graph_scene<N>(
     head: &gantz_ca::Head,
     head_state: &mut OpenHeadState,
     view_toggles: &mut ViewToggles,
-    ext_panes: &[(String, String, String)],
+    ext_panes: &[widget::ExtPaneEntry],
     head_view: &mut crate::SceneView,
     layout_params: egui_graph::LayoutParams,
     scene_config: SceneConfig,

@@ -87,6 +87,11 @@ pub struct DspHead {
     /// The derived program rendered as text ([`describe_parts`]), or the
     /// failure message.
     pub view: std::sync::Arc<str>,
+    /// The per-port shapes recorded at derive time, merged across the head's
+    /// parts. Instanced parts arrive absolutized by their instance path (see
+    /// [`gantz_plyphon::instance`]), so keys are node paths absolute to the
+    /// head's root graph. Empty unless `status` is [`DeriveStatus::Ok`].
+    pub shapes: std::sync::Arc<gantz_plyphon::PortShapes>,
 }
 
 /// OSC/NTP fixed-point units per second (OSC time is 32.32 fixed point: 2^32).
@@ -717,6 +722,7 @@ fn drive_synths<N>(
                     DspHead {
                         status: DeriveStatus::FlattenError(e.to_string()),
                         view: format!("{e} - keeping the previous synths").into(),
+                        shapes: Default::default(),
                     }
                 }
             };
@@ -919,6 +925,7 @@ where
             return DspHead {
                 status: DeriveStatus::Silent,
                 view: "no dsp sink (`~out` / `~scopeout`) - silent".into(),
+                shapes: Default::default(),
             };
         }
         // A part cycle (`~bus` regions or instances with no runnable
@@ -931,13 +938,20 @@ where
             return DspHead {
                 status: DeriveStatus::DeriveError(e.to_string()),
                 view: format!("{e} - keeping the previous synths").into(),
+                shapes: Default::default(),
             };
         }
     };
 
-    // The GUI's readable rendering, taken before the planning loop below
-    // consumes `derived`.
+    // The GUI's readable rendering and the merged per-port shapes, taken
+    // before the planning loop below consumes `derived`.
     let view: std::sync::Arc<str> = describe_parts(&derived).into();
+    let shapes: std::sync::Arc<gantz_plyphon::PortShapes> = std::sync::Arc::new(
+        derived
+            .iter()
+            .flat_map(|r| r.shapes.iter().map(|(k, v)| (k.clone(), *v)))
+            .collect(),
+    );
     let n_parts = derived.len();
 
     // Release bus runs whose keys are gone from the derivation.
@@ -1066,6 +1080,7 @@ where
     DspHead {
         status: DeriveStatus::Ok { parts: n_parts },
         view,
+        shapes,
     }
 }
 

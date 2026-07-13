@@ -8,10 +8,12 @@
 //! of the crate is headless by construction, so new UI code cannot
 //! accidentally leak egui into a `--no-default-features` build.
 
+pub use edge_style::DspEdgeStyle;
 pub use pane::{DSP_PANE_KEY, DspPane, DspPaneHead};
 pub use ref_ext::DspRefExtUi;
 pub use settings::DspSettingsTab;
 
+pub mod edge_style;
 pub mod node;
 pub mod pane;
 pub mod param;

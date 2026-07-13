@@ -147,7 +147,7 @@ fn bus_key_str(key: &BusKey) -> String {
 }
 
 /// The display token of a [`Rate`]: `ar`/`kr`/`ir`/`dr`.
-fn rate_token(rate: Rate) -> &'static str {
+pub(crate) fn rate_token(rate: Rate) -> &'static str {
     match rate {
         Rate::Audio => "ar",
         Rate::Control => "kr",

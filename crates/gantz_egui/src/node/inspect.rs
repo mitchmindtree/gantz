@@ -1,6 +1,6 @@
 //! An Inspect node for viewing SteelVals flowing through the graph.
 
-use crate::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind};
+use crate::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind, ui_tree::UiTree};
 use gantz_ca::CaHash;
 use gantz_core::node::{self, ExprCtx, ExprResult, MetaCtx, RegCtx};
 use gantz_nodetag::NodeTag;
@@ -43,16 +43,17 @@ impl NodeUi for Inspect {
         "inspect"
     }
 
-    fn ui(&mut self, ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
+    fn ui(&mut self, mut ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
         let mut frame = egui_graph::node::default_frame(uictx.style(), uictx.interaction());
         frame.fill = uictx.style().visuals.extreme_bg_color;
+        let (&id, prefix) = ctx.path().split_last().expect("a node path is never empty");
+        let tree = fragment(id);
+        let root_id = uictx.egui_id().with("gui");
         let framed = uictx.framed_with(frame, |ui, _sockets| {
-            let text = match ctx.extract_value() {
-                Ok(Some(val)) => format!("{:?}", val),
-                Ok(None) => "∅".to_string(),
-                Err(_) => "ERR".to_string(),
-            };
-            ui.add(egui::Label::new(&text).selectable(false))
+            let r = UiTree::new(root_id)
+                .instance_prefix(prefix)
+                .show(&tree, &mut ctx, ui);
+            r.inner.unwrap_or_else(|| ui.response())
         });
         NodeUiResponse::new(framed)
     }
@@ -66,5 +67,29 @@ impl NodeUi for Inspect {
                 SocketDoc::ty("any").with_description("the input value, unchanged")
             }
         })
+    }
+}
+
+/// The inspect's value fragment: a read-only repr of its own state.
+fn fragment(id: node::Id) -> gantz_ui::Element {
+    gantz_ui::Element::Value(gantz_ui::Value {
+        bind: Some(gantz_ui::BindPath(vec![id])),
+        wrap: false,
+        key: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fragment_bakes_bind() {
+        let expected = gantz_ui::Element::Value(gantz_ui::Value {
+            bind: Some(gantz_ui::BindPath(vec![2])),
+            wrap: false,
+            key: None,
+        });
+        assert_eq!(fragment(2), expected);
     }
 }

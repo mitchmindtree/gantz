@@ -303,6 +303,8 @@ pub struct Plot {
     pub grid: bool,
     /// Whether axes draw.
     pub axes: bool,
+    /// Whether hovering the samples shows a value readout.
+    pub interactive: bool,
     /// A fixed lower value axis bound. Attribute `y-min`.
     pub y_min: Option<f32>,
     /// A fixed upper value axis bound. Attribute `y-max`.

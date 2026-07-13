@@ -488,6 +488,7 @@ fn elem(ctx: &mut Ctx, path: &mut Vec<usize>, depth: usize, expr: SExpr) -> Elem
             let color = a.color("color");
             let grid = a.bool_or("grid", false);
             let axes = a.bool_or("axes", false);
+            let interactive = a.bool_or("interactive", false);
             let y_min = a.f32("y-min");
             let y_max = a.f32("y-max");
             let w = a.f32("w");
@@ -502,6 +503,7 @@ fn elem(ctx: &mut Ctx, path: &mut Vec<usize>, depth: usize, expr: SExpr) -> Elem
                 color,
                 grid,
                 axes,
+                interactive,
                 y_min,
                 y_max,
                 w,
@@ -904,6 +906,7 @@ mod tests {
                 attr("color", str_("#00ff0080")),
                 attr("grid", SExpr::Bool(true)),
                 attr("axes", SExpr::Bool(true)),
+                attr("interactive", SExpr::Bool(true)),
                 attr("y-min", float(-1.0)),
                 attr("y-max", float(1.0)),
                 attr("w", int(120)),
@@ -917,6 +920,7 @@ mod tests {
             color: Some(Rgba([0, 255, 0, 128])),
             grid: true,
             axes: true,
+            interactive: true,
             y_min: Some(-1.0),
             y_max: Some(1.0),
             w: Some(120.0),

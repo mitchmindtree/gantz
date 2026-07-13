@@ -1,6 +1,6 @@
 use crate::{
     ContextMenuResponse, InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, NodeViewResponse,
-    Registry, SocketDoc, SocketKind,
+    Registry, SocketDoc, SocketKind, node, ui_tree::UiTree,
 };
 use gantz_std::number::Number;
 use steel::SteelVal;
@@ -16,33 +16,38 @@ impl NodeUi for Number {
 
     fn ui(&mut self, mut ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
         // The numeric value lives in VM runtime state, not the node weight, so
-        // editing the dialer does NOT change the graph's content address - we
-        // only queue an evaluation (when enabled), never mark `changed`.
+        // editing the dialer does NOT change the graph's content address - the
+        // interpreter only queues an evaluation (when enabled), never `changed`.
         let frame = egui_graph::node::default_frame(uictx.style(), uictx.interaction());
-        let frame_fill = frame.fill;
-        let mut do_eval = false;
+        let (&id, prefix) = ctx.path().split_last().expect("a node path is never empty");
+        let tree = fragment(self, id);
+        let root_id = uictx.egui_id().with("gui");
+        let mut payloads = Vec::new();
         let framed = uictx.framed_with(frame, |ui, _sockets| {
-            let (res, eval) = dialer_ui(self, &mut ctx, frame_fill, ui);
-            do_eval = eval;
-            res
+            let r = UiTree::new(root_id)
+                .instance_prefix(prefix)
+                .n_outputs(&|_: &[node::Id]| Some(1))
+                .show(&tree, &mut ctx, ui);
+            payloads = r.payloads;
+            r.inner.unwrap_or_else(|| ui.response())
         });
         let mut resp = NodeUiResponse::new(framed);
-        if do_eval {
-            resp.push_eval(ctx.path(), 1);
-        }
+        resp.payloads.extend(payloads);
         resp
     }
 
     fn view_ui(&mut self, mut ctx: NodeCtx, ui: &mut egui::Ui) -> NodeViewResponse {
-        // The same dialer as the in-graph node; the pane provides the background
-        // and margin. Editing updates VM state and (when enabled) queues an eval.
-        let bg = ui.visuals().panel_fill;
-        let (res, do_eval) = dialer_ui(self, &mut ctx, bg, ui);
+        // The same fragment as the in-graph node; the pane provides the
+        // background and margin.
+        let (&id, prefix) = ctx.path().split_last().expect("a node path is never empty");
+        let tree = fragment(self, id);
+        let r = UiTree::new(ui.id().with("gui"))
+            .instance_prefix(prefix)
+            .n_outputs(&|_: &[node::Id]| Some(1))
+            .show(&tree, &mut ctx, ui);
         let mut resp = NodeViewResponse::default();
-        resp.inner = Some(res);
-        if do_eval {
-            resp.push_eval(ctx.path(), 1);
-        }
+        resp.inner = r.inner;
+        resp.payloads = r.payloads;
         resp
     }
 
@@ -159,55 +164,17 @@ impl NodeUi for Number {
     }
 }
 
-/// Render the value dialer (updating VM state on edit), shared by the in-graph
-/// node body and the detached view. `bg` is the surrounding fill used to
-/// "flatten" the dialer when push-eval is off - a cue that editing won't fire
-/// downstream. Returns the dialer's response and whether a push-eval should fire
-/// (an edit happened and push-eval is enabled).
-fn dialer_ui(
-    num: &Number,
-    ctx: &mut NodeCtx,
-    bg: egui::Color32,
-    ui: &mut egui::Ui,
-) -> (egui::Response, bool) {
-    let push = num.push_eval_on_edit();
-    if !push {
-        let widgets = &mut ui.visuals_mut().widgets;
-        widgets.inactive.weak_bg_fill = bg;
-        widgets.inactive.bg_fill = bg;
-    }
-    let (min, max, precision) = (num.min(), num.max(), num.precision());
-    let mut val = ctx.extract_value().unwrap().unwrap();
-    let res = match val {
-        SteelVal::NumV(ref mut f) => {
-            let mut dv = egui::DragValue::new(f);
-            if min.is_some() || max.is_some() {
-                dv = dv.range(min.unwrap_or(f64::NEG_INFINITY)..=max.unwrap_or(f64::INFINITY));
-            }
-            if let Some(p) = precision {
-                dv = dv.max_decimals(p as usize);
-            }
-            ui.add(dv)
-        }
-        SteelVal::IntV(ref mut i) => {
-            let mut dv = egui::DragValue::new(i);
-            if min.is_some() || max.is_some() {
-                let lo = min.map_or(isize::MIN, |m| m as isize);
-                let hi = max.map_or(isize::MAX, |m| m as isize);
-                dv = dv.range(lo..=hi);
-            }
-            ui.add(dv)
-        }
-        _ => ui.add(egui::Label::new("ERR")),
-    };
-    let mut do_eval = false;
-    if res.changed() {
-        ctx.update_value(val).unwrap();
-        if push {
-            do_eval = true;
-        }
-    }
-    (res, do_eval)
+/// The number's dialer fragment, bound to its own state. Attrs come from the
+/// weight, and the bind id is the node's id in its defining graph.
+fn fragment(num: &Number, id: node::Id) -> gantz_ui::Element {
+    gantz_ui::Element::Dialer(gantz_ui::Dialer {
+        bind: Some(gantz_ui::BindPath(vec![id])),
+        min: num.min(),
+        max: num.max(),
+        precision: num.precision(),
+        push: num.push_eval_on_edit(),
+        ..Default::default()
+    })
 }
 
 /// Keep `max >= min` and re-clamp the stored value into the new bounds so the
@@ -248,5 +215,37 @@ fn clamp_value(num: &Number, val: &SteelVal) -> Option<SteelVal> {
             })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fragment_bakes_weight_attrs_and_bind() {
+        let mut num = Number::default();
+        num.set_min(Some(0.0));
+        num.set_max(Some(10.0));
+        num.set_precision(Some(2));
+        num.set_push_eval_on_edit(false);
+        let expected = gantz_ui::Element::Dialer(gantz_ui::Dialer {
+            bind: Some(gantz_ui::BindPath(vec![3])),
+            min: Some(0.0),
+            max: Some(10.0),
+            precision: Some(2),
+            push: false,
+            ..Default::default()
+        });
+        assert_eq!(fragment(&num, 3), expected);
+    }
+
+    #[test]
+    fn default_weight_yields_default_dialer_attrs() {
+        let expected = gantz_ui::Element::Dialer(gantz_ui::Dialer {
+            bind: Some(gantz_ui::BindPath(vec![0])),
+            ..Default::default()
+        });
+        assert_eq!(fragment(&Number::default(), 0), expected);
     }
 }

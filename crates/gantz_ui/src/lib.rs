@@ -87,7 +87,7 @@
 //! |---|---|---|
 //! | `(label "text")` | none | positional text (required), `size` (number), `color` (`"#rrggbb"` or `"#rrggbbaa"`) |
 //! | `(value)` | any, rendered as its representation | `bind`, `wrap` (bool, default `#f`) |
-//! | `(plot)` | scope buffer or signal, a list of lists renders as stacked channels | `bind`, `mode` (`scope`/`signal`), `style` (`bars`/`line`), `color`, `grid`, `axes` (bools, default `#f`), `y-min`, `y-max`, `w`, `h` (numbers) |
+//! | `(plot)` | scope buffer or signal, a list of lists renders as stacked channels | `bind`, `mode` (`scope`/`signal`), `style` (`bars`/`line`), `color`, `grid`, `axes`, `interactive` (bools, default `#f`), `y-min`, `y-max`, `w`, `h` (numbers) |
 //!
 //! ## Embedding
 //!

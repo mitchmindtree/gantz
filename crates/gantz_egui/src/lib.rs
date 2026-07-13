@@ -21,6 +21,7 @@ pub mod reg;
 pub mod response;
 pub mod sugar;
 pub mod sync;
+pub mod ui_tree;
 pub mod view;
 pub mod widget;
 
@@ -818,8 +819,12 @@ impl<'a> NodeCtx<'a> {
     }
 
     /// The node's full path into the state tree.
-    pub fn path(&self) -> &[node::Id] {
-        &self.path
+    ///
+    /// Returns the slice with the ctx's own lifetime (rather than borrowing
+    /// `self`), so a node can split its path into id + instance prefix and
+    /// still pass the ctx on (e.g. to the [`ui_tree`] interpreter).
+    pub fn path(&self) -> &'a [node::Id] {
+        self.path
     }
 
     /// Read-only access to the VM.
@@ -845,6 +850,26 @@ impl<'a> NodeCtx<'a> {
     /// Register the given value as the node's new state.
     pub fn update<T: IntoSteelVal>(&mut self, val: T) -> Result<(), SteelErr> {
         node::state::update(self.vm, self.path, val)
+    }
+
+    /// Extract the state of the node at `path`, which need not be this
+    /// node's own path.
+    ///
+    /// Exists for the UI tree interpreter, whose widgets bind to node state
+    /// at resolved paths.
+    pub fn extract_value_at(&self, path: &[node::Id]) -> Result<Option<SteelVal>, SteelErr> {
+        node::state::extract_value(self.vm, path)
+    }
+
+    /// Register `val` as the new state of the node at `path`, which need not
+    /// be this node's own path.
+    ///
+    /// Exists for the UI tree interpreter, whose widgets bind to node state
+    /// at resolved paths. Like [`update_value`][Self::update_value], this
+    /// writes VM runtime state only and must never mark a response
+    /// `changed`.
+    pub fn update_value_at(&mut self, path: &[node::Id], val: SteelVal) -> Result<(), SteelErr> {
+        node::state::update_value(self.vm, path, val)
     }
 
     /// The IDs of the inlets within the current graph.

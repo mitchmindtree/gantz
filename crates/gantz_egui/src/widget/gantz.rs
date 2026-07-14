@@ -65,6 +65,7 @@ pub struct Gantz<'a> {
     settings_tabs: &'a mut [&'a mut dyn widget::SettingsTab],
     ext_panes: &'a mut [&'a mut dyn widget::ExtPane],
     ref_ext_uis: &'a [&'a dyn crate::node::RefExtUi],
+    edge_styles: &'a [&'a dyn widget::EdgeStyle],
     base_sources: Option<BaseSourcesCtx<'a>>,
     pane_window_mode: PaneWindowMode,
 }
@@ -796,6 +797,7 @@ impl<'a> Gantz<'a> {
             settings_tabs: &mut [],
             ext_panes: &mut [],
             ref_ext_uis: &[],
+            edge_styles: &[],
             base_sources: None,
             pane_window_mode: PaneWindowMode::default(),
         }
@@ -852,6 +854,14 @@ impl<'a> Gantz<'a> {
     /// are appended after the ref's own inspector rows.
     pub fn ref_ext_uis(mut self, uis: &'a [&'a dyn crate::node::RefExtUi]) -> Self {
         self.ref_ext_uis = uis;
+        self
+    }
+
+    /// Provide domain edge stylers for the graph scenes (see
+    /// [`EdgeStyle`][widget::EdgeStyle]). Each edge is styled by the first
+    /// styler returning `Some`; unclaimed edges keep the default styling.
+    pub fn edge_styles(mut self, styles: &'a [&'a dyn widget::EdgeStyle]) -> Self {
+        self.edge_styles = styles;
         self
     }
 
@@ -1510,6 +1520,7 @@ where
                 base_names,
                 base_immutable: gantz.base_immutable,
                 ext_panes: &ext_panes,
+                edge_styles: gantz.edge_styles,
             };
             graph_tree.ui(&mut graph_behaviour, ui);
 
@@ -1994,6 +2005,8 @@ where
     /// Extension-pane toggle entries for the scene's "Panes" context submenu
     /// (see [`ext_pane_entries`]).
     ext_panes: &'a [widget::ExtPaneEntry],
+    /// Domain edge stylers for the graph scenes (see [`widget::EdgeStyle`]).
+    edge_styles: &'a [&'a dyn widget::EdgeStyle],
 }
 
 impl<'a, Access> egui_tiles::Behavior<GraphPane> for GraphTreeBehaviour<'a, Access>
@@ -2211,6 +2224,7 @@ where
                 head_state,
                 view_toggles,
                 self.ext_panes,
+                self.edge_styles,
                 data.view,
                 layout_params,
                 scene_config,
@@ -3176,6 +3190,7 @@ fn graph_scene<N>(
     head_state: &mut OpenHeadState,
     view_toggles: &mut ViewToggles,
     ext_panes: &[widget::ExtPaneEntry],
+    edge_styles: &[&dyn widget::EdgeStyle],
     head_view: &mut crate::SceneView,
     layout_params: egui_graph::LayoutParams,
     scene_config: SceneConfig,
@@ -3224,6 +3239,7 @@ where
         .immutable(immutable)
         .view_toggles(view_toggles)
         .ext_panes(ext_panes)
+        .edge_styles(head, edge_styles)
         .show(head_view, &mut head_state.scene, vm, ui);
 
     graph_scene::paint_diagnostics(diagnostics, &[], &response, ui);

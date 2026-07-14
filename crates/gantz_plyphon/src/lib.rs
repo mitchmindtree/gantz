@@ -37,11 +37,14 @@ pub use instance::{
     TemplateRegion, VariantKey, derive_template, instantiate,
 };
 pub use node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Sum, Unpack};
+pub use port_info::{RootPortInfo, root_port_info};
 pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, dsp_commits};
 pub use sugar::PlyphonSugar;
 // `self::` disambiguates from the extern `egui` crate at the crate root.
 #[cfg(feature = "egui")]
-pub use self::egui::{DSP_PANE_KEY, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab};
+pub use self::egui::{
+    DSP_PANE_KEY, DspEdgeStyle, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab,
+};
 
 pub mod backend;
 pub mod builtin;
@@ -56,6 +59,7 @@ pub mod instance;
 pub mod monitor;
 pub mod node;
 pub mod param;
+pub mod port_info;
 pub mod ref_ext;
 pub mod sugar;
 

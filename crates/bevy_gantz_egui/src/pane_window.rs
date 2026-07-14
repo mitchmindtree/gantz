@@ -18,10 +18,10 @@
 //! `egui::Window`s instead.
 
 use crate::{
-    BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, Demos, ExtPanes, GuiState, HeadAccess,
-    HostNativePaneWindows, ImportTask, OpenHeadViews, PerfGui, PerfVm, RefExtUis, Registry,
-    ResponseDispatchers, SettingsTabs, TraceCapture, WindowedPanesRequested, handle_gantz_response,
-    head, registry_ref,
+    BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, Demos, EdgeStyles, ExtPanes, GuiState,
+    HeadAccess, HostNativePaneWindows, ImportTask, OpenHeadViews, PerfGui, PerfVm, RefExtUis,
+    Registry, ResponseDispatchers, SettingsTabs, TraceCapture, WindowedPanesRequested,
+    handle_gantz_response, head, registry_ref,
 };
 use bevy_app::prelude::*;
 use bevy_camera::{Camera2d, RenderTarget};
@@ -194,6 +194,7 @@ fn render_windowed_panes<N: PaneNode>(
         mut settings_tabs,
         mut ext_panes,
         ref_ext_uis,
+        edge_styles,
         mut demos,
         dispatchers,
         export_paths,
@@ -207,6 +208,7 @@ fn render_windowed_panes<N: PaneNode>(
         ResMut<SettingsTabs>,
         ResMut<ExtPanes>,
         Res<RefExtUis>,
+        Res<EdgeStyles>,
         ResMut<Demos>,
         Res<ResponseDispatchers>,
         Option<Res<crate::base::ExportPaths>>,
@@ -268,6 +270,11 @@ fn render_windowed_panes<N: PaneNode>(
                 .iter()
                 .map(|e| &**e as &dyn gantz_egui::node::RefExtUi)
                 .collect();
+            let stylers: Vec<&dyn gantz_egui::widget::EdgeStyle> = edge_styles
+                .0
+                .iter()
+                .map(|s| &**s as &dyn gantz_egui::widget::EdgeStyle)
+                .collect();
             let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .demos(&demos.0)
@@ -277,7 +284,8 @@ fn render_windowed_panes<N: PaneNode>(
                 .perf_captures(&mut perf_vm.0, &mut perf_gui.0)
                 .settings_tabs(&mut tabs)
                 .ext_panes(&mut panes)
-                .ref_ext_uis(&exts);
+                .ref_ext_uis(&exts)
+                .edge_styles(&stylers);
             // Base-source authoring context (mirrors `update`).
             if let Some(paths) = &export_paths {
                 widget = widget.base_sources(gantz_egui::widget::BaseSourcesCtx {

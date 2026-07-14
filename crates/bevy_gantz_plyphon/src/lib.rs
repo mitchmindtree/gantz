@@ -53,10 +53,10 @@ type UnitRegistrar = Box<dyn Fn(&mut plyphon::UnitRegistry) + Send + Sync>;
 
 use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
 use bevy_gantz::{EntrypointSet, EvalEpoch, Registry, VmSet};
-use bevy_gantz_egui::{ExtPanes, RefExtUis, RegisterResponseExt, SettingsTabs};
+use bevy_gantz_egui::{EdgeStyles, ExtPanes, RefExtUis, RegisterResponseExt, SettingsTabs};
 use gantz_plyphon::{
-    Config, DeriveStatus, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab, Status,
-    describe_parts, dsp_commits,
+    Config, DeriveStatus, DspEdgeStyle, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab,
+    RootPortInfo, Status, describe_parts, dsp_commits, root_port_info,
 };
 
 /// Editable DSP settings: the domain's [`Config`] as a bevy resource.
@@ -87,6 +87,11 @@ pub struct DspHead {
     /// The derived program rendered as text ([`describe_parts`]), or the
     /// failure message.
     pub view: std::sync::Arc<str>,
+    /// The per-port shapes recorded at derive time, merged across the head's
+    /// parts. Instanced parts arrive absolutized by their instance path (see
+    /// [`gantz_plyphon::instance`]), so keys are node paths absolute to the
+    /// head's root graph. Empty unless `status` is [`DeriveStatus::Ok`].
+    pub shapes: std::sync::Arc<gantz_plyphon::PortShapes>,
 }
 
 /// OSC/NTP fixed-point units per second (OSC time is 32.32 fixed point: 2^32).
@@ -141,9 +146,9 @@ fn osc(secs: f64) -> u64 {
 ///   `insert_resource`, which would clobber earlier contributions.
 /// - GUI surfaces are provided by per-frame systems in `PreUpdate`
 ///   (here `sync_dsp_settings` and `provide_dsp_ref_ext`) pushing into the
-///   `First`-cleared collections ([`SettingsTabs`], [`RefExtUis`]), whose
-///   `init_resource` calls are idempotent on purpose so the plugin works
-///   with or without `GantzEguiPlugin`.
+///   `First`-cleared collections ([`SettingsTabs`], [`RefExtUis`],
+///   [`EdgeStyles`]), whose `init_resource` calls are idempotent on purpose
+///   so the plugin works with or without `GantzEguiPlugin`.
 /// - The domain's own extension points (here
 ///   [`with_units`](Self::with_units)) hang off the plugin itself.
 pub struct PlyphonPlugin<N> {
@@ -201,6 +206,7 @@ where
         app.init_resource::<SettingsTabs>()
             .init_resource::<ExtPanes>()
             .init_resource::<RefExtUis>()
+            .init_resource::<EdgeStyles>()
             .add_message::<DspSettingsChanged>()
             .register_response_with::<Config>(dispatch_dsp_settings)
             .add_systems(
@@ -209,6 +215,7 @@ where
                     sync_dsp_settings,
                     provide_dsp_pane,
                     provide_dsp_ref_ext::<N>,
+                    provide_dsp_edge_style::<N>,
                 ),
             );
         // The DSP domain's base graphs (see `bevy_gantz_egui::base`).
@@ -617,6 +624,41 @@ fn provide_dsp_ref_ext<N>(
     ref_ext_uis.0.push(Box::new(DspRefExtUi { dsp_graphs }));
 }
 
+/// Provide this frame's DSP edge styler: each open head's root-level port
+/// classification, driving signal-edge rendering in the graph scene (see
+/// [`EdgeStyles`] for the First/PreUpdate schedule contract).
+///
+/// Classification requires the concrete node type (see
+/// [`root_port_info`]), so it is computed here and handed to the UI -
+/// recomputed per head only when the registry, the head's working graph or
+/// its [`DspHead`] change.
+fn provide_dsp_edge_style<N>(
+    registry: Res<Registry<N>>,
+    heads: Query<(&HeadRef, Ref<WorkingGraph<N>>, Option<Ref<DspHead>>), With<OpenHead>>,
+    mut cache: Local<HashMap<ca::Head, std::sync::Arc<RootPortInfo>>>,
+    mut edge_styles: ResMut<EdgeStyles>,
+) where
+    N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Send + Sync,
+{
+    let mut styled: HashMap<ca::Head, std::sync::Arc<RootPortInfo>> = HashMap::new();
+    for (head_ref, wg, dsp) in heads.iter() {
+        let head = head_ref.0.clone();
+        let stale = registry.is_changed()
+            || wg.is_changed()
+            || dsp.as_ref().is_some_and(|d| d.is_changed())
+            || !cache.contains_key(&head);
+        if stale {
+            let shapes = dsp.as_ref().map(|d| d.shapes.clone()).unwrap_or_default();
+            let info = root_port_info(&wg.0, &registry.0, &shapes);
+            cache.insert(head.clone(), std::sync::Arc::new(info));
+        }
+        styled.insert(head.clone(), cache[&head].clone());
+    }
+    // Forget heads that are no longer open.
+    cache.retain(|head, _| styled.contains_key(head));
+    edge_styles.0.push(Box::new(DspEdgeStyle { heads: styled }));
+}
+
 /// Keep each open head's synth in sync, `.after(VmSet)` and `.after(EntrypointSet)`.
 /// Two passes per head:
 ///
@@ -716,6 +758,7 @@ fn drive_synths<N>(
                     DspHead {
                         status: DeriveStatus::FlattenError(e.to_string()),
                         view: format!("{e} - keeping the previous synths").into(),
+                        shapes: Default::default(),
                     }
                 }
             };
@@ -918,6 +961,7 @@ where
             return DspHead {
                 status: DeriveStatus::Silent,
                 view: "no dsp sink (`~out` / `~scopeout`) - silent".into(),
+                shapes: Default::default(),
             };
         }
         // A part cycle (`~bus` regions or instances with no runnable
@@ -930,13 +974,20 @@ where
             return DspHead {
                 status: DeriveStatus::DeriveError(e.to_string()),
                 view: format!("{e} - keeping the previous synths").into(),
+                shapes: Default::default(),
             };
         }
     };
 
-    // The GUI's readable rendering, taken before the planning loop below
-    // consumes `derived`.
+    // The GUI's readable rendering and the merged per-port shapes, taken
+    // before the planning loop below consumes `derived`.
     let view: std::sync::Arc<str> = describe_parts(&derived).into();
+    let shapes: std::sync::Arc<gantz_plyphon::PortShapes> = std::sync::Arc::new(
+        derived
+            .iter()
+            .flat_map(|r| r.shapes.iter().map(|(k, v)| (k.clone(), *v)))
+            .collect(),
+    );
     let n_parts = derived.len();
 
     // Release bus runs whose keys are gone from the derivation.
@@ -1065,6 +1116,7 @@ where
     DspHead {
         status: DeriveStatus::Ok { parts: n_parts },
         view,
+        shapes,
     }
 }
 

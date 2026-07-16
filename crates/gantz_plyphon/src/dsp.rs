@@ -530,6 +530,7 @@ pub fn node_dsp_of(any: &dyn std::any::Any) -> Option<&dyn NodeDsp> {
         .or_else(|| probe::<crate::Sum>(any))
         .or_else(|| probe::<crate::Unpack>(any))
         .or_else(|| probe::<crate::Bus>(any))
+        .or_else(|| probe::<crate::PlayBuf>(any))
 }
 
 /// The signal at dsp input `i` of a [`NodeDsp::ugens`] `inputs` slice, or mono
@@ -679,6 +680,7 @@ mod tests {
         check::<crate::Sum>();
         check::<crate::Unpack>();
         check::<crate::Bus>();
+        check::<crate::PlayBuf>();
     }
 
     /// A unit-backed mono wire at `rate` to feed the summing helpers.

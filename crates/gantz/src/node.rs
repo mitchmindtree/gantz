@@ -54,6 +54,7 @@ gantz_format::impl_node_set_serde! {
         gantz_plyphon::Sum,
         gantz_plyphon::Unpack,
         gantz_plyphon::Bus,
+        gantz_plyphon::PlayBuf,
     }
 }
 
@@ -196,6 +197,7 @@ mod tests {
             "~lag",
             "~out",
             "~pack",
+            "~playbuf",
             "~scopeout",
             "~sinosc",
             "~sum",

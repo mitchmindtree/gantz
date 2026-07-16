@@ -16,6 +16,9 @@
 //! UGens into one gantz node - or emits none, like the `~pack`/`~unpack`
 //! channel-routing pair - gets its own descriptive name instead.
 
+pub use asset::{
+    AudioAsset, AudioBuffers, BUFFER_SECTION, DecodeError, add_audio_asset, audio_asset,
+};
 pub use backend::{AddAction, Backend, BackendError, Embedded, ROOT_GROUP_ID};
 pub use builtin::builtins;
 pub use compile::{
@@ -46,6 +49,7 @@ pub use self::egui::{
     DSP_PANE_KEY, DspEdgeStyle, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab,
 };
 
+pub mod asset;
 pub mod backend;
 pub mod builtin;
 pub mod compile;

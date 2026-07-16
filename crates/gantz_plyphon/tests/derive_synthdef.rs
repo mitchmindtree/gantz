@@ -5,8 +5,8 @@
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    Backend, DeriveError, DspBuilder, Embedded, Lag, NodeDsp, NodeRate, Out, Pack, PortShape,
-    ScopeOut, Signal, SinOsc, Sum, ToNodeDsp, Unpack, derive_synthdef, structural_sig,
+    Backend, DeriveError, DspBuilder, Embedded, Finished, Lag, NodeDsp, NodeRate, Out, Pack,
+    PortShape, ScopeOut, Signal, SinOsc, Sum, ToNodeDsp, Unpack, derive_synthdef, structural_sig,
 };
 use plyphon::synthdef::{InputRef, SynthDef, UnitSpec};
 use plyphon::{AddAction, Options, ROOT_GROUP_ID, Rate, World, engine};
@@ -573,7 +573,7 @@ fn scopeout_taps_a_multichannel_signal() {
     let outs = ScopeOut::default().ugens(&[2], &[Some(sig)], &mut b);
     assert!(outs.is_empty(), "a tap sink has no dsp outputs");
 
-    let (def, _params, monitors, _gains) = b.finish("t");
+    let Finished { def, monitors, .. } = b.finish("t");
     let scope = def
         .units
         .iter()
@@ -600,7 +600,7 @@ fn lag_smooths_each_channel() {
     assert_eq!(outs.len(), 1, "one dsp output port");
     assert_eq!(outs[0].width(), 2, "width flows through");
 
-    let (def, params, _monitors, _gains) = b.finish("t");
+    let Finished { def, params, .. } = b.finish("t");
     let lags: Vec<_> = def.units.iter().filter(|u| u.name == "Lag").collect();
     assert_eq!(lags.len(), 2, "one Lag per channel");
     assert_eq!(def.params.len(), 1, "one shared dur param");
@@ -623,7 +623,7 @@ fn out_writes_multichannel_channel_per_bus() {
     let outs = Out::default().ugens(&[0], &[Some(sig)], &mut b);
     assert!(outs.is_empty());
 
-    let (def, ..) = b.finish("t");
+    let Finished { def, .. } = b.finish("t");
     // One control-rate level mul (gain * fade) shared by two per-channel muls.
     let kr_muls: Vec<_> = def
         .units
@@ -665,7 +665,7 @@ fn out_drops_excess_channels() {
     ]);
     Out::default().ugens(&[0], &[Some(sig)], &mut b);
 
-    let (def, ..) = b.finish("t");
+    let Finished { def, .. } = b.finish("t");
     let n_muls = def
         .units
         .iter()

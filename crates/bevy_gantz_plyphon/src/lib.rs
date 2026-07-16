@@ -1171,6 +1171,7 @@ fn spawn_part(
         params,
         monitors,
         gains,
+        buffers: _,
         bus_writes,
         bus_reads,
         shapes: _,

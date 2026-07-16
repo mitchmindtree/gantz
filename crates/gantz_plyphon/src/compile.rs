@@ -14,8 +14,8 @@ use gantz_core::node::Conns;
 use gantz_core::node::graph::{Graph, NodeIx};
 
 use crate::dsp::{
-    DspBuilder, GainRef, ParamBinding, PortShapes, ScopeOutBinding, Signal, ToNodeDsp,
-    record_port_shapes, sum_signals,
+    BufferBinding, DspBuilder, Finished, GainRef, ParamBinding, PortShapes, ScopeOutBinding,
+    Signal, ToNodeDsp, record_port_shapes, sum_signals,
 };
 
 /// An error deriving a synthdef from a graph.
@@ -110,6 +110,9 @@ pub struct Derived {
     /// The params that gate the def's whole output (e.g. `~out`'s gain), which
     /// the driver fades through on a crossfaded replacement.
     pub gains: Vec<GainRef>,
+    /// One binding per buffer reference (`~playbuf`), so the driver can make
+    /// each asset resident and wire the node's `bufnum`/`rate` params.
+    pub buffers: Vec<BufferBinding>,
     /// The width and rate each dsp output port carried, for diagnostics.
     pub shapes: PortShapes,
 }
@@ -216,12 +219,19 @@ where
         outputs.insert(n, outs);
     }
 
-    let (def, params, monitors, gains) = builder.finish(name);
+    let Finished {
+        def,
+        params,
+        monitors,
+        gains,
+        buffers,
+    } = builder.finish(name);
     Ok(Derived {
         def,
         params,
         monitors,
         gains,
+        buffers,
         shapes,
     })
 }
@@ -696,7 +706,13 @@ where
         let key = h.finish();
 
         let name = format!("{name_prefix}-{key:016x}");
-        let (def, params, monitors, gains) = builder.finish(name);
+        let Finished {
+            def,
+            params,
+            monitors,
+            gains,
+            buffers,
+        } = builder.finish(name);
         regions.push(RegionDerived {
             key,
             derived: Derived {
@@ -704,6 +720,7 @@ where
                 params,
                 monitors,
                 gains,
+                buffers,
                 shapes,
             },
             bus_writes,

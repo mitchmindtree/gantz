@@ -1975,6 +1975,49 @@ mod tests {
         });
     }
 
+    /// A `~playbuf`'s buffer reference wires audio blobs into reachability:
+    /// prune and export keep exactly the buffers live graphs reference, and
+    /// drop the rest.
+    #[test]
+    fn playbuf_buffers_ride_reachability() {
+        use std::time::Duration;
+        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
+
+        let mut registry: gantz_ca::Registry<G> = gantz_ca::Registry::default();
+        let used = gantz_plyphon::AudioAsset::from_interleaved(vec![0.5; 8], 1, 48_000.0);
+        let unused = gantz_plyphon::AudioAsset::from_interleaved(vec![-0.5; 8], 1, 48_000.0);
+        let used_addr = gantz_plyphon::add_audio_asset(&mut registry, &used);
+        let unused_addr = gantz_plyphon::add_audio_asset(&mut registry, &unused);
+
+        let mut g = G::default();
+        g.add_node(Box::new(gantz_plyphon::PlayBuf::new(used_addr, 1, 48_000.0)) as Box<dyn Node>);
+        let g_addr = registry.add_graph(g);
+        let commit = registry.commit_graph(Duration::from_secs(1), None, g_addr, || {
+            unreachable!("graph already added")
+        });
+        registry.set_head(name("sampler"), commit);
+
+        let builtins = super::builtins();
+        let reg_ref = gantz_egui::RegistryRef::new(&registry, &builtins);
+        let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
+        let live = gantz_core::reg::live(&get_node, &registry, [] as [gantz_ca::Head; 0]);
+        assert!(live.blob_live(gantz_plyphon::BUFFER_SECTION, &used_addr));
+        assert!(!live.blob_live(gantz_plyphon::BUFFER_SECTION, &unused_addr));
+
+        // Export carries only the referenced buffer.
+        let exported = gantz_ca::export(&registry, &live);
+        assert!(gantz_plyphon::audio_asset(&exported, &used_addr).is_some());
+        assert!(gantz_plyphon::audio_asset(&exported, &unused_addr).is_none());
+
+        // Prune drops the unreferenced one in place.
+        gantz_ca::prune(&mut registry, &live);
+        assert_eq!(
+            gantz_plyphon::audio_asset(&registry, &used_addr),
+            Some(used)
+        );
+        assert!(gantz_plyphon::audio_asset(&registry, &unused_addr).is_none());
+    }
+
     /// The inline-name base export (`format::to_string_named`) names every graph
     /// inline, drops the `(commits ...)`/`(names ...)` tables and the pinned ref
     /// addresses, and is *stable*: re-exporting an unchanged base produces byte

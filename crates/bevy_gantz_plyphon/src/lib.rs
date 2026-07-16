@@ -1970,6 +1970,70 @@ mod tests {
         );
     }
 
+    /// End-to-end: a `~playbuf -> ~out` graph plays a content-addressed asset.
+    /// Exercises the whole chain - node -> derive -> `BufferBinding` -> resident
+    /// install -> `PlayBuf` reads the buffer -> `Out` - and confirms it sounds.
+    #[test]
+    fn playbuf_sounds_through_out() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_plyphon::flatten::{Flat, RefKind, flatten};
+
+        // An alternating +/-0.5 waveform (nonzero RMS), content-addressed and
+        // placed in the store the driver reads.
+        let samples = (0..64)
+            .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
+        let audio = gantz_plyphon::AudioAsset::from_interleaved(samples, 1, 48_000.0);
+        let addr = audio.addr();
+        let bytes = ca::Bytes::from(audio.encode());
+        let assets: BufferBlobs = std::iter::once((addr, bytes)).collect();
+
+        let mut g = Graph::<TestN>::default();
+        let p = g.add_node(TestN::PlayBuf(gantz_plyphon::PlayBuf::new(
+            addr, 1, 48_000.0,
+        )));
+        let o = g.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        g.add_edge(p, o, Edge::new(0.into(), 0.into()));
+        let resolve =
+            |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> { None };
+        let flat: Graph<Flat<TestN>> = flatten(&|_| None, &g, &resolve).expect("flatten");
+
+        let mut cache = DefCache::new();
+        let template = derive_template(&flat, 1, &|_| None, &mut cache).expect("derive");
+        let part = instantiate(&template, &cache).into_iter().next().unwrap();
+        let wiring = wiring_hash(&part);
+
+        let (mut controller, _nrt, mut world) = plyphon::engine(plyphon::Options {
+            sample_rate: 48_000.0,
+            output_channels: 1,
+            ..plyphon::Options::default()
+        });
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+        let synth = spawn_part(
+            &mut controller,
+            &mut state,
+            &assets,
+            entity,
+            part,
+            wiring,
+            48_000.0,
+            None,
+        )
+        .expect("spawn_part");
+        // The asset was made resident with a single refcount, held by this synth.
+        assert_eq!(state.resident.get(&addr).map(|r| r.refcount), Some(1));
+        assert_eq!(synth.buffers, vec![addr]);
+
+        let mut out = vec![0.0f32; 48_000 / 2];
+        for block in out.chunks_mut(64) {
+            world.fill(block, 1);
+        }
+        let rms = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(rms > 0.05, "playbuf -> out must sound: rms={rms}");
+    }
+
     /// Multi-frame `structural_sync`: a `~sinosc -> ~out` head graph sounds,
     /// and adding unconnected `inlet`/`outlet` nodes (which dissolve in the
     /// flattener) keeps the tone audible (the region is kept or respawned with
@@ -2145,6 +2209,7 @@ mod tests {
         Out(gantz_plyphon::Out),
         Pack(gantz_plyphon::Pack),
         Unpack(gantz_plyphon::Unpack),
+        PlayBuf(gantz_plyphon::PlayBuf),
         Inlet,
         Outlet,
         Ref(gantz_ca::ContentAddr, usize, usize, bool),
@@ -2157,6 +2222,7 @@ mod tests {
                 TestN::Out(o) => gantz_ca::CaHash::hash(o, hasher),
                 TestN::Pack(p) => gantz_ca::CaHash::hash(p, hasher),
                 TestN::Unpack(u) => gantz_ca::CaHash::hash(u, hasher),
+                TestN::PlayBuf(p) => gantz_ca::CaHash::hash(p, hasher),
                 TestN::Inlet => {
                     hasher.update(b"inlet");
                 }
@@ -2181,6 +2247,7 @@ mod tests {
                 TestN::Out(o) => Some(o),
                 TestN::Pack(p) => Some(p),
                 TestN::Unpack(u) => Some(u),
+                TestN::PlayBuf(p) => Some(p),
                 TestN::Inlet | TestN::Outlet | TestN::Ref(..) => None,
             }
         }

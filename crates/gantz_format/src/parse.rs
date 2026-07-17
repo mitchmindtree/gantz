@@ -10,8 +10,8 @@
 use crate::datum::{Datum, datum_from_expr};
 use crate::error::{ErrorKind, FormatError};
 use crate::model::{
-    Addr, CommitDecl, Conn, DescriptionDecl, Document, Endpoint, Form, GraphBody, GraphDef,
-    NameDecl, NodeDecl, NodeSpec, RefSpec,
+    Addr, CommitDecl, Conn, Document, Endpoint, Form, GraphBody, GraphDef, NameDecl, NodeDecl,
+    NodeSpec, RefSpec, SectionForm, SectionKey,
 };
 use crate::sexpr::{self, as_keyword, as_string, as_symbol, err_at, list_args, span_src};
 use crate::sugar::{Sugar, SugarArgs};
@@ -37,9 +37,7 @@ pub fn parse(src: &str, sugar: &dyn Sugar) -> Result<Document, FormatError> {
                 .push(parse_graph_def(&args[1..], form, src, sugar)?),
             "commits" => doc.commits.extend(parse_commits_table(&args[1..], src)?),
             "names" => doc.names.extend(parse_names_table(&args[1..], src)?),
-            "descriptions" => doc
-                .descriptions
-                .extend(parse_descriptions_table(&args[1..], src)?),
+            "section" => doc.sections.push(parse_section(&args[1..], form, src)?),
             // Preserve anything else (e.g. `layout`, `demo`) for an extender.
             other => doc.extra.push(Form {
                 head: other.to_string(),
@@ -310,43 +308,154 @@ fn parse_names_table(args: &[ExprKind], src: &str) -> Result<Vec<NameDecl>, Form
     Ok(names)
 }
 
-fn parse_descriptions_table(
+/// Parse a `(section "<id>" (policy <p>) (liveness <l>) (entry <key> <datum>) ...)`
+/// form. Policy and liveness are required so unknown-domain sections carry
+/// their semantics through text.
+fn parse_section(
     args: &[ExprKind],
+    form: &ExprKind,
     src: &str,
-) -> Result<Vec<DescriptionDecl>, FormatError> {
-    let mut descriptions = Vec::new();
-    for item in args {
+) -> Result<SectionForm, FormatError> {
+    let id = args.first().and_then(as_string).ok_or_else(|| {
+        err_at(
+            form,
+            src,
+            ErrorKind::Malformed("section requires a string id".into()),
+        )
+    })?;
+    let mut policy = None;
+    let mut liveness = None;
+    let mut entries = Vec::new();
+    for item in &args[1..] {
         let iargs = list_args(item).ok_or_else(|| {
             err_at(
                 item,
                 src,
-                ErrorKind::Malformed("description entry must be (name \"text\")".into()),
+                ErrorKind::Malformed("section item must be a list".into()),
             )
         })?;
-        if iargs.len() != 2 {
-            return Err(err_at(
-                item,
-                src,
-                ErrorKind::Malformed("description entry must be (name \"text\")".into()),
-            ));
+        match iargs.first().and_then(as_symbol).as_deref() {
+            Some("policy") => {
+                let sym = iargs.get(1).and_then(as_symbol);
+                policy = Some(match sym.as_deref() {
+                    Some("keep-existing") => gantz_ca::MergePolicy::KeepExisting,
+                    Some("replace") => gantz_ca::MergePolicy::Replace,
+                    _ => {
+                        return Err(err_at(
+                            item,
+                            src,
+                            ErrorKind::Malformed("policy must be keep-existing or replace".into()),
+                        ));
+                    }
+                });
+            }
+            Some("liveness") => {
+                let sym = iargs.get(1).and_then(as_symbol);
+                liveness = Some(match sym.as_deref() {
+                    Some("root") => gantz_ca::Liveness::Root,
+                    Some("with-name") => gantz_ca::Liveness::WithName,
+                    Some("with-commit") => gantz_ca::Liveness::WithCommit,
+                    Some("with-graph") => gantz_ca::Liveness::WithGraph,
+                    Some("pinned") => gantz_ca::Liveness::Pinned,
+                    _ => {
+                        return Err(err_at(
+                            item,
+                            src,
+                            ErrorKind::Malformed(
+                                "liveness must be root, with-name, with-commit, with-graph \
+                                 or pinned"
+                                    .into(),
+                            ),
+                        ));
+                    }
+                });
+            }
+            Some("entry") => {
+                if iargs.len() != 3 {
+                    return Err(err_at(
+                        item,
+                        src,
+                        ErrorKind::Malformed("entry must be (entry <key> <datum>)".into()),
+                    ));
+                }
+                let key = parse_section_key(&iargs[1], src)?;
+                let value = datum_from_expr(&iargs[2], src);
+                entries.push((key, value));
+            }
+            _ => {
+                return Err(err_at(
+                    item,
+                    src,
+                    ErrorKind::Malformed(
+                        "section item must be (policy ...), (liveness ...) or (entry ...)".into(),
+                    ),
+                ));
+            }
         }
-        let name = as_symbol(&iargs[0]).ok_or_else(|| {
-            err_at(
-                &iargs[0],
-                src,
-                ErrorKind::Malformed("description name must be a symbol".into()),
-            )
-        })?;
-        let description = as_string(&iargs[1]).ok_or_else(|| {
-            err_at(
-                &iargs[1],
-                src,
-                ErrorKind::Malformed("description must be a string".into()),
-            )
-        })?;
-        descriptions.push(DescriptionDecl { name, description });
     }
-    Ok(descriptions)
+    let policy = policy.ok_or_else(|| {
+        err_at(
+            form,
+            src,
+            ErrorKind::Malformed("section requires a (policy ...)".into()),
+        )
+    })?;
+    let liveness = liveness.ok_or_else(|| {
+        err_at(
+            form,
+            src,
+            ErrorKind::Malformed("section requires a (liveness ...)".into()),
+        )
+    })?;
+    Ok(SectionForm {
+        id,
+        policy,
+        liveness,
+        entries,
+    })
+}
+
+/// Parse a section entry key: `(name <symbol>)`, `(commit "<hex>")`,
+/// `(graph "<hex>")` or `(addr "<hex>")`.
+fn parse_section_key(e: &ExprKind, src: &str) -> Result<SectionKey, FormatError> {
+    let args = list_args(e).ok_or_else(|| {
+        err_at(
+            e,
+            src,
+            ErrorKind::Malformed("section key must be a list".into()),
+        )
+    })?;
+    let malformed = || {
+        err_at(
+            e,
+            src,
+            ErrorKind::Malformed(
+                "section key must be (name <symbol>), (commit \"<hex>\"), (graph \"<hex>\") \
+                 or (addr \"<hex>\")"
+                    .into(),
+            ),
+        )
+    };
+    if args.len() != 2 {
+        return Err(malformed());
+    }
+    let kind = args.first().and_then(as_symbol).ok_or_else(malformed)?;
+    match kind.as_str() {
+        "name" => {
+            let name = as_symbol(&args[1])
+                .or_else(|| as_string(&args[1]))
+                .ok_or_else(malformed)?;
+            Ok(SectionKey::Name(name))
+        }
+        "commit" => Ok(SectionKey::Commit(
+            as_string(&args[1]).ok_or_else(malformed)?,
+        )),
+        "graph" => Ok(SectionKey::Graph(
+            as_string(&args[1]).ok_or_else(malformed)?,
+        )),
+        "addr" => Ok(SectionKey::Addr(as_string(&args[1]).ok_or_else(malformed)?)),
+        _ => Err(malformed()),
+    }
 }
 
 fn parse_commit_entry(
@@ -501,22 +610,46 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_descriptions() {
+    fn descriptions_form_lands_in_extra() {
+        // `(descriptions ...)` is an extender's friendly form now (the gui
+        // layer maps it to the `gantz.description` section), so the core
+        // parser preserves it verbatim like any unrecognised form.
         let text = "\
 (graph mul (m (expr 1)))
 (descriptions
   (mul \"multiply two numbers\"))";
         let doc = parse(text, &CoreSugar).expect("parse");
-        assert_eq!(doc.descriptions.len(), 1);
-        assert_eq!(doc.descriptions[0].name, "mul");
-        assert_eq!(doc.descriptions[0].description, "multiply two numbers");
+        assert_eq!(doc.extra.len(), 1);
+        assert_eq!(doc.extra[0].head, "descriptions");
+    }
 
-        // write -> parse preserves the description verbatim.
+    #[test]
+    fn round_trips_sections() {
+        // A section from a domain this parser knows nothing about carries
+        // its semantics as data and round-trips through write -> parse.
+        let text = "\
+(graph mul (m (expr 1)))
+(section \"laser.palette\"
+  (policy keep-existing)
+  (liveness with-name)
+  (entry (name mul) \"warm\"))";
+        let doc = parse(text, &CoreSugar).expect("parse");
+        assert_eq!(doc.sections.len(), 1);
+        let section = &doc.sections[0];
+        assert_eq!(section.id, "laser.palette");
+        assert!(matches!(
+            section.policy,
+            gantz_ca::MergePolicy::KeepExisting
+        ));
+        assert!(matches!(section.liveness, gantz_ca::Liveness::WithName));
+        assert_eq!(section.entries.len(), 1);
+        assert!(matches!(&section.entries[0].0, SectionKey::Name(n) if n == "mul"));
+
         let written = crate::writer::write_document(&doc, &CoreSugar);
         let reparsed = parse(&written, &CoreSugar).expect("reparse");
-        assert_eq!(reparsed.descriptions.len(), 1);
-        assert_eq!(reparsed.descriptions[0].name, "mul");
-        assert_eq!(reparsed.descriptions[0].description, "multiply two numbers");
+        assert_eq!(reparsed.sections.len(), 1);
+        assert_eq!(reparsed.sections[0].id, "laser.palette");
+        assert_eq!(reparsed.sections[0].entries.len(), 1);
     }
 
     #[test]

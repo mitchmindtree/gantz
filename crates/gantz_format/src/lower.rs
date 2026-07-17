@@ -11,8 +11,9 @@ use crate::datum::{Datum, from_datum};
 use crate::error::{ErrorKind, FormatError};
 use crate::model::{
     Addr, CommitDecl, Document, Form, GraphBody, GraphDef, NameDecl, NodeDecl, NodeSpec, RefSpec,
+    SectionKey,
 };
-use gantz_ca::{CaHash, Commit, CommitAddr, ContentAddr, Registry, Timestamp};
+use gantz_ca::{CaHash, Commit, CommitAddr, ContentAddr, GraphAddr, Key, Registry, Timestamp};
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::{Graph, NodeIx};
 use gantz_core::node::{Input, Output};
@@ -36,17 +37,23 @@ pub struct Loaded<N> {
 }
 
 /// Read-only reference-resolution context, threaded through graph building.
+///
+/// References resolve to GRAPH addresses (content identity): a by-name
+/// reference resolves to the graph at the name's head, a pinned address is
+/// a graph address.
 struct Resolve<'a> {
-    /// name -> head commit, for already-built graphs.
-    names: &'a HashMap<String, CommitAddr>,
-    /// commit id -> commit, for resolving pinned references by id.
-    commit_ids: &'a HashMap<Addr, CommitAddr>,
-    /// every commit built so far, for resolving concrete-address prefixes.
-    known: &'a [CommitAddr],
-    /// Externally-known names, consulted as a fallback after the document's
-    /// own names. Lets a document reference graphs defined elsewhere (e.g. a
-    /// domain base source referencing another source's graphs).
-    seed: &'a BTreeMap<String, CommitAddr>,
+    /// name -> head graph, for already-built graphs.
+    name_graphs: &'a HashMap<String, GraphAddr>,
+    /// commit id -> that commit's graph, for resolving pinned references by
+    /// commit label.
+    commit_graphs: &'a HashMap<Addr, GraphAddr>,
+    /// every graph built so far, for resolving concrete-address prefixes.
+    known: &'a [GraphAddr],
+    /// Externally-known name -> head graph associations, consulted as a
+    /// fallback after the document's own names. Lets a document reference
+    /// graphs defined elsewhere (e.g. a domain base source referencing
+    /// another source's graphs).
+    seed: &'a BTreeMap<String, GraphAddr>,
 }
 
 /// Lower a parsed [`Document`] into a [`Loaded`] registry, synthesising root
@@ -59,16 +66,16 @@ where
 }
 
 /// [`lower`], resolving names the document does not define through `seed`
-/// (externally-known name -> head commit associations).
+/// (externally-known name -> head graph associations).
 ///
 /// The document's own names shadow the seed. A seeded reference embeds the
-/// seeded commit address in the built node, so the referring graph's content
+/// seeded graph address in the built node, so the referring graph's content
 /// address depends on it - callers wanting reproducible addresses must seed
 /// reproducible ones.
 pub fn lower_seeded<N>(
     doc: Document,
     now: Timestamp,
-    seed: &BTreeMap<String, CommitAddr>,
+    seed: &BTreeMap<String, GraphAddr>,
 ) -> Result<Loaded<N>, FormatError>
 where
     // `'static` is required by content-addressing (`Registry::add_graph`), whose
@@ -80,7 +87,7 @@ where
         graphs,
         commits,
         names: name_decls,
-        descriptions,
+        sections,
         extra,
     } = doc;
 
@@ -108,32 +115,37 @@ where
         compute_name_to_graph_id(&graphs, &name_decls, &commit_for_graph, &graph_of_commit);
     let order = topo_order(&graphs, &graphs_by_id, &name_to_graph_id)?;
 
-    let mut registry: Registry<Graph<N>> =
-        Registry::new(HashMap::new(), HashMap::new(), BTreeMap::new());
+    let mut registry: Registry<Graph<N>> = Registry::default();
     let mut names: HashMap<String, CommitAddr> = HashMap::new();
+    let mut name_graphs: HashMap<String, GraphAddr> = HashMap::new();
     let mut commit_ids: HashMap<Addr, CommitAddr> = HashMap::new();
-    let mut known: Vec<CommitAddr> = Vec::new();
+    let mut commit_graphs: HashMap<Addr, GraphAddr> = HashMap::new();
+    let mut known_commits: Vec<CommitAddr> = Vec::new();
+    let mut known_graphs: Vec<GraphAddr> = Vec::new();
     let mut graph_head: HashMap<Addr, CommitAddr> = HashMap::new();
     let mut index: HashMap<Addr, HashMap<String, usize>> = HashMap::new();
 
     for id in &order {
         let def = graphs_by_id[id];
         let resolve = Resolve {
-            names: &names,
-            commit_ids: &commit_ids,
-            known: &known,
+            name_graphs: &name_graphs,
+            commit_graphs: &commit_graphs,
+            known: &known_graphs,
             seed,
         };
         let (graph, index_map) = build_graph::<N>(&def.body, &resolve)?;
         let g_addr = registry.add_graph(graph);
+        known_graphs.push(g_addr);
         index.insert(id.clone(), index_map);
 
         // Build the head commit: from the table where present, else a fresh root.
         let head = match commit_for_graph.get(id) {
-            Some(decl) => build_commit(&mut registry, decl, g_addr, &commit_ids, &mut known),
+            Some(decl) => {
+                build_commit(&mut registry, decl, g_addr, &commit_ids, &mut known_commits)
+            }
             None => {
                 let ca = registry.add_commit(Commit::new(now, None, g_addr));
-                known.push(ca);
+                known_commits.push(ca);
                 ca
             }
         };
@@ -143,11 +155,13 @@ where
         // plus an auto-name for an un-committed label graph (hand-authored).
         let mut register = |name: String| {
             names.insert(name.clone(), head);
-            registry.insert_name(name, head);
+            name_graphs.insert(name.clone(), g_addr);
+            registry.set_head(name.parse().expect("infallible"), head);
         };
         match commit_for_graph.get(id) {
             Some(decl) => {
                 commit_ids.insert(decl.id.clone(), head);
+                commit_graphs.insert(decl.id.clone(), g_addr);
                 if let Some(ns) = names_of_commit.get(&decl.id) {
                     ns.iter().for_each(|n| register(n.clone()));
                 }
@@ -160,9 +174,20 @@ where
         }
     }
 
-    // Apply name-keyed descriptions (independent of how each name registered).
-    for decl in descriptions {
-        registry.set_description(decl.name, decl.description);
+    // Apply generic metadata sections, semantics as declared in the text.
+    for section in sections {
+        for (key, value) in section.entries {
+            let Some(key) = lower_section_key(key) else {
+                continue;
+            };
+            registry.set_section_value(
+                section.id.clone(),
+                section.policy,
+                section.liveness,
+                key,
+                gantz_ca::Value::Datum(value),
+            );
+        }
     }
 
     Ok(Loaded {
@@ -172,6 +197,17 @@ where
         names,
         extra,
     })
+}
+
+/// Convert a text-form section key to a registry key. Malformed hex keys
+/// are dropped (advisory metadata degrades, it never fails a load).
+fn lower_section_key(key: SectionKey) -> Option<Key> {
+    match key {
+        SectionKey::Name(name) => Some(Key::Name(name.parse().expect("infallible"))),
+        SectionKey::Commit(hex) => Some(Key::Commit(hex.parse::<ContentAddr>().ok()?.into())),
+        SectionKey::Graph(hex) => Some(Key::Graph(hex.parse::<ContentAddr>().ok()?.into())),
+        SectionKey::Addr(hex) => Some(Key::Addr(hex.parse().ok()?)),
+    }
 }
 
 // -- graph construction ------------------------------------------------------
@@ -242,30 +278,28 @@ where
 }
 
 fn resolve_ref_value(refspec: &RefSpec, resolve: &Resolve) -> Result<Datum, FormatError> {
-    let commit_ca = match &refspec.addr {
+    let graph_ca = match &refspec.addr {
         None => resolve
-            .names
+            .name_graphs
             .get(&refspec.name)
             .or_else(|| resolve.seed.get(&refspec.name))
             .copied()
             .ok_or_else(|| FormatError::new(ErrorKind::MissingDependency(refspec.name.clone())))?,
         Some(Addr::Label(label)) => resolve
-            .commit_ids
+            .commit_graphs
             .get(&Addr::Label(label.clone()))
             .copied()
             .ok_or_else(|| FormatError::new(ErrorKind::MissingDependency(label.clone())))?,
-        // A pinned address is advisory: if it no longer resolves (e.g. the
-        // commit healed because the format keeps only the head commit per
-        // graph, so a parent was dropped and the address recomputed), fall
-        // back to the reference's name. This keeps `NamedRef`s - including
-        // nested-graph refs in a copy/paste payload - resolving across the
-        // address drift (#232).
-        Some(Addr::Concrete(hex)) => resolve_commit(hex, resolve.known)
-            .or_else(|| resolve.names.get(&refspec.name).copied())
+        // A pinned address is advisory: if it no longer resolves, fall back
+        // to the reference's name. Content addressing makes this rare (a
+        // graph address is independent of commit re-rooting), but a document
+        // may pin a graph version it does not itself carry.
+        Some(Addr::Concrete(hex)) => resolve_graph(hex, resolve.known)
+            .or_else(|| resolve.name_graphs.get(&refspec.name).copied())
             .or_else(|| resolve.seed.get(&refspec.name).copied())
             .ok_or_else(|| FormatError::new(ErrorKind::MissingDependency(hex.clone())))?,
     };
-    let content: ContentAddr = commit_ca.into();
+    let content: ContentAddr = graph_ca.into();
     let hex = content.to_string();
     let tag = if refspec.func {
         "FnNamedRef"
@@ -457,6 +491,22 @@ fn resolve_commit(hex: &str, known: &[CommitAddr]) -> Option<CommitAddr> {
         .iter()
         .copied()
         .filter(|ca| ContentAddr::from(*ca).to_string().starts_with(hex))
+        .collect();
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+/// Resolve a concrete address (full hex or unambiguous prefix) to a *present*
+/// graph. A prefix is ambiguous only when it matches two distinct graphs.
+fn resolve_graph(hex: &str, known: &[GraphAddr]) -> Option<GraphAddr> {
+    let mut matches: Vec<GraphAddr> = known
+        .iter()
+        .copied()
+        .filter(|ga| ContentAddr::from(*ga).to_string().starts_with(hex))
         .collect();
     matches.sort();
     matches.dedup();

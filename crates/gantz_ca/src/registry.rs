@@ -70,6 +70,9 @@ pub struct Heads;
 pub type Graphs<G> = HashMap<GraphAddr, G>;
 pub type Commits = HashMap<CommitAddr, Commit>;
 
+/// The id of the core [`Heads`] section.
+pub const HEADS_ID: &str = "heads";
+
 /// The result of merging an incoming registry into an existing one.
 #[derive(Clone, Debug, Default)]
 pub struct MergeReport {
@@ -84,7 +87,7 @@ pub struct MergeReport {
 }
 
 impl SectionDecl for Heads {
-    const ID: &'static str = "heads";
+    const ID: &'static str = HEADS_ID;
     const POLICY: MergePolicy = MergePolicy::Replace;
     const LIVENESS: Liveness = Liveness::Root;
     type Key = Name;

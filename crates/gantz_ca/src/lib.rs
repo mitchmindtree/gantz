@@ -30,8 +30,8 @@ pub use name::{Name, SEP as NAME_SEP};
 pub use reach::{LiveSet, OutRefs, closure, closure_from, export, prune};
 #[doc(inline)]
 pub use registry::{
-    Heads, MergeReport, Registry, section_get, section_insert, section_insert_datum, section_iter,
-    section_remove,
+    HEADS_ID, Heads, MergeReport, Registry, section_get, section_insert, section_insert_datum,
+    section_iter, section_remove,
 };
 #[doc(inline)]
 pub use section::{

@@ -11,11 +11,11 @@
 use crate::datum::{Datum, to_datum};
 use crate::error::FormatError;
 use crate::model::{
-    Addr, CommitDecl, Conn, DescriptionDecl, Document, Endpoint, GraphBody, GraphDef, NameDecl,
-    NodeDecl, NodeSpec, RefSpec,
+    Addr, CommitDecl, Conn, Document, Endpoint, GraphBody, GraphDef, NameDecl, NodeDecl, NodeSpec,
+    RefSpec, SectionForm, SectionKey,
 };
 use crate::sugar::Sugar;
-use gantz_ca::{ContentAddr, GraphAddr, Registry};
+use gantz_ca::{ContentAddr, GraphAddr, Key, Registry, Value};
 use gantz_core::node::graph::Graph;
 use petgraph::visit::EdgeRef;
 use serde::Serialize;
@@ -39,7 +39,17 @@ pub struct GraphLabels {
 }
 
 /// Raise a registry into serialized text plus per-graph label context.
-pub fn raise<N>(registry: &Registry<Graph<N>>, sugar: &dyn Sugar) -> Result<Dumped, FormatError>
+///
+/// `claimed` names the section ids the caller renders itself with friendly
+/// forms (e.g. `gantz.description` as `(descriptions ...)`); those are
+/// skipped here, every other section is emitted as a generic
+/// `(section ...)` form so unknown-domain data round-trips through text.
+/// The `heads` section is always covered by the `(names ...)` table.
+pub fn raise<N>(
+    registry: &Registry<Graph<N>>,
+    sugar: &dyn Sugar,
+    claimed: &[&str],
+) -> Result<Dumped, FormatError>
 where
     // Raising only ever *serializes* nodes, hence no `DeserializeOwned` bound.
     N: Serialize,
@@ -88,26 +98,52 @@ where
         });
     }
 
-    for (name, c_addr) in registry.names() {
+    for (name, c_addr) in registry.heads() {
         doc.names.push(NameDecl {
-            name: name.clone(),
-            commit: Addr::Concrete(short_hex(*c_addr)),
+            name: name.to_string(),
+            commit: Addr::Concrete(short_hex(c_addr)),
         });
     }
 
-    push_descriptions(&mut doc, registry);
+    push_sections(&mut doc, registry, claimed);
 
     let text = crate::writer::write_document(&doc, sugar);
     Ok(Dumped { text, graphs })
 }
 
-/// Push the registry's name-keyed descriptions onto the document, so both the
-/// full and inline-name formats round-trip them via a `(descriptions ...)` form.
-fn push_descriptions<N>(doc: &mut Document, registry: &Registry<Graph<N>>) {
-    for (name, description) in registry.descriptions() {
-        doc.descriptions.push(DescriptionDecl {
-            name: name.clone(),
-            description: description.clone(),
+/// Push the registry's metadata sections onto the document as generic
+/// `(section ...)` forms, skipping `heads` (covered by the names table),
+/// the caller's `claimed` ids, and non-datum values (blob indirections do
+/// not travel through text yet).
+fn push_sections<N>(doc: &mut Document, registry: &Registry<Graph<N>>, claimed: &[&str]) {
+    for (id, section) in registry.sections() {
+        if id == gantz_ca::registry::HEADS_ID || claimed.contains(&id.as_str()) {
+            continue;
+        }
+        let entries: Vec<(SectionKey, Datum)> = section
+            .entries
+            .iter()
+            .filter_map(|(key, value)| {
+                let key = match key {
+                    Key::Name(name) => SectionKey::Name(name.to_string()),
+                    Key::Commit(ca) => SectionKey::Commit(ContentAddr::from(*ca).to_string()),
+                    Key::Graph(ga) => SectionKey::Graph(ContentAddr::from(*ga).to_string()),
+                    Key::Addr(addr) => SectionKey::Addr(addr.to_string()),
+                };
+                match value {
+                    Value::Datum(d) => Some((key, d.clone())),
+                    Value::Blob(..) | Value::Commit(_) => None,
+                }
+            })
+            .collect();
+        if entries.is_empty() {
+            continue;
+        }
+        doc.sections.push(SectionForm {
+            id: id.clone(),
+            policy: section.policy,
+            liveness: section.liveness,
+            entries,
         });
     }
 }
@@ -124,6 +160,7 @@ fn push_descriptions<N>(doc: &mut Document, registry: &Registry<Graph<N>>) {
 pub fn raise_named<N>(
     registry: &Registry<Graph<N>>,
     sugar: &dyn Sugar,
+    claimed: &[&str],
 ) -> Result<Dumped, FormatError>
 where
     N: Serialize,
@@ -131,8 +168,8 @@ where
     let mut doc = Document::default();
     let mut graphs = HashMap::new();
 
-    for (name, c_addr) in registry.names() {
-        let Some(commit) = registry.commits().get(c_addr) else {
+    for (name, c_addr) in registry.heads() {
+        let Some(commit) = registry.commits().get(&c_addr) else {
             continue;
         };
         let Some(graph) = registry.graphs().get(&commit.graph) else {
@@ -140,19 +177,19 @@ where
         };
         let (body, labels) = graph_to_body::<N>(graph, sugar, false)?;
         doc.graphs.push(GraphDef {
-            id: Addr::Label(name.clone()),
+            id: Addr::Label(name.to_string()),
             body,
         });
         graphs.insert(
             commit.graph,
             GraphLabels {
-                id: name.clone(),
+                id: name.to_string(),
                 labels,
             },
         );
     }
 
-    push_descriptions(&mut doc, registry);
+    push_sections(&mut doc, registry, claimed);
 
     let text = crate::writer::write_document(&doc, sugar);
     Ok(Dumped { text, graphs })

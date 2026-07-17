@@ -1,94 +1,98 @@
-//! The Export-level `.gantz` format.
+//! The GUI layer of the `.gantz` format.
 //!
 //! [`gantz_format`] owns the layout-agnostic registry format. This module
-//! layers GUI view state on top - `(layout ...)` and `(demo ...)` forms - using
-//! the format's [`sexpr`] toolkit and the resolution
-//! context returned by [`gantz_format::from_str`]/[`gantz_format::to_string`].
-//! It produces and consumes a full [`Export`] (registry + views + demos), so
-//! existing `crate::format::{from_str, to_string}` call sites are unchanged.
+//! renders the GUI's registry sections (see [`crate::section`]) as friendly
+//! forms - `(descriptions ...)`, `(layout ...)` and `(demo ...)` - using the
+//! format's [`sexpr`] toolkit and the resolution context returned by
+//! [`gantz_format::from_str`]/[`gantz_format::to_string`], and applies those
+//! forms back into the registry's sections on parse.
 
-use crate::export::Export;
-use gantz_ca::{CaHash, CommitAddr, Timestamp};
+use gantz_ca::{CaHash, GraphAddr, Name, Registry, Timestamp};
 use gantz_core::node::graph::Graph;
 use gantz_format::sexpr;
 use gantz_format::{Addr, Form, GraphLabels, Loaded};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
 
 pub use gantz_format::FormatError;
 
-/// Parse a `.gantz` document into an [`Export`] (registry + views + demos).
+/// The section ids this module renders itself as friendly forms (passed as
+/// `claimed` to [`gantz_format::to_string`], which then skips their generic
+/// `(section ...)` output).
+const CLAIMED: &[&str] = &[
+    crate::section::DESCRIPTIONS_ID,
+    crate::section::VIEWS_ID,
+    crate::section::DEMOS_ID,
+];
+
+/// Parse a `.gantz` document into a registry, applying the GUI-layer friendly
+/// forms (`descriptions`, `layout`, `demo`) into its sections.
 ///
 /// `now` provides the timestamp for any graph the document does not commit
 /// explicitly (hand-authored graphs).
-pub fn from_str<N>(text: &str, now: Timestamp) -> Result<Export<Graph<N>>, FormatError>
+pub fn from_str<N>(text: &str, now: Timestamp) -> Result<Registry<Graph<N>>, FormatError>
 where
     N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
 {
     let loaded = gantz_format::from_str::<N>(text, now)?;
-    Ok(export_from_loaded(loaded))
+    Ok(registry_from_loaded(loaded))
 }
 
 /// [`from_str`], resolving names the document does not define through `seed`
-/// (externally-known name -> head commit associations). See
+/// (externally-known name -> head graph associations). See
 /// [`gantz_format::from_str_seeded`].
 pub fn from_str_seeded<N>(
     text: &str,
     now: Timestamp,
-    seed: &std::collections::BTreeMap<String, CommitAddr>,
-) -> Result<Export<Graph<N>>, FormatError>
+    seed: &std::collections::BTreeMap<String, GraphAddr>,
+) -> Result<Registry<Graph<N>>, FormatError>
 where
     N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
 {
     let loaded = gantz_format::from_str_seeded::<N>(text, now, seed)?;
-    Ok(export_from_loaded(loaded))
+    Ok(registry_from_loaded(loaded))
 }
 
-/// Apply the GUI-layer extra forms (`layout`, `demo`) to a loaded registry.
-fn export_from_loaded<N: 'static>(loaded: Loaded<N>) -> Export<Graph<N>> {
-    let mut views: HashMap<CommitAddr, crate::SceneView> = HashMap::new();
-    let mut demos: HashMap<String, String> = HashMap::new();
-    for form in &loaded.extra {
+/// Apply the GUI-layer extra forms (`descriptions`, `layout`, `demo`) to a
+/// loaded registry's sections.
+fn registry_from_loaded<N: 'static>(mut loaded: Loaded<N>) -> Registry<Graph<N>> {
+    let extra = std::mem::take(&mut loaded.extra);
+    for form in &extra {
         match form.head.as_str() {
-            "layout" => apply_layout(form, &loaded, &mut views),
-            "demo" => apply_demo(form, &loaded, &mut demos),
+            "descriptions" => apply_descriptions(form, &mut loaded),
+            "layout" => apply_layout(form, &mut loaded),
+            "demo" => apply_demo(form, &mut loaded),
             other => log::warn!("ignoring unrecognised `.gantz` form `{other}`"),
         }
     }
-    Export {
-        registry: loaded.registry,
-        views,
-        demos,
-    }
+    loaded.registry
 }
 
-/// Serialize an [`Export`] to a `.gantz` document.
-pub fn to_string<N>(export: &Export<Graph<N>>) -> Result<String, FormatError>
+/// Serialize a registry to a `.gantz` document.
+pub fn to_string<N>(registry: &Registry<Graph<N>>) -> Result<String, FormatError>
 where
     N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
 {
-    let dumped = gantz_format::to_string::<N>(&export.registry)?;
+    let dumped = gantz_format::to_string::<N>(registry, CLAIMED)?;
     // Each top-level block is a section; they are joined with a blank line.
     let mut sections = vec![dumped.text.trim_end().to_string()];
 
-    // `(layout ...)` per graph that has a top-level view, keyed by graph id.
-    let mut views: Vec<_> = export.views.iter().collect();
-    views.sort_by_key(|(ca, _)| **ca);
-    for (commit_ca, view) in views {
-        let Some(commit) = export.registry.commits().get(commit_ca) else {
+    // `(descriptions ...)`, in name order.
+    sections.extend(descriptions_text(registry));
+
+    // `(layout ...)` per commit that has a stored view, keyed by graph id.
+    for (commit_ca, view) in crate::section::views(registry) {
+        let Some(commit) = registry.commits().get(&commit_ca) else {
             continue;
         };
         if let Some(labels) = dumped.graphs.get(&commit.graph) {
-            sections.push(layout_text(labels, view, false));
+            sections.push(layout_text(labels, &view, false));
         }
     }
 
     // `(demo <name> ...)` per named graph that has a demo, in name order.
-    let mut demos: Vec<_> = export.demos.iter().collect();
-    demos.sort_by(|a, b| a.0.cmp(b.0));
-    for (name, demo) in demos {
-        sections.push(format!("(demo {} {})", name, sexpr::quote(demo)));
+    for (name, demo) in crate::section::demos(registry) {
+        sections.push(format!("(demo {} {})", name, sexpr::quote(&demo)));
     }
 
     let mut result = sections.join("\n\n");
@@ -96,36 +100,37 @@ where
     Ok(result)
 }
 
-/// Serialize an [`Export`] in the inline-name format (see
+/// Serialize a registry in the inline-name format (see
 /// [`gantz_format::to_string_named`]): graphs named inline, no commits/names
 /// tables, references by name. The `(layout ...)` and `(demo ...)` forms are
 /// emitted in graph-name order so the output is stable across address changes -
 /// suited to a hand-editable, git-friendly base file.
-pub fn to_string_named<N>(export: &Export<Graph<N>>) -> Result<String, FormatError>
+pub fn to_string_named<N>(registry: &Registry<Graph<N>>) -> Result<String, FormatError>
 where
     N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
 {
-    let dumped = gantz_format::to_string_named::<N>(&export.registry)?;
+    let dumped = gantz_format::to_string_named::<N>(registry, CLAIMED)?;
     let mut sections = vec![dumped.text.trim_end().to_string()];
 
+    // `(descriptions ...)`, in name order.
+    sections.extend(descriptions_text(registry));
+
     // `(layout ...)` per named graph that has a view, in name order.
-    for (_name, commit_ca) in export.registry.names() {
+    for (_name, commit_ca) in registry.heads() {
         let (Some(view), Some(commit)) = (
-            export.views.get(commit_ca),
-            export.registry.commits().get(commit_ca),
+            crate::section::view(registry, &commit_ca),
+            registry.commits().get(&commit_ca),
         ) else {
             continue;
         };
         if let Some(labels) = dumped.graphs.get(&commit.graph) {
-            sections.push(layout_text(labels, view, true));
+            sections.push(layout_text(labels, &view, true));
         }
     }
 
     // `(demo <name> ...)` per named graph that has a demo, in name order.
-    for (name, _commit_ca) in export.registry.names() {
-        if let Some(demo) = export.demos.get(name) {
-            sections.push(format!("(demo {} {})", name, sexpr::quote(demo)));
-        }
+    for (name, demo) in crate::section::demos(registry) {
+        sections.push(format!("(demo {} {})", name, sexpr::quote(&demo)));
     }
 
     let mut result = sections.join("\n\n");
@@ -133,13 +138,49 @@ where
     Ok(result)
 }
 
-// -- layout ------------------------------------------------------------------
+// -- descriptions -------------------------------------------------------------
 
-fn apply_layout<N>(
-    form: &Form,
-    loaded: &Loaded<N>,
-    views: &mut HashMap<CommitAddr, crate::SceneView>,
-) {
+fn apply_descriptions<N: 'static>(form: &Form, loaded: &mut Loaded<N>) {
+    let src = &form.raw;
+    let Ok(forms) = sexpr::read(src) else { return };
+    let Some(args) = forms.first().and_then(sexpr::list_args) else {
+        return;
+    };
+    // args = [descriptions, (<name> "<text>")...]
+    for entry in &args[1..] {
+        let Some(eargs) = sexpr::list_args(entry) else {
+            continue;
+        };
+        let (Some(name), Some(text)) = (
+            eargs.first().and_then(sexpr::as_symbol),
+            eargs.get(1).and_then(sexpr::as_string),
+        ) else {
+            continue;
+        };
+        // Only retain descriptions for names this document actually defines.
+        if loaded.names.contains_key(&name) {
+            let name: Name = name.parse().expect("infallible");
+            crate::section::set_description(&mut loaded.registry, name, text);
+        }
+    }
+}
+
+/// The `(descriptions ...)` form for the registry's description section, in
+/// name order. `None` when there are no descriptions.
+fn descriptions_text<N>(registry: &Registry<Graph<N>>) -> Option<String> {
+    let mut entries = crate::section::descriptions(registry).peekable();
+    entries.peek()?;
+    let mut s = "(descriptions".to_string();
+    for (name, text) in entries {
+        s.push_str(&format!("\n  ({} {})", name, sexpr::quote(&text)));
+    }
+    s.push(')');
+    Some(s)
+}
+
+// -- layout --------------------------------------------------------------------
+
+fn apply_layout<N: 'static>(form: &Form, loaded: &mut Loaded<N>) {
     let src = &form.raw;
     let Ok(forms) = sexpr::read(src) else { return };
     let Some(args) = forms.first().and_then(sexpr::list_args) else {
@@ -202,7 +243,7 @@ fn apply_layout<N>(
     }
 
     let view = crate::SceneView { camera, layout };
-    views.insert(head, view);
+    crate::section::set_view(&mut loaded.registry, head, &view);
 }
 
 /// `bare_id` writes the graph id as a bare symbol (the inline-name format, where
@@ -247,7 +288,7 @@ fn layout_text(labels: &GraphLabels, view: &crate::SceneView, bare_id: bool) -> 
 
 // -- demos -------------------------------------------------------------------
 
-fn apply_demo<N>(form: &Form, loaded: &Loaded<N>, demos: &mut HashMap<String, String>) {
+fn apply_demo<N: 'static>(form: &Form, loaded: &mut Loaded<N>) {
     let src = &form.raw;
     let Ok(forms) = sexpr::read(src) else { return };
     let Some(args) = forms.first().and_then(sexpr::list_args) else {
@@ -262,7 +303,8 @@ fn apply_demo<N>(form: &Form, loaded: &Loaded<N>, demos: &mut HashMap<String, St
     };
     // Only retain demos for names this document's registry actually defines.
     if loaded.names.contains_key(&name) {
-        demos.insert(name, demo);
+        let name: Name = name.parse().expect("infallible");
+        crate::section::set_demo(&mut loaded.registry, name, demo);
     }
 }
 
@@ -273,4 +315,112 @@ fn addr_of(e: &sexpr::ExprKind) -> Option<Addr> {
     sexpr::as_string(e)
         .map(Addr::Concrete)
         .or_else(|| sexpr::as_symbol(e).map(Addr::Label))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_node::{TestGraph, TestNode, expr, named_ref};
+    use gantz_ca::CommitAddr;
+    use std::time::Duration;
+
+    fn name(s: &str) -> Name {
+        s.parse().unwrap()
+    }
+
+    /// A registry with a `leaf` expr graph, a `root` graph referencing it,
+    /// and a description, demo and view attached to `root`.
+    fn test_registry() -> (Registry<TestGraph>, CommitAddr) {
+        let mut reg = Registry::default();
+
+        let mut leaf_g = TestGraph::default();
+        leaf_g.add_node(expr("(+ 1 1)"));
+        let leaf_ga = gantz_ca::graph_addr(&leaf_g);
+        reg.commit_graph_to_name(Duration::from_secs(1), leaf_ga, || leaf_g, &name("leaf"));
+
+        let mut root_g = TestGraph::default();
+        root_g.add_node(named_ref("leaf", leaf_ga));
+        let root_ga = gantz_ca::graph_addr(&root_g);
+        let root_ca =
+            reg.commit_graph_to_name(Duration::from_secs(2), root_ga, || root_g, &name("root"));
+
+        crate::section::set_description(&mut reg, name("root"), "the root".to_string());
+        crate::section::set_demo(&mut reg, name("root"), "demo-root".to_string());
+        let view = crate::SceneView {
+            camera: crate::Camera {
+                center: egui::pos2(3.0, 4.0),
+                zoom: 2.0,
+            },
+            layout: [(egui_graph::NodeId(0), egui::pos2(10.0, 20.0))]
+                .into_iter()
+                .collect(),
+        };
+        crate::section::set_view(&mut reg, root_ca, &view);
+
+        (reg, root_ca)
+    }
+
+    fn assert_sections_survive(parsed: &Registry<TestGraph>) {
+        assert!(parsed.head(&name("leaf")).is_some());
+        let root_ca = parsed.head(&name("root")).expect("root head survives");
+        assert_eq!(
+            crate::section::description(parsed, &name("root")).as_deref(),
+            Some("the root"),
+        );
+        assert_eq!(
+            crate::section::demo(parsed, &name("root")).as_deref(),
+            Some("demo-root"),
+        );
+        let view = crate::section::view(parsed, &root_ca).expect("view survives");
+        assert_eq!(
+            view.layout.get(&egui_graph::NodeId(0)).copied(),
+            Some(egui::pos2(10.0, 20.0)),
+        );
+        assert_eq!(view.camera.center, egui::pos2(3.0, 4.0));
+        assert_eq!(view.camera.zoom, 2.0);
+    }
+
+    /// Descriptions, demos and views survive an address-based text
+    /// round-trip via their friendly forms.
+    #[test]
+    fn sections_round_trip_through_text() {
+        let (reg, root_ca) = test_registry();
+        let text = to_string(&reg).unwrap();
+        // Claimed sections must not also appear as generic forms.
+        assert!(!text.contains("(section"));
+        assert!(text.contains("(descriptions"));
+        assert!(text.contains("(layout"));
+        assert!(text.contains("(demo root"));
+        let parsed: Registry<TestGraph> =
+            from_str::<Box<dyn TestNode>>(&text, Duration::from_secs(9)).unwrap();
+        // The commits table preserves the head commit exactly.
+        assert_eq!(parsed.head(&name("root")), Some(root_ca));
+        assert_sections_survive(&parsed);
+    }
+
+    /// The same survives the inline-name format, where commits are
+    /// synthesized on load.
+    #[test]
+    fn sections_round_trip_through_named_text() {
+        let (reg, _root_ca) = test_registry();
+        let text = to_string_named(&reg).unwrap();
+        assert!(!text.contains("(section"));
+        let parsed: Registry<TestGraph> =
+            from_str::<Box<dyn TestNode>>(&text, Duration::from_secs(9)).unwrap();
+        assert_sections_survive(&parsed);
+    }
+
+    /// A registry with no GUI sections emits no friendly forms.
+    #[test]
+    fn empty_sections_emit_no_forms() {
+        let mut reg = Registry::<TestGraph>::default();
+        let mut g = TestGraph::default();
+        g.add_node(expr("(+ 1 1)"));
+        let ga = gantz_ca::graph_addr(&g);
+        reg.commit_graph_to_name(Duration::from_secs(1), ga, || g, &name("only"));
+        let text = to_string(&reg).unwrap();
+        assert!(!text.contains("(descriptions"));
+        assert!(!text.contains("(layout"));
+        assert!(!text.contains("(demo"));
+    }
 }

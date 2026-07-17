@@ -99,7 +99,7 @@ impl<'a> HistoryView<'a> {
                 // Get the focused head's commit address and walk parent chain.
                 let focused_ca = self.focused_head.and_then(|idx| {
                     self.heads.get(idx).and_then(|head| match head {
-                        gantz_ca::Head::Branch(name) => self.registry.names().get(name).copied(),
+                        gantz_ca::Head::Branch(name) => self.registry.name_head(name),
                         gantz_ca::Head::Commit(ca) => Some(*ca),
                     })
                 });

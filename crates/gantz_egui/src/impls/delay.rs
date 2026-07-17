@@ -1,8 +1,8 @@
 use crate::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind};
 
 impl NodeUi for gantz_core::node::Delay {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "delay"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "delay".into()
     }
 
     fn description(&self) -> Option<&'static str> {

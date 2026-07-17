@@ -1,13 +1,14 @@
-//! Export/import representation for sharing node sets between gantz instances.
+//! Export/import helpers for sharing node sets between gantz instances.
 //!
-//! The [`Export`] type bundles a [`gantz_ca::Registry`] subset with optional
-//! [`crate::SceneView`] layout data. Serialization uses the `.gantz` S-expression text
-//! format (see [`crate::format`]) under the `.gantz` file extension.
+//! An export is a [`gantz_ca::Registry`] subset: all GUI metadata (views,
+//! demos, descriptions) rides the registry's sections, so no side-band bundle
+//! type is needed. Serialization uses the `.gantz` S-expression text format
+//! (see [`crate::format`]) under the `.gantz` file extension.
 
-use gantz_ca::{CaHash, CommitAddr, registry::MergeResult};
+use gantz_ca::{CaHash, GraphAddr, Name};
 use gantz_core::node::{self, GetNode, graph::Graph};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// File extension for gantz export files (without the leading dot).
 pub const FILE_EXTENSION: &str = "gantz";
@@ -38,56 +39,13 @@ impl std::error::Error for ParseExportError {
     }
 }
 
-/// A serializable bundle of a registry subset and its associated view state.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Export<G> {
-    pub registry: gantz_ca::Registry<G>,
-    #[serde(default, serialize_with = "gantz_ca::serde_sorted::serialize_map")]
-    pub views: HashMap<CommitAddr, crate::SceneView>,
-    /// Maps a graph *name* to its associated demo graph name (a `demo-*` name).
-    ///
-    /// Keyed by name (rather than commit) so the association survives an edit:
-    /// editing a graph mints a new commit but keeps the name.
-    #[serde(default)]
-    pub demos: HashMap<String, String>,
-}
-
-/// Produce an [`Export`] by filtering views to commits, and demos to names,
-/// present in the registry.
-pub fn export_with<G>(
-    registry: gantz_ca::Registry<G>,
-    all_views: &HashMap<CommitAddr, crate::SceneView>,
-    all_demos: &HashMap<String, String>,
-) -> Export<G>
-where
-    G: Clone,
-{
-    let commits = registry.commits();
-    let views = all_views
-        .iter()
-        .filter(|(ca, _)| commits.contains_key(ca))
-        .map(|(&ca, v)| (ca, v.clone()))
-        .collect();
-    let names = registry.names();
-    let demos = all_demos
-        .iter()
-        .filter(|(name, _)| names.contains_key(name.as_str()))
-        .map(|(name, demo)| (name.clone(), demo.clone()))
-        .collect();
-    Export {
-        registry,
-        views,
-        demos,
-    }
-}
-
-/// Parse the raw bytes of a `.gantz` file into an [`Export`].
+/// Parse the raw bytes of a `.gantz` file into a registry.
 ///
 /// The file is the `.gantz` S-expression text format (see [`crate::format`]).
 /// Graphs the document does not commit explicitly (hand-authored graphs with no
 /// `(commits ...)` entry) are stamped with the current time. Use
 /// [`parse_export_at`] to stamp them with a fixed timestamp instead.
-pub fn parse_export<N>(bytes: &[u8]) -> Result<Export<Graph<N>>, ParseExportError>
+pub fn parse_export<N>(bytes: &[u8]) -> Result<gantz_ca::Registry<Graph<N>>, ParseExportError>
 where
     N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
 {
@@ -98,15 +56,13 @@ where
 /// given timestamp rather than the current time.
 ///
 /// A fixed timestamp makes the resulting commit addresses reproducible across
-/// loads. This matters for content that is re-parsed and whose graphs reference
-/// each other by content address - e.g. the baked-in base, which is parsed both
-/// at startup and on demo reset: a wall-clock timestamp would give each parse
-/// distinct commit addresses, so a reset demo's `ref`s would point at commits
-/// absent from the already-loaded registry.
+/// loads. This matters for content that is re-parsed and whose commits should
+/// line up with an already-loaded registry - e.g. the baked-in base, which is
+/// parsed both at startup and on demo reset.
 pub fn parse_export_at<N>(
     bytes: &[u8],
     now: gantz_ca::Timestamp,
-) -> Result<Export<Graph<N>>, ParseExportError>
+) -> Result<gantz_ca::Registry<Graph<N>>, ParseExportError>
 where
     N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
 {
@@ -115,14 +71,14 @@ where
 }
 
 /// Like [`parse_export_at`], resolving names the document does not define
-/// through `seed` (externally-known name -> head commit associations). Lets a
+/// through `seed` (externally-known name -> head graph associations). Lets a
 /// base source reference graphs another source defines - see
 /// [`gantz_format::from_str_seeded`].
 pub fn parse_export_seeded_at<N>(
     bytes: &[u8],
     now: gantz_ca::Timestamp,
-    seed: &std::collections::BTreeMap<String, gantz_ca::CommitAddr>,
-) -> Result<Export<Graph<N>>, ParseExportError>
+    seed: &std::collections::BTreeMap<String, GraphAddr>,
+) -> Result<gantz_ca::Registry<Graph<N>>, ParseExportError>
 where
     N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
 {
@@ -137,35 +93,35 @@ fn now() -> gantz_ca::Timestamp {
         .unwrap_or_default()
 }
 
-/// The unique root name of an export, if it has exactly one.
+/// The unique root name of an exported registry, if it has exactly one.
 ///
 /// `get_node` resolves node lookups outside the export (e.g. builtins).
-pub fn unique_root_name<N>(get_node: GetNode, export: &Export<Graph<N>>) -> Option<String>
+pub fn unique_root_name<N>(
+    get_node: GetNode,
+    registry: &gantz_ca::Registry<Graph<N>>,
+) -> Option<Name>
 where
     N: gantz_core::Node,
 {
-    let mut roots = gantz_core::reg::root_names(get_node, &export.registry);
+    let mut roots = gantz_core::reg::root_names(get_node, registry);
     (roots.len() == 1).then(|| roots.pop().unwrap())
 }
 
-/// Build and serialize an [`Export`] for the given heads as `.gantz` text.
+/// Serialize an export for the given heads as `.gantz` text.
 ///
 /// Covers both export-head and export-all-named: the export contains the heads'
-/// transitively required commits along with their views and demos. File IO
-/// stays with the caller.
+/// transitively required content along with their views, demos and
+/// descriptions. File IO stays with the caller.
 pub fn export_heads_sexpr<N>(
     get_node: GetNode,
     registry: &gantz_ca::Registry<Graph<N>>,
-    all_views: &HashMap<CommitAddr, crate::SceneView>,
-    all_demos: &HashMap<String, String>,
     heads: impl IntoIterator<Item = impl std::borrow::Borrow<gantz_ca::Head>>,
 ) -> Result<String, crate::format::FormatError>
 where
     N: Serialize + DeserializeOwned + gantz_core::Node + Clone + gantz_format::NodeSugar,
 {
     let export_registry = gantz_core::reg::export_heads(get_node, registry, heads);
-    let export = export_with(export_registry, all_views, all_demos);
-    crate::format::to_string(&export)
+    crate::format::to_string(&export_registry)
 }
 
 /// As [`export_heads_sexpr`], but serializes in the inline-name format (see
@@ -175,16 +131,13 @@ where
 pub fn export_heads_sexpr_named<N>(
     get_node: GetNode,
     registry: &gantz_ca::Registry<Graph<N>>,
-    all_views: &HashMap<CommitAddr, crate::SceneView>,
-    all_demos: &HashMap<String, String>,
     heads: impl IntoIterator<Item = impl std::borrow::Borrow<gantz_ca::Head>>,
 ) -> Result<String, crate::format::FormatError>
 where
     N: Serialize + DeserializeOwned + gantz_core::Node + Clone + gantz_format::NodeSugar,
 {
     let export_registry = gantz_core::reg::export_heads(get_node, registry, heads);
-    let export = export_with(export_registry, all_views, all_demos);
-    crate::format::to_string_named(&export)
+    crate::format::to_string_named(&export_registry)
 }
 
 /// As [`export_heads_sexpr_named`], but exports EXACTLY the given names with
@@ -196,57 +149,40 @@ where
 /// resolves them through the seeded parse (see [`parse_export_seeded_at`]).
 pub fn export_names_sexpr_named<N>(
     registry: &gantz_ca::Registry<Graph<N>>,
-    all_views: &HashMap<CommitAddr, crate::SceneView>,
-    all_demos: &HashMap<String, String>,
     names: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<String, crate::format::FormatError>
 where
     N: Serialize + DeserializeOwned + gantz_core::Node + Clone + gantz_format::NodeSugar,
 {
-    let requested: std::collections::HashSet<String> = names
+    let requested: HashSet<Name> = names
         .into_iter()
-        .map(|name| name.as_ref().to_string())
+        .map(|name| name.as_ref().parse().expect("infallible"))
         .collect();
-    let required: std::collections::HashSet<gantz_ca::CommitAddr> = requested
-        .iter()
-        .filter_map(|name| registry.names().get(name).copied())
-        .collect();
-    let mut export_registry = registry.export(&required);
-    // `export` keeps every name whose commit survives - identical graphs
+    let mut live = gantz_ca::LiveSet::default();
+    for name in &requested {
+        let Some(head_ca) = registry.head(name) else {
+            continue;
+        };
+        let Some(commit) = registry.commits().get(&head_ca) else {
+            continue;
+        };
+        live.commits.insert(head_ca);
+        live.graphs.insert(commit.graph);
+    }
+    let mut export_registry = gantz_ca::export(registry, &live);
+    // The export keeps every head whose commit survives - identical graphs
     // across sources share commits, so a foreign name could ride along.
-    // Restrict to exactly the requested names (their descriptions follow).
-    let extra: Vec<String> = export_registry
-        .names()
-        .keys()
-        .filter(|name| !requested.contains(*name))
-        .cloned()
+    // Restrict to exactly the requested names (their `WithName` metadata,
+    // descriptions included, drops with them).
+    let extra: Vec<Name> = export_registry
+        .heads()
+        .filter(|(name, _)| !requested.contains(name))
+        .map(|(name, _)| name.clone())
         .collect();
     for name in extra {
-        export_registry.remove_name(&name);
-        export_registry.set_description(name, String::new());
+        export_registry.remove_head(&name);
     }
-    let export = export_with(export_registry, all_views, all_demos);
-    crate::format::to_string_named(&export)
-}
-
-/// Merge an [`Export`] into an existing registry, views and demos maps.
-///
-/// Incoming views and demos for new commits are inserted; existing entries for
-/// known commits are kept.
-pub fn merge_with<G>(
-    registry: &mut gantz_ca::Registry<G>,
-    views: &mut HashMap<CommitAddr, crate::SceneView>,
-    demos: &mut HashMap<String, String>,
-    export: Export<G>,
-) -> MergeResult {
-    let result = registry.merge(export.registry);
-    for (ca, v) in export.views {
-        views.entry(ca).or_insert(v);
-    }
-    for (name, d) in export.demos {
-        demos.entry(name).or_insert(d);
-    }
-    result
+    crate::format::to_string_named(&export_registry)
 }
 
 /// Derive a default export filename from a [`gantz_ca::Head`].
@@ -320,8 +256,9 @@ impl std::error::Error for ParseCopiedError {
 /// A clipboard payload for copied graph nodes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Copied<N> {
-    /// Registry dependencies referenced by copied nodes (e.g. Ref nodes).
-    pub export: Export<Graph<N>>,
+    /// Registry dependencies referenced by copied nodes (e.g. Ref nodes),
+    /// along with the heads (and their metadata) naming them.
+    pub registry: gantz_ca::Registry<Graph<N>>,
     /// The subgraph of selected nodes and their internal edges.
     pub graph: Graph<N>,
     /// Positions of nodes in the subgraph.
@@ -329,9 +266,13 @@ pub struct Copied<N> {
 }
 
 /// Build a [`Copied`] payload from the selected nodes in a graph.
+///
+/// The payload registry carries the transitive closure of the graphs the
+/// selected nodes reference, plus the heads (and `WithName`/`WithCommit`
+/// metadata) whose tips point at those graphs, so pasting into another
+/// registry restores names and views.
 pub fn copy<N>(
     registry: &gantz_ca::Registry<Graph<N>>,
-    all_views: &HashMap<CommitAddr, crate::SceneView>,
     graph: &Graph<N>,
     selected: &HashSet<node::graph::NodeIx>,
     layout: &egui_graph::Layout,
@@ -353,35 +294,55 @@ where
         }
     }
 
-    // Collect registry deps transitively: the commits the selected nodes
-    // reference, and the commits *those* graphs reference in turn (a nested
+    // Collect registry deps transitively: the graphs the selected nodes
+    // reference, and the graphs *those* graphs reference in turn (a nested
     // graph that itself contains nested graphs), so the whole subtree travels
-    // with the clipboard.
-    let mut required_commits = HashSet::new();
-    let mut stack: Vec<CommitAddr> = subgraph
+    // with the clipboard. Blob references ride along likewise.
+    let mut live = gantz_ca::LiveSet::default();
+    let mut stack: Vec<GraphAddr> = subgraph
         .node_weights()
         .flat_map(|n| n.required_addrs())
-        .map(CommitAddr::from)
-        .filter(|ca| registry.commits().contains_key(ca))
+        .map(GraphAddr::from)
+        .filter(|ga| registry.graph(ga).is_some())
         .collect();
-    while let Some(commit_ca) = stack.pop() {
-        if !required_commits.insert(commit_ca) {
+    for (section, addr) in subgraph.node_weights().flat_map(|n| n.required_blobs()) {
+        live.blobs.entry(section).or_default().insert(addr);
+    }
+    while let Some(graph_ca) = stack.pop() {
+        if !live.graphs.insert(graph_ca) {
             continue;
         }
-        if let Some(nested) = registry.commit_graph_ref(&commit_ca) {
-            for ca in nested.node_weights().flat_map(|n| n.required_addrs()) {
-                let dep = CommitAddr::from(ca);
-                if registry.commits().contains_key(&dep) {
-                    stack.push(dep);
-                }
+        let Some(nested) = registry.graph(&graph_ca) else {
+            continue;
+        };
+        for ca in nested.node_weights().flat_map(|n| n.required_addrs()) {
+            let dep = GraphAddr::from(ca);
+            if registry.graph(&dep).is_some() {
+                stack.push(dep);
             }
         }
+        for (section, addr) in nested.node_weights().flat_map(|n| n.required_blobs()) {
+            live.blobs.entry(section).or_default().insert(addr);
+        }
     }
-    let export_registry = registry.export(&required_commits);
-    let export = export_with(export_registry, all_views, &HashMap::new());
+
+    // Include each collected graph's naming heads (tip commits), so
+    // paste-merge restores names and the text format's commits table still
+    // describes the named graphs.
+    live.commits.extend(
+        registry
+            .heads()
+            .filter(|(_, ca)| {
+                registry
+                    .commits()
+                    .get(ca)
+                    .is_some_and(|commit| live.graphs.contains(&commit.graph))
+            })
+            .map(|(_, ca)| ca),
+    );
 
     Copied {
-        export,
+        registry: gantz_ca::export(registry, &live),
         graph: subgraph,
         positions,
     }
@@ -394,8 +355,6 @@ where
 /// target graph.
 pub fn paste<N>(
     registry: &mut gantz_ca::Registry<Graph<N>>,
-    views: &mut HashMap<CommitAddr, crate::SceneView>,
-    demos: &mut HashMap<String, String>,
     target_graph: &mut Graph<N>,
     target_layout: &mut egui_graph::Layout,
     copied: &Copied<N>,
@@ -404,7 +363,7 @@ pub fn paste<N>(
 where
     N: Clone,
 {
-    merge_with(registry, views, demos, copied.export.clone());
+    registry.merge(copied.registry.clone());
     let new_indices = gantz_core::graph::add_subgraph(target_graph, &copied.graph);
 
     // Map positions from subgraph indices to target indices with offset.
@@ -421,42 +380,34 @@ where
 
 /// Serialize a [`Copied`] payload as a `.gantz` document.
 ///
-/// The copied subgraph rides as a graph named `clipboard` - its positions stored
-/// as that graph's layout view - alongside the registry dependencies, so the
-/// whole payload is one ordinary `.gantz` document. [`copied_from_str`] reverses
-/// this.
+/// The copied subgraph rides as a graph named `clipboard` - its positions
+/// stored as the clipboard commit's view section entry - alongside the
+/// registry dependencies, so the whole payload is one ordinary `.gantz`
+/// document. [`copied_from_str`] reverses this.
 pub fn copied_to_string<N>(copied: &Copied<N>) -> Result<String, crate::format::FormatError>
 where
     N: Serialize + DeserializeOwned + CaHash + Clone + gantz_format::NodeSugar + 'static,
 {
     // Add the subgraph to the dependency registry as a fresh root commit named
     // `CLIPBOARD_NAME`. A fixed timestamp keeps the payload deterministic.
-    let mut registry = copied.export.registry.clone();
+    let mut registry = copied.registry.clone();
     let g_addr = registry.add_graph(copied.graph.clone());
     let commit_ca = registry.add_commit(gantz_ca::Commit::new(
         std::time::Duration::ZERO,
         None,
         g_addr,
     ));
-    registry.insert_name(CLIPBOARD_NAME.to_string(), commit_ca);
+    registry.set_head(CLIPBOARD_NAME.parse().expect("infallible"), commit_ca);
 
-    // Carry the positions as the clipboard graph's layout view. The camera is
+    // Carry the positions as the clipboard commit's view. The camera is
     // irrelevant for a clipboard payload, so use the default.
-    let mut views = copied.export.views.clone();
-    views.insert(
-        commit_ca,
-        crate::SceneView {
-            camera: crate::Camera::default(),
-            layout: copied.positions.clone(),
-        },
-    );
-
-    let export = Export {
-        registry,
-        views,
-        demos: copied.export.demos.clone(),
+    let view = crate::SceneView {
+        camera: crate::Camera::default(),
+        layout: copied.positions.clone(),
     };
-    crate::format::to_string(&export)
+    crate::section::set_view(&mut registry, commit_ca, &view);
+
+    crate::format::to_string(&registry)
 }
 
 /// Parse a clipboard payload produced by [`copied_to_string`].
@@ -465,45 +416,49 @@ where
 /// dependencies.
 pub fn copied_from_str<N>(text: &str) -> Result<Copied<N>, ParseCopiedError>
 where
-    N: Serialize + DeserializeOwned + CaHash + Clone + gantz_format::NodeSugar + 'static,
+    N: Serialize
+        + DeserializeOwned
+        + CaHash
+        + Clone
+        + gantz_core::Node
+        + gantz_format::NodeSugar
+        + 'static,
 {
-    let mut export = crate::format::from_str::<N>(text, now()).map_err(ParseCopiedError::Format)?;
+    let registry = crate::format::from_str::<N>(text, now()).map_err(ParseCopiedError::Format)?;
 
-    let clip_ca = export
-        .registry
-        .names()
-        .get(CLIPBOARD_NAME)
-        .copied()
+    let clipboard: Name = CLIPBOARD_NAME.parse().expect("infallible");
+    let clip_ca = registry
+        .head(&clipboard)
         .ok_or(ParseCopiedError::NotClipboard)?;
-    let graph = export
-        .registry
+    let graph = registry
         .commit_graph_ref(&clip_ca)
         .cloned()
         .ok_or(ParseCopiedError::NotClipboard)?;
-    let positions = export
-        .views
-        .get(&clip_ca)
-        .map(|view| view.layout.clone())
+    let positions = crate::section::view(&registry, &clip_ca)
+        .map(|view| view.layout)
         .unwrap_or_default();
 
-    // Everything but the clipboard commit is a dependency. `export` filters
-    // names to the kept commits, so the `clipboard` name drops out with it.
-    let deps: HashSet<CommitAddr> = export
-        .registry
+    // Everything reachable outside the clipboard commit is a dependency. The
+    // export filters heads (and views) to the kept commits, so the
+    // `clipboard` name and its view entry drop out with it.
+    let dep_commits: Vec<gantz_ca::CommitAddr> = registry
         .commits()
         .keys()
         .copied()
         .filter(|&ca| ca != clip_ca)
         .collect();
-    let registry = export.registry.export(&deps);
-    export.views.remove(&clip_ca);
+    let get_node = |ca: &gantz_ca::ContentAddr| {
+        registry
+            .graph(&GraphAddr::from(*ca))
+            .map(|g| g as &dyn gantz_core::Node)
+    };
+    let live = gantz_ca::closure_from(&registry, dep_commits, |g| {
+        gantz_core::graph::out_refs(&get_node, g)
+    });
+    let deps = gantz_ca::export(&registry, &live);
 
     Ok(Copied {
-        export: Export {
-            registry,
-            views: export.views,
-            demos: export.demos,
-        },
+        registry: deps,
         graph,
         positions,
     })
@@ -512,117 +467,210 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gantz_ca::{Commit, ContentAddr};
-    use std::{collections::BTreeMap, time::Duration};
+    use gantz_ca::{Commit, CommitAddr, ContentAddr};
+    use std::collections::HashMap;
+    use std::time::Duration;
 
-    fn graph_addr(n: u8) -> gantz_ca::GraphAddr {
-        gantz_ca::GraphAddr::from(ContentAddr::from([n; 32]))
+    fn graph_addr(n: u8) -> GraphAddr {
+        GraphAddr::from(ContentAddr::from([n; 32]))
     }
 
     fn commit_addr_raw(n: u8) -> CommitAddr {
         CommitAddr::from(ContentAddr::from([n; 32]))
     }
 
-    fn test_export() -> Export<String> {
+    fn name(s: &str) -> Name {
+        s.parse().unwrap()
+    }
+
+    fn test_registry() -> gantz_ca::Registry<String> {
         let ga = graph_addr(1);
         let ca = commit_addr_raw(10);
         let commit = Commit::new(Duration::from_secs(1), None, ga);
-        let registry = gantz_ca::Registry::new(
+        gantz_ca::Registry::from_parts(
             HashMap::from([(ga, "graph_a".to_string())]),
             HashMap::from([(ca, commit)]),
-            BTreeMap::from([("alpha".to_string(), ca)]),
-        );
-        Export {
-            registry,
-            views: HashMap::new(),
-            demos: HashMap::new(),
-        }
+            std::collections::BTreeMap::from([(name("alpha"), ca)]),
+        )
     }
 
     #[test]
     fn export_merge_recovers_data() {
-        let export = test_export();
+        let export = test_registry();
         let mut target = gantz_ca::Registry::<String>::default();
-        let mut views = HashMap::new();
-        let mut demos = HashMap::new();
-        let result = merge_with(&mut target, &mut views, &mut demos, export);
-        assert_eq!(result.names_added, vec!["alpha".to_string()]);
-        assert!(result.names_replaced.is_empty());
+        let report = target.merge(export);
+        assert_eq!(report.heads_added, vec![name("alpha")]);
+        assert!(report.heads_replaced.is_empty());
         let ca = commit_addr_raw(10);
         assert!(target.commits().contains_key(&ca));
-        assert_eq!(target.names().get("alpha"), Some(&ca));
+        assert_eq!(target.head(&name("alpha")), Some(ca));
     }
 
     #[test]
-    fn export_with_filters_views() {
-        let ga = graph_addr(1);
+    fn merge_keeps_existing_views() {
+        let mut registry = test_registry();
         let ca = commit_addr_raw(10);
-        let cb = commit_addr_raw(20);
-        let commit = Commit::new(Duration::from_secs(1), None, ga);
-        let registry = gantz_ca::Registry::new(
-            HashMap::from([(ga, "g".to_string())]),
-            HashMap::from([(ca, commit)]),
-            BTreeMap::new(),
-        );
-        let mut all_views = HashMap::new();
-        all_views.insert(ca, crate::SceneView::default());
-        all_views.insert(cb, crate::SceneView::default()); // cb not in registry
-        let export = export_with(registry, &all_views, &HashMap::new());
-        assert!(export.views.contains_key(&ca));
-        assert!(!export.views.contains_key(&cb));
-    }
-
-    #[test]
-    fn export_with_filters_demos() {
-        let ga = graph_addr(1);
-        let ca = commit_addr_raw(10);
-        let commit = Commit::new(Duration::from_secs(1), None, ga);
-        let registry = gantz_ca::Registry::new(
-            HashMap::from([(ga, "g".to_string())]),
-            HashMap::from([(ca, commit)]),
-            BTreeMap::from([("alpha".to_string(), ca)]),
-        );
-        let all_demos = HashMap::from([
-            ("alpha".to_string(), "demo-alpha".to_string()),
-            // `beta` is not a name in the registry, so it is dropped.
-            ("beta".to_string(), "demo-beta".to_string()),
-        ]);
-        let export = export_with(registry, &HashMap::new(), &all_demos);
-        assert_eq!(
-            export.demos.get("alpha").map(String::as_str),
-            Some("demo-alpha")
-        );
-        assert!(!export.demos.contains_key("beta"));
-    }
-
-    #[test]
-    fn merge_with_keeps_existing_views() {
-        let ga = graph_addr(1);
-        let ca = commit_addr_raw(10);
-        let commit = Commit::new(Duration::from_secs(1), None, ga);
-        let mut registry = gantz_ca::Registry::new(
-            HashMap::from([(ga, "g".to_string())]),
-            HashMap::from([(ca, commit.clone())]),
-            BTreeMap::new(),
-        );
         let mut existing_view = crate::SceneView::default();
         existing_view
             .layout
             .insert(egui_graph::NodeId(0), Default::default());
-        let mut views = HashMap::from([(ca, existing_view)]);
-        let mut demos = HashMap::new();
-        let export = Export {
-            registry: gantz_ca::Registry::new(
-                HashMap::from([(ga, "g".to_string())]),
-                HashMap::from([(ca, commit)]),
-                BTreeMap::new(),
-            ),
-            views: HashMap::from([(ca, crate::SceneView::default())]),
-            demos: HashMap::new(),
+        crate::section::set_view(&mut registry, ca, &existing_view);
+
+        let mut incoming = test_registry();
+        crate::section::set_view(&mut incoming, ca, &crate::SceneView::default());
+        registry.merge(incoming);
+
+        // Existing view (with 1 layout entry) is preserved, not replaced.
+        let view = crate::section::view(&registry, &ca).unwrap();
+        assert_eq!(view.layout.len(), 1);
+    }
+
+    #[test]
+    fn merge_keeps_existing_descriptions_and_demos() {
+        let mut registry = test_registry();
+        crate::section::set_description(&mut registry, name("alpha"), "local".to_string());
+        crate::section::set_demo(&mut registry, name("alpha"), "demo-a".to_string());
+
+        let mut incoming = test_registry();
+        crate::section::set_description(&mut incoming, name("alpha"), "imported".to_string());
+        crate::section::set_demo(&mut incoming, name("alpha"), "demo-b".to_string());
+        crate::section::set_description(&mut incoming, name("beta"), "new".to_string());
+        registry.merge(incoming);
+
+        assert_eq!(
+            crate::section::description(&registry, &name("alpha")).as_deref(),
+            Some("local"),
+        );
+        assert_eq!(
+            crate::section::demo(&registry, &name("alpha")).as_deref(),
+            Some("demo-a"),
+        );
+        assert_eq!(
+            crate::section::description(&registry, &name("beta")).as_deref(),
+            Some("new"),
+        );
+    }
+
+    /// Copying a `NamedRef` carries the referenced graph, its naming head
+    /// and `WithName` metadata through the clipboard text round-trip, with
+    /// positions riding the clipboard commit's view section entry.
+    #[test]
+    fn clipboard_round_trip_carries_positions_and_deps() {
+        use crate::test_node::{TestGraph, TestNode, expr, named_ref};
+
+        let mut reg = gantz_ca::Registry::<TestGraph>::default();
+        let mut leaf_g = TestGraph::default();
+        leaf_g.add_node(expr("(+ 1 1)"));
+        let leaf_ga = gantz_ca::graph_addr(&leaf_g);
+        reg.commit_graph_to_name(Duration::from_secs(1), leaf_ga, || leaf_g, &name("leaf"));
+        crate::section::set_description(&mut reg, name("leaf"), "a leaf".to_string());
+
+        // The working graph: a ref to `leaf` plus a plain expr node.
+        let mut working = TestGraph::default();
+        let a = working.add_node(named_ref("leaf", leaf_ga));
+        let b = working.add_node(expr("(+ 2 2)"));
+        let mut layout = egui_graph::Layout::default();
+        layout.insert(egui_graph::NodeId(a.index() as u64), egui::pos2(1.0, 2.0));
+        layout.insert(egui_graph::NodeId(b.index() as u64), egui::pos2(3.0, 4.0));
+        let selected: HashSet<_> = working.node_indices().collect();
+
+        let copied = copy(&reg, &working, &selected, &layout);
+        assert!(copied.registry.graph(&leaf_ga).is_some());
+        assert!(copied.registry.head(&name("leaf")).is_some());
+
+        let text = copied_to_string(&copied).unwrap();
+        let back: Copied<Box<dyn TestNode>> = copied_from_str(&text).unwrap();
+
+        // The subgraph and its positions survive.
+        assert_eq!(back.graph.node_count(), 2);
+        for ix in [a, b] {
+            let id = egui_graph::NodeId(ix.index() as u64);
+            assert_eq!(back.positions.get(&id), copied.positions.get(&id));
+        }
+
+        // The deps registry restores the referenced graph, its name and
+        // metadata, and carries no clipboard head.
+        assert!(back.registry.graph(&leaf_ga).is_some());
+        assert!(back.registry.head(&name("leaf")).is_some());
+        assert_eq!(
+            crate::section::description(&back.registry, &name("leaf")).as_deref(),
+            Some("a leaf"),
+        );
+        assert!(
+            back.registry
+                .head(&CLIPBOARD_NAME.parse().unwrap())
+                .is_none()
+        );
+
+        // Pasting merges the deps so the ref resolves in the target.
+        let mut target_reg = gantz_ca::Registry::<TestGraph>::default();
+        let mut target_graph = TestGraph::default();
+        let mut target_layout = egui_graph::Layout::default();
+        let new = paste(
+            &mut target_reg,
+            &mut target_graph,
+            &mut target_layout,
+            &back,
+            egui::vec2(10.0, 10.0),
+        );
+        assert_eq!(new.len(), 2);
+        assert!(target_reg.graph(&leaf_ga).is_some());
+        assert!(target_reg.head(&name("leaf")).is_some());
+        assert_eq!(
+            target_layout.get(&egui_graph::NodeId(new[0].index() as u64)),
+            Some(&egui::pos2(11.0, 12.0)),
+        );
+    }
+
+    /// Exporting heads as text carries transitive deps and sections through
+    /// a parse + merge into a fresh registry.
+    #[test]
+    fn export_heads_text_round_trip() {
+        use crate::test_node::{TestGraph, TestNode, expr, named_ref};
+
+        let mut reg = gantz_ca::Registry::<TestGraph>::default();
+        let mut leaf_g = TestGraph::default();
+        leaf_g.add_node(expr("(+ 1 1)"));
+        let leaf_ga = gantz_ca::graph_addr(&leaf_g);
+        reg.commit_graph_to_name(Duration::from_secs(1), leaf_ga, || leaf_g, &name("leaf"));
+        let mut root_g = TestGraph::default();
+        root_g.add_node(named_ref("leaf", leaf_ga));
+        let root_ga = gantz_ca::graph_addr(&root_g);
+        let root_ca =
+            reg.commit_graph_to_name(Duration::from_secs(2), root_ga, || root_g, &name("root"));
+        crate::section::set_description(&mut reg, name("root"), "the root".to_string());
+        let mut view = crate::SceneView::default();
+        view.layout
+            .insert(egui_graph::NodeId(0), egui::pos2(5.0, 6.0));
+        crate::section::set_view(&mut reg, root_ca, &view);
+
+        let get_node = |ca: &ContentAddr| {
+            reg.graph(&GraphAddr::from(*ca))
+                .map(|g| g as &dyn gantz_core::Node)
         };
-        merge_with(&mut registry, &mut views, &mut demos, export);
-        // Existing view (with 1 layout entry) should be preserved, not replaced.
-        assert_eq!(views[&ca].layout.len(), 1);
+        let heads = [
+            gantz_ca::Head::Branch(name("root")),
+            gantz_ca::Head::Branch(name("leaf")),
+        ];
+        let text = export_heads_sexpr(&get_node, &reg, heads.iter()).unwrap();
+
+        let parsed =
+            parse_export_at::<Box<dyn TestNode>>(text.as_bytes(), Duration::from_secs(9)).unwrap();
+        let mut fresh = gantz_ca::Registry::<TestGraph>::default();
+        let report = fresh.merge(parsed);
+        assert_eq!(report.heads_added.len(), 2);
+        assert!(fresh.graph(&leaf_ga).is_some());
+        assert!(fresh.graph(&root_ga).is_some());
+        assert_eq!(fresh.head(&name("root")), Some(root_ca));
+        assert_eq!(
+            crate::section::description(&fresh, &name("root")).as_deref(),
+            Some("the root"),
+        );
+        let view = crate::section::view(&fresh, &root_ca).expect("view survives");
+        assert_eq!(
+            view.layout.get(&egui_graph::NodeId(0)).copied(),
+            Some(egui::pos2(5.0, 6.0)),
+        );
     }
 
     #[test]

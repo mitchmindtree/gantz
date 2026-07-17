@@ -74,8 +74,8 @@ impl gantz_core::Node for Comment {
 }
 
 impl NodeUi for Comment {
-    fn name(&self, _registry: &dyn crate::Registry) -> &str {
-        "comment"
+    fn name(&self, _registry: &dyn crate::Registry) -> std::borrow::Cow<'_, str> {
+        "comment".into()
     }
 
     fn description(&self) -> Option<&'static str> {

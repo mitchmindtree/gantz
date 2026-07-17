@@ -4,10 +4,11 @@ use crate::{
     BranchNode, ContextMenuResponse, InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse,
     OpenHead, ReplaceHead, SocketDoc, widget::node_inspector,
 };
-use gantz_ca::CaHash;
+use gantz_ca::{CaHash, Name};
 use gantz_core::node::{self, ExprCtx, ExprResult, MetaCtx, Node, RegCtx};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 /// The warning color used for outdated references.
 pub fn outdated_color() -> egui::Color32 {
@@ -30,7 +31,7 @@ pub struct NamedRef {
     /// The underlying reference by content address.
     ref_: gantz_core::node::Ref,
     /// The human-readable name associated with this reference.
-    name: String,
+    name: Name,
     /// Whether to automatically sync to the latest commit.
     ///
     /// Part of the content address: toggling it is a genuine edit, so the
@@ -48,16 +49,9 @@ pub trait NameRegistry {
     fn node_exists(&self, ca: &gantz_ca::ContentAddr) -> bool;
 }
 
-/// The separator reserved for nested-graph names (`parent:child`).
-///
-/// A `NamedRef` whose name contains this character is a *nested* graph: it is
-/// hidden from the root graph-select list and its `sync` toggle is forced on so
-/// edits to the child always propagate back to its parent.
-pub const NESTED_SEP: char = ':';
-
 impl NamedRef {
     /// Construct a `NamedRef` node (auto-sync disabled).
-    pub fn new(name: String, ref_: gantz_core::node::Ref) -> Self {
+    pub fn new(name: Name, ref_: gantz_core::node::Ref) -> Self {
         Self {
             ref_,
             name,
@@ -69,7 +63,7 @@ impl NamedRef {
     ///
     /// Used for nested graphs, whose parent must always follow the child's
     /// latest commit.
-    pub fn with_sync(name: String, ref_: gantz_core::node::Ref) -> Self {
+    pub fn with_sync(name: Name, ref_: gantz_core::node::Ref) -> Self {
         Self {
             ref_,
             name,
@@ -78,13 +72,17 @@ impl NamedRef {
     }
 
     /// The human-readable name associated with this reference.
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &Name {
         &self.name
     }
 
     /// Whether this reference names a nested graph (`parent:child`).
+    ///
+    /// A `NamedRef` naming a nested graph is hidden from the root
+    /// graph-select list and its `sync` toggle is forced on so edits to the
+    /// child always propagate back to its parent.
     pub fn is_nested(&self) -> bool {
-        self.name.contains(NESTED_SEP)
+        self.name.is_nested()
     }
 
     /// The underlying reference.
@@ -125,20 +123,21 @@ impl NamedRef {
     }
 
     /// Re-point this reference at a renamed target: change the stored name and
-    /// repoint at the renamed graph's commit. Used by the rename cascade so a
-    /// renamed parent keeps referencing its (also-renamed) children.
-    pub fn rename(&mut self, name: String, ca: gantz_ca::ContentAddr) {
+    /// repoint at the renamed graph's head graph address. Used by the rename
+    /// cascade so a renamed parent keeps referencing its (also-renamed)
+    /// children.
+    pub fn rename(&mut self, name: Name, ca: gantz_ca::ContentAddr) {
         self.name = name;
         self.ref_ = self.ref_.retarget(ca);
     }
 
-    /// Bring the reference up to date with the name's current commit.
+    /// Bring the reference up to date with the name's current head graph.
     ///
     /// When sync is enabled and `resolve(name)` differs from the current
     /// reference, the reference is repointed at the resolved address. Returns
     /// `true` if the reference changed. This is the single implementation shared
     /// by the inspector UI and the headless propagation pass.
-    pub fn resync(&mut self, resolve: impl Fn(&str) -> Option<gantz_ca::ContentAddr>) -> bool {
+    pub fn resync(&mut self, resolve: impl Fn(&Name) -> Option<gantz_ca::ContentAddr>) -> bool {
         if !self.sync {
             return false;
         }
@@ -215,12 +214,12 @@ impl Node for NamedRef {
 }
 
 impl NodeUi for NamedRef {
-    fn name(&self, _registry: &dyn crate::Registry) -> &str {
-        &self.name
+    fn name(&self, _registry: &dyn crate::Registry) -> Cow<'_, str> {
+        Cow::Owned(self.name.to_string())
     }
 
-    fn demo_graph<'a>(&self, registry: &'a dyn crate::Registry) -> Option<&'a str> {
-        registry.demo_graph(&self.name)
+    fn demo_graph(&self, registry: &dyn crate::Registry) -> Option<String> {
+        registry.demo_graph(&self.name.to_string())
     }
 
     fn nav_head(&self, _registry: &dyn crate::Registry) -> Option<gantz_ca::Head> {
@@ -248,29 +247,30 @@ impl NodeUi for NamedRef {
             changed = true;
         }
 
-        // Auto-sync if enabled and the name points at a newer commit. This is a
+        // Auto-sync if enabled and the name points at newer content. This is a
         // silent mutation (no widget touched) that still changes the node's CA.
-        if self.resync(|name| registry.name_ca(name)) {
+        if self.resync(|name| registry.name_ca(&name.to_string())) {
             changed = true;
         }
 
         // Recalculate after potential sync.
+        let name_str = self.name.to_string();
         let ref_ca = self.ref_.content_addr();
         let is_missing = !registry.node_exists(&ref_ca);
         let is_outdated = !is_missing
             && registry
-                .name_ca(&self.name)
+                .name_ca(&name_str)
                 .map(|ca| ca != ref_ca)
                 .unwrap_or(false);
 
         // Regular frame, error color if missing, warning color if outdated.
         let framed = uictx.framed(|ui, _sockets| {
             let name_text = if is_missing {
-                egui::RichText::new(&self.name).color(missing_color())
+                egui::RichText::new(&name_str).color(missing_color())
             } else if is_outdated {
-                egui::RichText::new(&self.name).color(outdated_color())
+                egui::RichText::new(&name_str).color(outdated_color())
             } else {
-                egui::RichText::new(&self.name)
+                egui::RichText::new(&name_str)
             };
             ui.add(egui::Label::new(name_text).selectable(false))
         });
@@ -410,9 +410,9 @@ impl NodeUi for NamedRef {
     }
 }
 
-/// The name's current commit CA when this reference is *outdated*: it exists,
-/// auto-sync is off, and the name now points at a different commit. `None`
-/// otherwise (missing, synced, or already up to date).
+/// The name's current head graph CA when this reference is *outdated*: it
+/// exists, auto-sync is off, and the name now points at different content.
+/// `None` otherwise (missing, synced, or already up to date).
 fn outdated_latest(
     named: &NamedRef,
     registry: &dyn crate::Registry,
@@ -424,7 +424,7 @@ fn outdated_latest(
     if !registry.node_exists(&ref_ca) {
         return None;
     }
-    match registry.name_ca(&named.name) {
+    match registry.name_ca(&named.name.to_string()) {
         Some(latest) if latest != ref_ca => Some(latest),
         _ => None,
     }

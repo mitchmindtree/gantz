@@ -54,26 +54,25 @@ impl MergePreview {
 /// Skips ours' own name and nested (`parent:child`) graphs. Candidates are
 /// ordered by name (the registry's name order).
 pub fn merge_candidates<N>(reg: &ca::Registry<Graph<N>>, ours: &ca::Head) -> Vec<MergeCandidate> {
-    let Some(&ours_tip) = reg.head_commit_ca(ours) else {
+    let Some(ours_tip) = reg.head_commit_ca(ours) else {
         return vec![];
     };
     let our_name = match ours {
-        ca::Head::Branch(name) => Some(name.as_str()),
+        ca::Head::Branch(name) => Some(name),
         ca::Head::Commit(_) => None,
     };
     let commits = reg.commits();
-    reg.names()
-        .iter()
-        .filter(|(name, _)| Some(name.as_str()) != our_name)
-        .filter(|(name, _)| !name.contains(crate::node::NESTED_SEP))
-        .filter_map(|(name, &theirs)| {
+    reg.heads()
+        .filter(|(name, _)| Some(*name) != our_name)
+        .filter(|(name, _)| !name.is_nested())
+        .filter_map(|(name, theirs)| {
             let (base, fast_forward) = match ca::analyze(commits, ours_tip, theirs) {
                 ca::MergeAnalysis::Diverged(base) => (base, false),
                 ca::MergeAnalysis::FastForward => (ours_tip, true),
                 ca::MergeAnalysis::AlreadyUpToDate | ca::MergeAnalysis::Unrelated => return None,
             };
             Some(MergeCandidate {
-                name: name.clone(),
+                name: name.to_string(),
                 theirs,
                 base,
                 fast_forward,
@@ -96,8 +95,8 @@ pub fn merge_preview<N>(
 where
     N: Clone + ca::CaHash + AsNamedRef,
 {
-    let ours_tip = *reg.head_commit_ca(ours)?;
-    let theirs_tip = *reg.names().get(source)?;
+    let ours_tip = reg.head_commit_ca(ours)?;
+    let theirs_tip = reg.head(&source.parse().expect("infallible"))?;
     match ca::merge_commits(reg, ours_tip, theirs_tip, resolutions).ok()? {
         ca::MergeResolution::Diverged {
             theirs_diff,

@@ -11,7 +11,7 @@ use super::head_name_edit::{head_name, head_name_edit};
 pub struct GraphConfig<'a> {
     head: &'a gantz_ca::Head,
     head_state: &'a mut OpenHeadState,
-    names: &'a gantz_ca::registry::Names,
+    names: &'a [(gantz_ca::Name, gantz_ca::CommitAddr)],
     is_base: bool,
     immutable: bool,
     demo_names: &'a [&'a str],
@@ -49,7 +49,7 @@ impl<'a> GraphConfig<'a> {
     pub fn new(
         head: &'a gantz_ca::Head,
         head_state: &'a mut OpenHeadState,
-        names: &'a gantz_ca::registry::Names,
+        names: &'a [(gantz_ca::Name, gantz_ca::CommitAddr)],
     ) -> Self {
         Self {
             head,
@@ -124,8 +124,10 @@ impl<'a> GraphConfig<'a> {
 
     pub fn show(self, ui: &mut egui::Ui) -> GraphConfigResponse {
         let is_named = matches!(self.head, gantz_ca::Head::Branch(_));
-        let is_demo =
-            matches!(&self.head, gantz_ca::Head::Branch(name) if name.starts_with("demo-"));
+        let is_demo = matches!(
+            &self.head,
+            gantz_ca::Head::Branch(name) if super::graph_select::is_demo(name)
+        );
 
         // Per-head temp state for the name editor.
         let edit_id = egui::Id::new("graph_config_name_edit").with(self.head);
@@ -385,7 +387,7 @@ fn merge_select(
                 return;
             }
             let ours_tip = match head {
-                gantz_ca::Head::Branch(name) => env.names().get(name).copied(),
+                gantz_ca::Head::Branch(name) => env.name_head(name),
                 gantz_ca::Head::Commit(ca) => Some(*ca),
             };
             for candidate in candidates {

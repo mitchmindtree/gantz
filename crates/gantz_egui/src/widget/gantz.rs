@@ -54,8 +54,7 @@ pub trait NodeTypeRegistry {
 /// The top-level gantz widget.
 pub struct Gantz<'a> {
     env: &'a dyn Registry,
-    base_names: &'a gantz_ca::registry::Names,
-    demos: Option<&'a HashMap<String, String>>,
+    base_names: &'a crate::reg::Names,
     log_source: Option<LogSource>,
     perf_vm: Option<&'a mut widget::PerfCapture>,
     perf_gui: Option<&'a mut widget::PerfCapture>,
@@ -569,7 +568,7 @@ where
     state: &'a mut GantzState,
     access: &'a mut Access,
     focused_head: usize,
-    base_names: &'a gantz_ca::registry::Names,
+    base_names: &'a crate::reg::Names,
     response: &'a mut GantzResponse,
 }
 
@@ -583,7 +582,7 @@ where
     state: &'a mut GantzState,
     access: &'a mut Access,
     focused_head: usize,
-    base_names: &'a gantz_ca::registry::Names,
+    base_names: &'a crate::reg::Names,
     gantz_response: &'a mut GantzResponse,
     /// Panes detached into windows. The tab context menu pushes to this when a
     /// pane is popped out.
@@ -761,7 +760,7 @@ impl GantzResponse {
     }
 
     /// The given graph name was removed.
-    pub fn graph_name_removed(&self) -> Option<String> {
+    pub fn graph_name_removed(&self) -> Option<gantz_ca::Name> {
         self.graph_select
             .as_ref()
             .and_then(|g| g.name_removed.clone())
@@ -783,11 +782,10 @@ impl GantzResponse {
 
 impl<'a> Gantz<'a> {
     /// Instantiate the full top-level gantz widget.
-    pub fn new(env: &'a dyn Registry, base_names: &'a gantz_ca::registry::Names) -> Self {
+    pub fn new(env: &'a dyn Registry, base_names: &'a crate::reg::Names) -> Self {
         Self {
             env,
             base_names,
-            demos: None,
             log_source: None,
             perf_vm: None,
             perf_gui: None,
@@ -807,12 +805,6 @@ impl<'a> Gantz<'a> {
     /// (the default) or leaves them to the host as native OS windows.
     pub fn pane_window_mode(mut self, mode: PaneWindowMode) -> Self {
         self.pane_window_mode = mode;
-        self
-    }
-
-    /// Provide demo graph associations for the config dropdown.
-    pub fn demos(mut self, demos: &'a HashMap<String, String>) -> Self {
-        self.demos = Some(demos);
         self
     }
 
@@ -1411,33 +1403,32 @@ where
                 let immutable = head_immutable(&head, gantz.base_immutable, base_names);
 
                 // Collect demo-* names for the dropdown.
-                let demo_names_vec: Vec<&str> = names
-                    .keys()
-                    .filter(|n| n.starts_with("demo-"))
-                    .map(|n| n.as_str())
+                let demo_names: Vec<String> = names
+                    .iter()
+                    .filter(|(n, _)| widget::graph_select::is_demo(n))
+                    .map(|(n, _)| n.to_string())
                     .collect();
+                let demo_names_vec: Vec<&str> = demo_names.iter().map(|s| s.as_str()).collect();
 
                 // Look up the current demo association for this head.
                 let current_demo = match &head {
-                    gantz_ca::Head::Branch(name) => {
-                        gantz.demos.and_then(|d| d.get(name)).map(|s| s.as_str())
-                    }
+                    gantz_ca::Head::Branch(name) => gantz.env.demo_graph(&name.to_string()),
                     _ => None,
                 };
 
                 // The graph's current description (named graphs only).
                 let current_description = match &head {
-                    gantz_ca::Head::Branch(name) => gantz.env.graph_description(name),
+                    gantz_ca::Head::Branch(name) => gantz.env.graph_description(&name.to_string()),
                     _ => None,
                 };
 
                 let res = pane_ui(ui, |ui| {
-                    let mut config = widget::GraphConfig::new(&head, head_state, names)
+                    let mut config = widget::GraphConfig::new(&head, head_state, &names)
                         .is_base(is_base)
                         .immutable(immutable)
                         .demo_names(&demo_names_vec)
-                        .current_demo(current_demo)
-                        .current_description(current_description)
+                        .current_demo(current_demo.as_deref())
+                        .current_description(current_description.as_deref())
                         .merge_env(gantz.env, merge_resolutions);
                     // The base source dropdown, when authoring context was
                     // supplied (see `Gantz::base_sources`).
@@ -1445,7 +1436,7 @@ where
                     {
                         let current = ctx
                             .name_sources
-                            .get(name.as_str())
+                            .get(&name.to_string())
                             .copied()
                             .unwrap_or(ctx.default_source);
                         config = config.base_sources(ctx.sources, Some(current));
@@ -1597,10 +1588,11 @@ where
 
                 // Skip node palette when immutable.
                 if !focused_immutable {
-                    let editing = match &fh {
-                        gantz_ca::Head::Branch(name) => Some(name.as_str()),
+                    let editing_name = match &fh {
+                        gantz_ca::Head::Branch(name) => Some(name.to_string()),
                         _ => None,
                     };
+                    let editing = editing_name.as_deref();
                     // The pointer position over the focused head's scene
                     // (graph coords) recorded this frame; new nodes are placed
                     // here. `Copy`, so no borrow is held across the call.
@@ -1641,14 +1633,7 @@ where
             paint_gantz_file_hover_overlay(ui);
 
             let heads = access.heads();
-            let res = graph_select(
-                gantz.env,
-                heads,
-                *focused_head,
-                *base_names,
-                gantz.demos,
-                ui,
-            );
+            let res = graph_select(gantz.env, heads, *focused_head, *base_names, ui);
 
             if res.inner.export_all {
                 gantz_response.responses.push(None, ExportAllNamed);
@@ -2000,7 +1985,7 @@ where
     /// Per-head node index remappings from this frame's deletions, applied to
     /// the top-level tree's node views after layout (see `migrate_node_view_paths`).
     reindexes: &'a mut Vec<(gantz_ca::Head, crate::ops::Reindex)>,
-    base_names: &'a gantz_ca::registry::Names,
+    base_names: &'a crate::reg::Names,
     base_immutable: bool,
     /// Extension-pane toggle entries for the scene's "Panes" context submenu
     /// (see [`ext_pane_entries`]).
@@ -2094,7 +2079,7 @@ where
             let name_res = head.as_ref().map(|h| {
                 ui.scope(|ui| {
                     ui.set_max_width(ui.available_width().min(150.0));
-                    widget::head_name_edit(h, &mut edit_state.edit_text, names, ui)
+                    widget::head_name_edit(h, &mut edit_state.edit_text, &names, ui)
                 })
                 .inner
             });
@@ -2147,7 +2132,7 @@ where
                 if let Some(GraphPane(head)) = tiles.get_pane(&tile_id) {
                     // Initialize edit text based on head type.
                     let initial_text = match head {
-                        gantz_ca::Head::Branch(name) => name.clone(),
+                        gantz_ca::Head::Branch(name) => name.to_string(),
                         gantz_ca::Head::Commit(_) => String::new(),
                     };
                     edit_state.editing_tile_id = Some(tile_id);
@@ -3144,14 +3129,12 @@ fn graph_select(
     env: &dyn Registry,
     heads: &[gantz_ca::Head],
     focused_head: usize,
-    base_names: &gantz_ca::registry::Names,
-    demos: Option<&HashMap<String, String>>,
+    base_names: &crate::reg::Names,
     ui: &mut egui::Ui,
 ) -> egui::InnerResponse<widget::graph_select::GraphSelectResponse> {
     pane_ui(ui, |ui| {
         widget::GraphSelect::new(env, heads, base_names)
             .focused_head(focused_head)
-            .demos(demos)
             .show(ui)
     })
 }
@@ -3263,12 +3246,11 @@ fn name_breadcrumb(
     let gantz_ca::Head::Branch(name) = head else {
         return responses;
     };
-    let sep = crate::node::NESTED_SEP;
-    if !name.contains(sep) {
+    if !name.is_nested() {
         return responses; // a root graph has no ancestor levels
     }
-    let segs: Vec<&str> = name.split(sep).collect();
-    let sep_str = sep.to_string();
+    let segs: Vec<&str> = name.segments().iter().map(|s| s.as_str()).collect();
+    let sep_str = gantz_ca::name::SEP.to_string();
     let space = ui.style().interaction.interact_radius * 3.0;
     // Sit to the right of the floating sidebar toggle, which occupies the very
     // bottom-left corner of the scene, so the levels stay on the bottom row.
@@ -3304,7 +3286,7 @@ fn name_breadcrumb(
                             let resp = ui.add(button(&label)).on_hover_text(hover);
                             if resp.clicked() && !is_current {
                                 responses.push(DynResponse::new(ReplaceHead(
-                                    gantz_ca::Head::Branch(prefix),
+                                    gantz_ca::Head::Branch(prefix.parse().expect("infallible")),
                                 )));
                             }
                         });
@@ -3397,10 +3379,11 @@ fn trace_view(
 fn head_immutable(
     head: &gantz_ca::Head,
     base_immutable: bool,
-    base_names: &gantz_ca::registry::Names,
+    base_names: &crate::reg::Names,
 ) -> bool {
     let is_base = matches!(head, gantz_ca::Head::Branch(name) if base_names.contains_key(name));
-    let is_demo = matches!(head, gantz_ca::Head::Branch(name) if name.starts_with("demo-"));
+    let is_demo =
+        matches!(head, gantz_ca::Head::Branch(name) if widget::graph_select::is_demo(name));
     base_immutable && is_base && !is_demo
 }
 
@@ -3588,7 +3571,7 @@ mod tests {
 
     fn node_view(head: &str, path: &[node::Id]) -> Pane {
         Pane::NodeView(NodeViewPane {
-            head: gantz_ca::Head::Branch(head.to_string()),
+            head: gantz_ca::Head::Branch(head.parse().unwrap()),
             path: path.to_vec(),
             ty_name: "plot".to_string(),
         })
@@ -3603,7 +3586,7 @@ mod tests {
 
         let plot = node_view("main", &[3]);
         let same_node_number = Pane::NodeView(NodeViewPane {
-            head: gantz_ca::Head::Branch("main".to_string()),
+            head: gantz_ca::Head::Branch("main".parse().unwrap()),
             path: vec![3],
             ty_name: "number".to_string(),
         });
@@ -3623,7 +3606,7 @@ mod tests {
         push_windowed(
             &mut windowed,
             Pane::NodeView(NodeViewPane {
-                head: gantz_ca::Head::Branch("main".to_string()),
+                head: gantz_ca::Head::Branch("main".parse().unwrap()),
                 path: vec![3],
                 ty_name: "number".to_string(),
             }),
@@ -3636,7 +3619,7 @@ mod tests {
     /// panes are untouched.
     #[test]
     fn migrate_windowed_node_views_drops_and_rewrites() {
-        let head = gantz_ca::Head::Branch("main".to_string());
+        let head = gantz_ca::Head::Branch("main".parse().unwrap());
         let mut windowed = vec![
             node_view("main", &[1]),  // removed node -> dropped
             node_view("main", &[3]),  // swapped 3 -> 1
@@ -3663,7 +3646,7 @@ mod tests {
         assert!(
             windowed
                 .iter()
-                .any(|p| matches!(p, Pane::NodeView(nv) if matches!(&nv.head, gantz_ca::Head::Branch(n) if n == "other")))
+                .any(|p| matches!(p, Pane::NodeView(nv) if matches!(&nv.head, gantz_ca::Head::Branch(n) if n.to_string() == "other")))
         );
         assert_eq!(windowed.len(), 4);
     }

@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn extend_tags_payloads_with_the_head() {
-        let head = gantz_ca::Head::Branch("main".to_string());
+        let head = gantz_ca::Head::Branch("main".parse().unwrap());
         let mut rs = Responses::default();
         rs.extend(Some(&head), [DynResponse::new(A(1))]);
         let mut taken = rs.take::<A>();

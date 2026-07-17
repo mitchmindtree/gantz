@@ -1,6 +1,6 @@
 //! Registry reference for node lookup and trait implementations.
 //!
-//! Provides [`RegistryRef`] — a unified view combining a content-addressed
+//! Provides [`RegistryRef`] - a unified view combining a content-addressed
 //! registry with builtin nodes, implementing the various registry traits
 //! required by gantz_egui widgets.
 
@@ -13,7 +13,7 @@ use gantz_core::node::{self, graph::Graph};
 use gantz_core::{Builtins, Node};
 use petgraph::visit::{IntoNodeReferences, NodeRef};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// Registry reference providing unified node access.
 ///
@@ -23,20 +23,20 @@ use std::collections::{BTreeMap, HashMap};
 pub struct RegistryRef<'a, N: 'static + Send + Sync> {
     ca_registry: &'a ca::Registry<Graph<N>>,
     builtins: &'a dyn Builtins<Node = N>,
-    demos: &'a HashMap<String, String>,
 }
 
+/// Named heads (branches), ordered by name.
+pub type Names = BTreeMap<ca::Name, ca::CommitAddr>;
+
 impl<'a, N: 'static + Send + Sync> RegistryRef<'a, N> {
-    /// Construct from a CA registry, builtins provider and demo associations.
+    /// Construct from a CA registry and builtins provider.
     pub fn new(
         ca_registry: &'a ca::Registry<Graph<N>>,
         builtins: &'a dyn Builtins<Node = N>,
-        demos: &'a HashMap<String, String>,
     ) -> Self {
         Self {
             ca_registry,
             builtins,
-            demos,
         }
     }
 
@@ -54,10 +54,11 @@ impl<'a, N: 'static + Send + Sync> RegistryRef<'a, N> {
 impl<N: 'static + Node + Send + Sync> RegistryRef<'_, N> {
     /// Look up a node by content address.
     ///
-    /// Checks commit graphs in the registry first, then falls back to builtins.
+    /// Checks graphs in the registry first (a graph in the registry IS a
+    /// node), then falls back to builtins.
     pub fn node(&self, ca: &ca::ContentAddr) -> Option<&dyn Node> {
-        let commit_ca = ca::CommitAddr::from(*ca);
-        if let Some(graph) = self.ca_registry.commit_graph_ref(&commit_ca) {
+        let graph_ca = ca::GraphAddr::from(*ca);
+        if let Some(graph) = self.ca_registry.graph(&graph_ca) {
             return Some(graph as &dyn Node);
         }
         self.builtins.instance(ca).map(|n| n as &dyn Node)
@@ -65,18 +66,17 @@ impl<N: 'static + Node + Send + Sync> RegistryRef<'_, N> {
 
     /// Create a node of the given type name.
     ///
-    /// Checks registry names first (creating a [`crate::node::NamedRef`]),
-    /// then falls back to builtins.
+    /// Checks registry names first (creating a [`crate::node::NamedRef`]
+    /// pinning the name's head graph), then falls back to builtins.
     pub fn create_node(&self, node_type: &str) -> Option<N>
     where
         N: From<crate::node::NamedRef>,
     {
-        self.ca_registry
-            .names()
-            .get(node_type)
-            .map(|commit_ca| {
-                let ref_ = gantz_core::node::Ref::new((*commit_ca).into());
-                let named = crate::node::NamedRef::new(node_type.to_string(), ref_);
+        let name: ca::Name = node_type.parse().expect("infallible");
+        head_graph_addr(self.ca_registry, &name)
+            .map(|graph_addr| {
+                let ref_ = gantz_core::node::Ref::new(graph_addr.into());
+                let named = crate::node::NamedRef::new(name.clone(), ref_);
                 N::from(named)
             })
             .or_else(|| self.builtins.create(node_type))
@@ -93,13 +93,13 @@ impl<N: 'static + Node + Send + Sync> NodeTypeRegistry for RegistryRef<'_, N> {
         let mut types = vec![crate::widget::gantz::NESTED_GRAPH_TYPE];
         types.extend(self.builtins.names());
         // Nested graphs are hidden from the root graph-select list, so don't
-        // offer them as creatable node types either.
+        // offer them as creatable node types either. A root name is its
+        // single segment.
         types.extend(
             self.ca_registry
-                .names()
-                .keys()
-                .filter(|n| !n.contains(crate::node::NESTED_SEP))
-                .map(|s| &s[..]),
+                .heads()
+                .filter(|(name, _)| !name.is_nested())
+                .map(|(name, _)| name.segments()[0].as_str()),
         );
         types.sort();
         types.dedup();
@@ -114,17 +114,20 @@ impl<N: 'static + Node + Send + Sync> GraphRegistry for RegistryRef<'_, N> {
         commits
     }
 
-    fn names(&self) -> &BTreeMap<String, ca::CommitAddr> {
-        self.ca_registry.names()
+    fn names(&self) -> Vec<(ca::Name, ca::CommitAddr)> {
+        self.ca_registry
+            .heads()
+            .map(|(name, ca)| (name.clone(), ca))
+            .collect()
     }
 }
 
 impl<N: 'static + Node + Send + Sync> NameRegistry for RegistryRef<'_, N> {
     fn name_ca(&self, name: &str) -> Option<ca::ContentAddr> {
-        if let Some(commit_ca) = self.ca_registry.names().get(name) {
-            return Some((*commit_ca).into());
-        }
-        self.builtins.content_addr(name)
+        let parsed: ca::Name = name.parse().expect("infallible");
+        head_graph_addr(self.ca_registry, &parsed)
+            .map(Into::into)
+            .or_else(|| self.builtins.content_addr(name))
     }
 
     fn node_exists(&self, ca: &ca::ContentAddr) -> bool {
@@ -139,7 +142,7 @@ impl<N: 'static + Node + Send + Sync> FnNodeNames for RegistryRef<'_, N> {
             .names()
             .into_iter()
             .filter_map(|name| self.builtins.content_addr(name).map(|_| name.to_string()));
-        let registry_names = self.ca_registry.names().keys().cloned();
+        let registry_names = self.ca_registry.heads().map(|(name, _)| name.to_string());
         let all_names = builtin_names.chain(registry_names);
 
         let get_node = |ca: &ca::ContentAddr| self.node(ca);
@@ -171,16 +174,17 @@ where
     }
 
     fn would_ref_cycle(&self, target: &str, editing: &str) -> bool {
-        crate::cycle::would_cycle(self.ca_registry, target, editing)
+        let target: ca::Name = target.parse().expect("infallible");
+        let editing: ca::Name = editing.parse().expect("infallible");
+        crate::cycle::would_cycle(self.ca_registry, &target, &editing)
     }
 
-    fn demo_graph(&self, name: &str) -> Option<&str> {
-        // User-graph associations (from Export) are keyed by name; builtins
-        // expose their own demo by builtin name.
-        self.demos
-            .get(name)
-            .map(String::as_str)
-            .or_else(|| self.builtins.demo_graph(name))
+    fn demo_graph(&self, name: &str) -> Option<String> {
+        // User-graph associations live in the demo section, keyed by name;
+        // builtins expose their own demo by builtin name.
+        let parsed: ca::Name = name.parse().expect("infallible");
+        crate::section::demo(self.ca_registry, &parsed)
+            .or_else(|| self.builtins.demo_graph(name).map(str::to_string))
     }
 
     fn socket_doc(
@@ -191,8 +195,8 @@ where
     ) -> Option<crate::SocketDoc> {
         // Resolve the referenced graph and read the ix-th inlet/outlet marker's
         // own doc (docs live on the `Inlet`/`Outlet` nodes).
-        let commit_ca = ca::CommitAddr::from(*ca);
-        let graph = self.ca_registry.commit_graph_ref(&commit_ca)?;
+        let graph_ca = ca::GraphAddr::from(*ca);
+        let graph = self.ca_registry.graph(&graph_ca)?;
         let get_node = |c: &ca::ContentAddr| self.node(c);
         let meta_ctx = node::MetaCtx::new(&get_node);
         let node_ref = graph
@@ -236,11 +240,12 @@ where
                     .collect::<Vec<_>>()
             };
 
-        if let Some(commit_ca) = self.ca_registry.names().get(name) {
+        let parsed: ca::Name = name.parse().expect("infallible");
+        if let Some(graph_addr) = head_graph_addr(self.ca_registry, &parsed) {
             // A named graph: socket docs resolved from the referenced graph's
             // inlet/outlet markers.
-            if let Some(graph) = self.ca_registry.commit_graph_ref(commit_ca) {
-                let ca: ca::ContentAddr = (*commit_ca).into();
+            if let Some(graph) = self.ca_registry.graph(&graph_addr) {
+                let ca: ca::ContentAddr = graph_addr.into();
                 let socket =
                     |kind: SocketKind, ix: usize| Registry::socket_doc(self, &ca, kind, ix);
                 info.inputs = collect(graph.n_inputs(meta_ctx), SocketKind::Input, &socket);
@@ -256,8 +261,9 @@ where
         info
     }
 
-    fn graph_description(&self, name: &str) -> Option<&str> {
-        self.ca_registry.description(name)
+    fn graph_description(&self, name: &str) -> Option<String> {
+        let parsed: ca::Name = name.parse().expect("infallible");
+        crate::section::description(self.ca_registry, &parsed)
     }
 
     fn merge_candidates(&self, ours: &ca::Head) -> Vec<crate::merge::MergeCandidate> {
@@ -279,15 +285,20 @@ where
                 "Create a new nested graph. Its inlets and outlets become this node's sockets.",
             ));
         }
-        if self.ca_registry.names().contains_key(name) {
-            return self
-                .ca_registry
-                .description(name)
-                .map(|s| Cow::Owned(s.to_string()));
+        let parsed: ca::Name = name.parse().expect("infallible");
+        if self.ca_registry.head(&parsed).is_some() {
+            return crate::section::description(self.ca_registry, &parsed).map(Cow::Owned);
         }
         self.builtins
             .create(name)
             .and_then(|n| n.description())
             .map(Cow::Borrowed)
     }
+}
+
+/// The graph address at the tip of the named line of history: the address a
+/// [`Ref`](gantz_core::node::Ref) to the name should pin.
+pub fn head_graph_addr<G>(reg: &ca::Registry<G>, name: &ca::Name) -> Option<ca::GraphAddr> {
+    let head_ca = reg.head(name)?;
+    reg.commits().get(&head_ca).map(|commit| commit.graph)
 }

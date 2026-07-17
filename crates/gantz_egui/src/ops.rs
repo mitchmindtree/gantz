@@ -10,17 +10,20 @@ use crate::sync::AsNamedRef;
 use crate::widget::gantz::OpenHeadState;
 use crate::widget::graph_scene::NodeIndex;
 use crate::{CreateNode, InspectEdge, PastePos, export, node::NamedRef};
-use gantz_ca::{CaHash, CommitAddr};
+use gantz_ca::{CaHash, CommitAddr, GraphAddr, Name};
 use gantz_core::node::{self, GetNode, graph::Graph};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
 use steel::steel_vm::engine::Engine;
 
-/// Branch a named node: create a new commit for the given content address
-/// (original commit as parent), insert the new name pointing at it, and
-/// replace the node at `path` with a [`NamedRef`] referencing the fresh
-/// commit. `path`'s last element is the node's index within the graph.
+/// Branch a named node: commit the graph at the given (graph) content address
+/// under a new name, and replace the node at `path` with a [`NamedRef`]
+/// referencing it. `path`'s last element is the node's index within the
+/// graph.
+///
+/// The newest existing commit pointing at the graph (if any) becomes the new
+/// commit's parent, preserving the fork point's history.
 pub fn branch_node<N>(
     registry: &mut gantz_ca::Registry<Graph<N>>,
     timestamp: std::time::Duration,
@@ -31,16 +34,17 @@ pub fn branch_node<N>(
 ) where
     N: From<NamedRef> + AsNamedRef,
 {
-    let commit_ca = CommitAddr::from(ca);
-    let Some(commit) = registry.commits().get(&commit_ca) else {
-        log::error!("BranchNode: commit not found for {commit_ca:?}");
+    let graph_addr = GraphAddr::from(ca);
+    if registry.graph(&graph_addr).is_none() {
+        log::error!("BranchNode: graph not found for {graph_addr:?}");
         return;
-    };
-    let graph_addr = commit.graph;
-    let new_commit_ca = registry.commit_graph(timestamp, Some(commit_ca), graph_addr, || {
+    }
+    let parent = newest_commit_for_graph(registry, graph_addr);
+    let new_commit_ca = registry.commit_graph(timestamp, parent, graph_addr, || {
         unreachable!("graph already exists in registry")
     });
-    registry.insert_name(new_name.clone(), new_commit_ca);
+    let name: Name = new_name.parse().expect("infallible");
+    registry.set_head(name.clone(), new_commit_ca);
 
     // Replace the NamedRef node in the working graph.
     let Some(&node_ix) = path.last() else {
@@ -52,15 +56,29 @@ pub fn branch_node<N>(
     // identical, so domain flags still apply. `sync` deliberately resets - a
     // fork pins.
     let new_ref = match graph.node_weight(node_id).and_then(N::as_named_ref) {
-        Some(old) => old.ref_().retarget(new_commit_ca.into()),
-        None => node::Ref::new(new_commit_ca.into()),
+        Some(old) => old.ref_().retarget(graph_addr.into()),
+        None => node::Ref::new(graph_addr.into()),
     };
-    let named_ref = NamedRef::new(new_name, new_ref);
+    let named_ref = NamedRef::new(name, new_ref);
     if let Some(node) = graph.node_weight_mut(node_id) {
         *node = N::from(named_ref);
     } else {
         log::error!("BranchNode: node not found at index {node_ix}");
     }
+}
+
+/// The newest commit pointing at the given graph, if any (ties broken by
+/// address for determinism).
+fn newest_commit_for_graph<G>(
+    registry: &gantz_ca::Registry<G>,
+    graph_addr: GraphAddr,
+) -> Option<CommitAddr> {
+    registry
+        .commits()
+        .iter()
+        .filter(|(_, commit)| commit.graph == graph_addr)
+        .max_by_key(|(ca, commit)| (commit.timestamp, **ca))
+        .map(|(ca, _)| *ca)
 }
 
 /// Serialize the current selection to a `.gantz` clipboard payload.
@@ -70,7 +88,6 @@ pub fn branch_node<N>(
 /// responsibility.
 pub fn copy_nodes<N>(
     registry: &gantz_ca::Registry<Graph<N>>,
-    all_views: &HashMap<CommitAddr, crate::SceneView>,
     graph: &Graph<N>,
     head_view: &crate::SceneView,
     selection: &HashSet<NodeIndex>,
@@ -87,7 +104,7 @@ where
     if selection.is_empty() {
         return None;
     }
-    let copied = export::copy(registry, all_views, graph, selection, &head_view.layout);
+    let copied = export::copy(registry, graph, selection, &head_view.layout);
     match export::copied_to_string(&copied) {
         Ok(text) => Some(text),
         Err(e) => {
@@ -119,7 +136,11 @@ where
     // Refuse references that would form a cycle back to the editing graph; with
     // sync on such a cycle recommits endlessly (see `crate::cycle`). A nameless
     // (detached commit) head can't be the target of a name-based cycle.
-    if editing.is_some_and(|editing| crate::cycle::would_cycle(registry, &node_type, editing)) {
+    if editing.is_some_and(|editing| {
+        let target: Name = node_type.parse().expect("infallible");
+        let editing: Name = editing.parse().expect("infallible");
+        crate::cycle::would_cycle(registry, &target, &editing)
+    }) {
         log::warn!("CreateNode: '{node_type}' would create a reference cycle; skipping");
         return None;
     }
@@ -162,17 +183,16 @@ pub fn create_nested_graph<N>(
     view: &mut crate::SceneView,
     head_state: &mut OpenHeadState,
     pos: Option<egui::Pos2>,
-    parent: &str,
+    parent: &Name,
 ) -> Option<NodeIndex>
 where
     N: gantz_core::Node + From<NamedRef> + CaHash,
 {
     // Pick the first free `<parent>:<n>` leaf name.
-    let sep = crate::node::NESTED_SEP;
     let mut n = 1u32;
     let name = loop {
-        let candidate = format!("{parent}{sep}{n}");
-        if !registry.names().contains_key(&candidate) {
+        let candidate = parent.child(n.to_string());
+        if registry.head(&candidate).is_none() {
             break candidate;
         }
         n += 1;
@@ -181,12 +201,12 @@ where
     // Commit a fresh empty graph under the chosen name.
     let nested_graph = Graph::<N>::default();
     let graph_ca = gantz_ca::graph_addr(&nested_graph);
-    let commit_ca = registry.commit_graph_to_name(timestamp, graph_ca, || nested_graph, &name);
+    registry.commit_graph_to_name(timestamp, graph_ca, || nested_graph, &name);
 
     // Insert a synced reference to the new nested graph. The referenced graph is
     // empty, so the node has no state to register here; the next `vm::sync`
     // recompile re-registers the whole working graph.
-    let named_ref = NamedRef::with_sync(name, node::Ref::new(commit_ca.into()));
+    let named_ref = NamedRef::with_sync(name, node::Ref::new(graph_ca.into()));
     let node_ix = graph.add_node(N::from(named_ref));
 
     // Position the new node under the pointer, falling back to the center of the
@@ -310,7 +330,6 @@ pub fn remove_nodes<N>(
 /// next recompile.
 pub fn cut_nodes<N>(
     registry: &gantz_ca::Registry<Graph<N>>,
-    all_views: &HashMap<CommitAddr, crate::SceneView>,
     graph: &mut Graph<N>,
     vm: &mut Engine,
     head_view: &mut crate::SceneView,
@@ -326,7 +345,7 @@ where
         + gantz_format::NodeSugar
         + 'static,
 {
-    let text = copy_nodes(registry, all_views, graph, head_view, nodes)?;
+    let text = copy_nodes(registry, graph, head_view, nodes)?;
     remove_nodes(
         graph,
         vm,
@@ -401,8 +420,6 @@ pub fn inspect_edge<N>(
 pub fn paste<N>(
     registry: &mut gantz_ca::Registry<Graph<N>>,
     editing: Option<&str>,
-    all_views: &mut HashMap<CommitAddr, crate::SceneView>,
-    all_demos: &mut HashMap<String, String>,
     graph: &mut Graph<N>,
     head_view: &mut crate::SceneView,
     head_state: &mut OpenHeadState,
@@ -410,7 +427,8 @@ pub fn paste<N>(
     pos: &PastePos,
 ) -> bool
 where
-    N: Clone
+    N: gantz_core::Node
+        + Clone
         + Serialize
         + DeserializeOwned
         + CaHash
@@ -432,11 +450,12 @@ where
     // a refused paste mutates nothing. A nameless (detached commit) head can't
     // be a name-based cycle target.
     if let Some(editing) = editing {
+        let editing: Name = editing.parse().expect("infallible");
         if let Some(named) = copied
             .graph
             .node_weights()
             .filter_map(|n| n.as_named_ref())
-            .find(|nr| crate::cycle::would_cycle(registry, nr.name(), editing))
+            .find(|nr| crate::cycle::would_cycle(registry, nr.name(), &editing))
         {
             log::warn!(
                 "Paste: '{}' would create a reference cycle in '{editing}'; skipping paste",
@@ -448,15 +467,7 @@ where
 
     let offset = crate::resolve_paste_offset(pos, &copied.positions);
 
-    let new_indices = export::paste(
-        registry,
-        all_views,
-        all_demos,
-        graph,
-        &mut head_view.layout,
-        &copied,
-        offset,
-    );
+    let new_indices = export::paste(registry, graph, &mut head_view.layout, &copied, offset);
 
     // Update selection to the pasted nodes.
     head_state.scene.interaction.selection.nodes = new_indices.into_iter().collect();
@@ -473,8 +484,6 @@ where
 pub fn duplicate_nodes<N>(
     registry: &mut gantz_ca::Registry<Graph<N>>,
     editing: Option<&str>,
-    all_views: &mut HashMap<CommitAddr, crate::SceneView>,
-    all_demos: &mut HashMap<String, String>,
     graph: &mut Graph<N>,
     head_view: &mut crate::SceneView,
     head_state: &mut OpenHeadState,
@@ -490,14 +499,12 @@ where
         + gantz_format::NodeSugar
         + 'static,
 {
-    let Some(text) = copy_nodes(registry, all_views, graph, head_view, nodes) else {
+    let Some(text) = copy_nodes(registry, graph, head_view, nodes) else {
         return false;
     };
     paste(
         registry,
         editing,
-        all_views,
-        all_demos,
         graph,
         head_view,
         head_state,
@@ -516,7 +523,7 @@ pub fn undo<G>(
     redo_stacks: &mut HashMap<gantz_ca::Head, Vec<CommitAddr>>,
     head: &gantz_ca::Head,
 ) -> Option<CommitAddr> {
-    let commit_ca = registry.head_commit_ca(head).copied()?;
+    let commit_ca = registry.head_commit_ca(head)?;
     let parent = registry.commits().get(&commit_ca)?.parent?;
     redo_stacks.entry(head.clone()).or_default().push(commit_ca);
     Some(parent)
@@ -601,9 +608,10 @@ pub enum MergeHeadOutcome {
 /// On a true merge this migrates the index-keyed VM state, layout and
 /// selection through the merged graph's node mapping (an identity mapping
 /// whenever the source branch removed no nodes), seeds layout for merged-in
-/// nodes from the source branch's persisted view in `all_views` (falling back
-/// to placement near the view centre), and commits the result with two
-/// parents via [`gantz_ca::Registry::commit_merge_to_head`] - upholding the
+/// nodes from the source branch's persisted view in the registry's view
+/// section (falling back to placement near the view centre), and commits the
+/// result with two parents via
+/// [`gantz_ca::Registry::commit_merge_to_head`] - upholding the
 /// committed-working-graph invariant, so callers must not commit again.
 ///
 /// Conflicts refuse the merge unless `auto_resolve` accepts the given
@@ -612,7 +620,6 @@ pub enum MergeHeadOutcome {
 #[allow(clippy::too_many_arguments)]
 pub fn merge_head<N>(
     registry: &mut gantz_ca::Registry<Graph<N>>,
-    all_views: &HashMap<CommitAddr, crate::SceneView>,
     timestamp: gantz_ca::Timestamp,
     head: &mut gantz_ca::Head,
     graph: &mut Graph<N>,
@@ -627,11 +634,11 @@ where
     N: Clone + CaHash + AsNamedRef,
 {
     let node_id = |ix: usize| egui_graph::NodeId::from_u64(ix as u64);
-    let Some(&ours_tip) = registry.head_commit_ca(head) else {
+    let Some(ours_tip) = registry.head_commit_ca(head) else {
         log::error!("MergeHead: no commit for head {head}");
         return MergeHeadOutcome::Noop;
     };
-    let Some(&theirs_tip) = registry.names().get(source) else {
+    let Some(theirs_tip) = registry.head(&source.parse().expect("infallible")) else {
         log::error!("MergeHead: unknown source branch '{source}'");
         return MergeHeadOutcome::Noop;
     };
@@ -694,9 +701,10 @@ where
     // Seed layout for merged-in nodes from the source branch's persisted view
     // (positions are compatible: both branches share the base's coordinates),
     // falling back to placement near the view centre.
-    let theirs_view = all_views.get(&theirs_tip);
+    let theirs_view = crate::section::view(registry, &theirs_tip);
     for (i, &(m, t)) in theirs_only.iter().enumerate() {
         let pos = theirs_view
+            .as_ref()
             .and_then(|v| v.layout.get(&node_id(t)).copied())
             .unwrap_or_else(|| head_view.camera.center + egui::vec2(20.0, 20.0) * i as f32);
         head_view.layout.insert(node_id(m), pos);
@@ -729,18 +737,17 @@ where
 /// layout commit.
 ///
 /// Returns the new commit address when a layout commit was created, else `None`
-/// (no baseline view yet - i.e. the head commit's layout has not been seeded -
-/// or no node-position change). Seeding `views[new]`, clearing the redo stack
-/// and migrating GUI state stay with the caller.
+/// (no baseline view yet - i.e. the head commit's view section entry has not
+/// been seeded - or no node-position change). Seeding the new commit's view,
+/// clearing the redo stack and migrating GUI state stay with the caller.
 pub fn commit_layout<G>(
     registry: &mut gantz_ca::Registry<G>,
-    views: &HashMap<CommitAddr, crate::SceneView>,
     timestamp: gantz_ca::Timestamp,
     head: &mut gantz_ca::Head,
     live: &crate::SceneView,
 ) -> Option<CommitAddr> {
-    let head_commit_ca = *registry.head_commit_ca(head)?;
-    let baseline = views.get(&head_commit_ca)?;
+    let head_commit_ca = registry.head_commit_ca(head)?;
+    let baseline = crate::section::view(registry, &head_commit_ca)?;
     if baseline.layout == live.layout {
         return None;
     }
@@ -907,9 +914,9 @@ mod tests {
         let ours_ca = reg.commit_graph(secs(2), Some(base_ca), gantz_ca::graph_addr(&g), || g);
         let g = test_graph(theirs);
         let theirs_ca = reg.commit_graph(secs(3), Some(base_ca), gantz_ca::graph_addr(&g), || g);
-        reg.insert_name("alpha".to_string(), ours_ca);
-        reg.insert_name("beta".to_string(), theirs_ca);
-        (reg, gantz_ca::Head::Branch("alpha".to_string()))
+        reg.set_head("alpha".parse().unwrap(), ours_ca);
+        reg.set_head("beta".parse().unwrap(), theirs_ca);
+        (reg, gantz_ca::Head::Branch("alpha".parse().unwrap()))
     }
 
     #[allow(clippy::type_complexity)]
@@ -924,7 +931,6 @@ mod tests {
     ) -> MergeHeadOutcome {
         merge_head(
             reg,
-            &HashMap::new(),
             std::time::Duration::from_secs(9),
             head,
             graph,
@@ -942,8 +948,8 @@ mod tests {
     #[test]
     fn merge_head_applies_theirs_and_commits_two_parents() {
         let (mut reg, mut head) = diverged_registry(&[1, 2], &[1, 20], &[1, 2, 3]);
-        let ours_tip = *reg.head_commit_ca(&head).unwrap();
-        let theirs_tip = reg.names()["beta"];
+        let ours_tip = reg.head_commit_ca(&head).unwrap();
+        let theirs_tip = reg.head(&"beta".parse().unwrap()).unwrap();
         let mut graph = test_graph(&[1, 20]);
         let mut vm = Engine::new_base();
         let mut view = crate::SceneView::default();
@@ -977,7 +983,7 @@ mod tests {
         let commit = &reg.commits()[&new_commit];
         assert_eq!(commit.parent, Some(ours_tip));
         assert_eq!(commit.merge_parents, vec![theirs_tip]);
-        assert_eq!(reg.head_commit_ca(&head), Some(&new_commit));
+        assert_eq!(reg.head_commit_ca(&head), Some(new_commit));
     }
 
     // Theirs removed a node: ours' surviving state/layout/selection migrate
@@ -1028,7 +1034,7 @@ mod tests {
     #[test]
     fn merge_head_refuses_conflicts_unless_auto_resolve() {
         let (mut reg, mut head) = diverged_registry(&[1, 2], &[1, 20], &[1, 30]);
-        let ours_tip = *reg.head_commit_ca(&head).unwrap();
+        let ours_tip = reg.head_commit_ca(&head).unwrap();
         let mut graph = test_graph(&[1, 20]);
         let mut vm = Engine::new_base();
         let mut view = crate::SceneView::default();
@@ -1048,7 +1054,7 @@ mod tests {
         };
         assert!(!reasons.is_empty());
         // Nothing moved.
-        assert_eq!(reg.head_commit_ca(&head), Some(&ours_tip));
+        assert_eq!(reg.head_commit_ca(&head), Some(ours_tip));
         assert_eq!(
             graph.node_weights().map(|n| n.0).collect::<Vec<_>>(),
             [1, 20]
@@ -1069,7 +1075,7 @@ mod tests {
             graph.node_weights().map(|n| n.0).collect::<Vec<_>>(),
             [1, 20]
         );
-        assert_ne!(reg.head_commit_ca(&head), Some(&ours_tip));
+        assert_ne!(reg.head_commit_ca(&head), Some(ours_tip));
     }
 
     // A source branch that is strictly ahead fast-forwards without a commit.
@@ -1081,9 +1087,9 @@ mod tests {
         let base_ca = reg.commit_graph(secs(1), None, gantz_ca::graph_addr(&g), || g);
         let g = test_graph(&[1, 2]);
         let theirs_ca = reg.commit_graph(secs(2), Some(base_ca), gantz_ca::graph_addr(&g), || g);
-        reg.insert_name("alpha".to_string(), base_ca);
-        reg.insert_name("beta".to_string(), theirs_ca);
-        let mut head = gantz_ca::Head::Branch("alpha".to_string());
+        reg.set_head("alpha".parse().unwrap(), base_ca);
+        reg.set_head("beta".parse().unwrap(), theirs_ca);
+        let mut head = gantz_ca::Head::Branch("alpha".parse().unwrap());
         let mut graph = test_graph(&[1]);
         let mut vm = Engine::new_base();
         let mut view = crate::SceneView::default();
@@ -1103,7 +1109,7 @@ mod tests {
         };
         assert_eq!(target, theirs_ca);
         // Nothing mutated: navigation is the caller's job.
-        assert_eq!(reg.names()["alpha"], base_ca);
+        assert_eq!(reg.head(&"alpha".parse().unwrap()), Some(base_ca));
         assert_eq!(graph.node_count(), 1);
     }
 }

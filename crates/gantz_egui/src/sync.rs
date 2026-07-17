@@ -7,8 +7,8 @@
 //! counterpart of the inspector's render-time auto-sync, and the mechanism by
 //! which editing a nested graph propagates up to its parents.
 
-use crate::node::{NESTED_SEP, NamedRef};
-use gantz_ca::{CaHash, CommitAddr, Registry};
+use crate::node::NamedRef;
+use gantz_ca::{CaHash, CommitAddr, GraphAddr, Name, Registry};
 use gantz_core::node::graph::Graph;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -36,16 +36,11 @@ pub trait AsNamedRef {
 #[derive(Clone, Debug)]
 pub struct Moved {
     /// The name whose commit moved.
-    pub name: String,
+    pub name: Name,
     /// The commit the name pointed at before.
     pub old_commit: CommitAddr,
     /// The commit the name points at now.
     pub new_commit: CommitAddr,
-}
-
-/// The number of `:`-separated segments in a name (a nested graph's depth).
-fn depth(name: &str) -> usize {
-    name.matches(NESTED_SEP).count()
 }
 
 /// Apply `mutate` to every inner [`NamedRef`] of a clone of `graph`, returning
@@ -73,7 +68,7 @@ where
 fn commit_rewritten<N>(
     registry: &mut Registry<Graph<N>>,
     timestamp: Duration,
-    name: &str,
+    name: &Name,
     source_commit: CommitAddr,
     mutate: impl FnMut(&mut NamedRef) -> bool,
 ) -> Option<Moved>
@@ -87,22 +82,34 @@ where
     let graph_ca = gantz_ca::graph_addr(&g);
     let new_commit = registry.commit_graph_to_name(timestamp, graph_ca, || g, name);
     Some(Moved {
-        name: name.to_string(),
+        name: name.clone(),
         old_commit: source_commit,
         new_commit,
     })
 }
 
-/// Repoint a [`NamedRef`] whose name was renamed, per a `old -> (new, commit)`
+/// Repoint a [`NamedRef`] whose name was renamed, per a `old -> (new, graph)`
 /// map. Returns whether it changed.
-fn remap_ref(named_ref: &mut NamedRef, remap: &HashMap<String, (String, CommitAddr)>) -> bool {
+fn remap_ref(named_ref: &mut NamedRef, remap: &HashMap<Name, (Name, GraphAddr)>) -> bool {
     match remap.get(named_ref.name()) {
-        Some((new_name, new_commit)) => {
-            named_ref.rename(new_name.clone(), (*new_commit).into());
+        Some((new_name, new_graph)) => {
+            named_ref.rename(new_name.clone(), (*new_graph).into());
             true
         }
         None => false,
     }
+}
+
+/// The renamed counterpart of `descendant` when `old` is renamed to `new`:
+/// `new`'s segments followed by `descendant`'s segments past `old`'s.
+fn renamed(descendant: &Name, old: &Name, new: &Name) -> Name {
+    let segments: Vec<String> = new
+        .segments()
+        .iter()
+        .chain(&descendant.segments()[old.segments().len()..])
+        .cloned()
+        .collect();
+    Name::from(segments)
 }
 
 /// Give a freshly-forked graph independent nested children.
@@ -119,30 +126,28 @@ fn remap_ref(named_ref: &mut NamedRef, remap: &HashMap<String, (String, CommitAd
 pub fn fork_nested<N>(
     registry: &mut Registry<Graph<N>>,
     timestamp: Duration,
-    old: &str,
-    new: &str,
+    old: &Name,
+    new: &Name,
 ) -> Vec<Moved>
 where
     N: Clone + CaHash + AsNamedRefMut,
 {
-    let old_prefix = format!("{old}{NESTED_SEP}");
-    let mut descendants: Vec<String> = registry
-        .names()
-        .keys()
-        .filter(|n| n.starts_with(&old_prefix))
-        .cloned()
+    let mut descendants: Vec<Name> = registry
+        .heads()
+        .filter(|(n, _)| n.starts_with(old) && *n != old)
+        .map(|(n, _)| n.clone())
         .collect();
-    descendants.sort_by(|a, b| depth(b).cmp(&depth(a)).then_with(|| a.cmp(b)));
+    descendants.sort_by(|a, b| b.depth().cmp(&a.depth()).then_with(|| a.cmp(b)));
 
-    // old descendant name -> (new name, new commit).
-    let mut remap: HashMap<String, (String, CommitAddr)> = HashMap::new();
+    // old descendant name -> (new name, new graph).
+    let mut remap: HashMap<Name, (Name, GraphAddr)> = HashMap::new();
     let mut moves = Vec::new();
 
     // Each descendant is copied (under a fresh `new:*` name) with its references
     // to already-copied descendants repointed.
     for d in &descendants {
-        let d_new = format!("{new}{}", &d[old.len()..]);
-        let Some(&commit) = registry.names().get(d) else {
+        let d_new = renamed(d, old, new);
+        let Some(commit) = registry.head(d) else {
             continue;
         };
         let Some(graph) = registry.commit_graph_ref(&commit) else {
@@ -151,7 +156,7 @@ where
         let (g, _) = rewrite_refs(graph, |nr| remap_ref(nr, &remap));
         let graph_ca = gantz_ca::graph_addr(&g);
         let new_commit = registry.commit_graph_to_name(timestamp, graph_ca, || g, &d_new);
-        remap.insert(d.clone(), (d_new.clone(), new_commit));
+        remap.insert(d.clone(), (d_new.clone(), graph_ca));
         moves.push(Moved {
             name: d_new,
             old_commit: commit,
@@ -160,7 +165,7 @@ where
     }
 
     // Repoint the already-created `new` root's references to its own children.
-    if let Some(&root_commit) = registry.names().get(new) {
+    if let Some(root_commit) = registry.head(new) {
         moves.extend(commit_rewritten(
             registry,
             timestamp,
@@ -189,15 +194,18 @@ where
     N: Clone + CaHash + AsNamedRefMut,
 {
     // Deepest names first: a child is updated before the parent that refs it.
-    let mut order: Vec<String> = registry.names().keys().cloned().collect();
-    order.sort_by(|a, b| depth(b).cmp(&depth(a)).then_with(|| a.cmp(b)));
+    let mut order: Vec<Name> = registry.heads().map(|(n, _)| n.clone()).collect();
+    order.sort_by(|a, b| b.depth().cmp(&a.depth()).then_with(|| a.cmp(b)));
 
-    // A name -> current commit snapshot, kept in step with commits we make so a
-    // referrer resolves its children to their freshly-committed addresses.
-    let mut current: HashMap<String, CommitAddr> = registry
-        .names()
-        .iter()
-        .map(|(n, ca)| (n.clone(), *ca))
+    // A name -> current head graph snapshot, kept in step with commits we
+    // make so a referrer resolves its children to their freshly-committed
+    // content.
+    let mut current: HashMap<Name, (CommitAddr, GraphAddr)> = registry
+        .heads()
+        .filter_map(|(n, ca)| {
+            let graph = registry.commits().get(&ca)?.graph;
+            Some((n.clone(), (ca, graph)))
+        })
         .collect();
 
     let mut moves = Vec::new();
@@ -205,14 +213,23 @@ where
     for _ in 0..max_passes {
         let mut changed_any = false;
         for name in &order {
-            let Some(&commit_ca) = current.get(name) else {
+            let Some(&(commit_ca, _)) = current.get(name) else {
                 continue;
             };
-            let resolve = |m: &str| current.get(m).copied().map(gantz_ca::ContentAddr::from);
+            let resolve = |m: &Name| {
+                current
+                    .get(m)
+                    .map(|&(_, graph)| gantz_ca::ContentAddr::from(graph))
+            };
             if let Some(moved) = commit_rewritten(registry, timestamp, name, commit_ca, |nr| {
                 nr.resync(&resolve)
             }) {
-                current.insert(name.clone(), moved.new_commit);
+                let graph = registry
+                    .commits()
+                    .get(&moved.new_commit)
+                    .expect("freshly committed")
+                    .graph;
+                current.insert(name.clone(), (moved.new_commit, graph));
                 moves.push(moved);
                 changed_any = true;
             }
@@ -237,21 +254,20 @@ where
 pub fn promote_nested<N>(
     registry: &mut Registry<Graph<N>>,
     timestamp: Duration,
-    old_nested: &str,
-    new_name: &str,
+    old_nested: &Name,
+    new_name: &Name,
 ) -> Vec<Moved>
 where
     N: Clone + CaHash + AsNamedRefMut,
 {
     // The parent referencing the nested graph: the name with the last leaf
     // stripped (`A:1` -> `A`, `A:1:2` -> `A:1`).
-    let Some((parent, _)) = old_nested.rsplit_once(NESTED_SEP) else {
+    let Some(parent) = old_nested.parent() else {
         return Vec::new();
     };
-    let parent = parent.to_string();
-    let (Some(&new_commit), Some(&parent_commit)) = (
-        registry.names().get(new_name),
-        registry.names().get(&parent),
+    let (Some(new_graph), Some(parent_commit)) = (
+        registry.named_commit(new_name).map(|c| c.graph),
+        registry.head(&parent),
     ) else {
         return Vec::new();
     };
@@ -265,7 +281,7 @@ where
         parent_commit,
         |nr| {
             if nr.name() == old_nested {
-                nr.rename(new_name.to_string(), new_commit.into());
+                nr.rename(new_name.clone(), new_graph.into());
                 true
             } else {
                 false
@@ -275,15 +291,13 @@ where
 
     // Drop the orphaned nested name and its descendants (their content survives
     // as the new root graph copy).
-    let child_prefix = format!("{old_nested}{NESTED_SEP}");
-    let orphans: Vec<String> = registry
-        .names()
-        .keys()
-        .filter(|n| n.as_str() == old_nested || n.starts_with(&child_prefix))
-        .cloned()
+    let orphans: Vec<Name> = registry
+        .heads()
+        .filter(|(n, _)| n.starts_with(old_nested))
+        .map(|(n, _)| n.clone())
         .collect();
     for orphan in orphans {
-        registry.remove_name(&orphan);
+        registry.remove_head(&orphan);
     }
 
     moves

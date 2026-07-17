@@ -132,7 +132,7 @@ mod tests {
             color: blue,
         };
         let styles: [&dyn EdgeStyle; 3] = [&a, &b, &c];
-        let head = gantz_ca::Head::Branch("test".to_string());
+        let head = gantz_ca::Head::Branch("test".parse().unwrap());
         let ctx = |src_node| EdgeStyleCtx {
             head: &head,
             src: (src_node, 0),

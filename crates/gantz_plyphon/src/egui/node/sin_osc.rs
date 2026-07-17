@@ -8,8 +8,8 @@ use gantz_egui::{
 };
 
 impl NodeUi for SinOsc {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~sinosc"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "~sinosc".into()
     }
 
     fn description(&self) -> Option<&'static str> {

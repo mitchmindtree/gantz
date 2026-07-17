@@ -8,8 +8,8 @@ use gantz_egui::{
 };
 
 impl NodeUi for Lag {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~lag"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "~lag".into()
     }
 
     fn description(&self) -> Option<&'static str> {

@@ -20,7 +20,7 @@ use bevy_gantz::{
     FocusedHead, HeadTabOrder, OpenHead, OpenHeadDataReadOnly, Registry,
     debounced_input::{DebouncedEvent, DebouncedInputEvent, DebouncedInputPlugin},
 };
-use bevy_gantz_egui::{GuiState, Views};
+use bevy_gantz_egui::GuiState;
 
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::tasks::{IoTaskPool, Task, block_on};
@@ -145,18 +145,15 @@ fn setup_persister(pkv: Res<Pkv>, mut cmds: Commands) {
     cmds.insert_resource(spawn_persister(pkv.clone()));
 }
 
-/// Collect the registry/heads/views/gui/window into a `(key, value)` batch to
-/// persist.
+/// Collect the registry/heads/gui/window into a `(key, value)` batch to
+/// persist. Views, demos and descriptions ride the registry's sections.
 ///
 /// Registry writes dedup against `persisted` (pass a fresh
 /// [`PersistedRegistry`](bevy_gantz::storage::PersistedRegistry) to force a
 /// complete write); everything else is written each call.
-#[allow(clippy::too_many_arguments)]
 fn collect_batch_to_persist(
     registry: &Registry<BoxNode>,
     persisted: &mut bevy_gantz::storage::PersistedRegistry,
-    views: &Views,
-    persisted_views: &mut bevy_gantz_egui::storage::PersistedViews,
     gui_state: &GuiState,
     tab_order: &HeadTabOrder,
     focused: &FocusedHead,
@@ -164,7 +161,7 @@ fn collect_batch_to_persist(
     window: Option<&Window>,
 ) -> Vec<(String, String)> {
     let mut batch = bevy_gantz::storage::BatchWriter::default();
-    // Registry: only newly-seen graphs/commits and any changed name maps.
+    // Registry: only newly-seen content and any changed sections.
     bevy_gantz::storage::save_registry_incremental(&mut batch, registry, persisted);
     // Open heads in tab order.
     let heads: Vec<_> = tab_order
@@ -183,15 +180,6 @@ fn collect_batch_to_persist(
             bevy_gantz::storage::save_focused_head(&mut batch, &**data.head_ref);
         }
     }
-    // Views (kept current by `persist_camera_and_seed` and `settle_layout`):
-    // write only the per-commit views that changed, for commits that still exist.
-    let valid_commits: std::collections::HashSet<_> = registry.commits().keys().copied().collect();
-    bevy_gantz_egui::storage::save_views_incremental(
-        &mut batch,
-        views,
-        &valid_commits,
-        persisted_views,
-    );
     // GUI state.
     bevy_gantz_egui::storage::save_gui_state(&mut batch, gui_state);
     // Native window size (no-op on web).
@@ -204,8 +192,6 @@ fn collect_batch_to_persist(
 fn persist_resources(
     registry: Res<Registry<BoxNode>>,
     mut persisted: ResMut<bevy_gantz::storage::PersistedRegistry>,
-    views: Res<Views>,
-    mut persisted_views: ResMut<bevy_gantz_egui::storage::PersistedViews>,
     gui_state: Res<GuiState>,
     mut persister: ResMut<Persister>,
     tab_order: Res<HeadTabOrder>,
@@ -218,8 +204,6 @@ fn persist_resources(
     let batch = collect_batch_to_persist(
         &registry,
         &mut persisted,
-        &views,
-        &mut persisted_views,
         &gui_state,
         &tab_order,
         &focused,
@@ -262,16 +246,14 @@ fn persist_egui_memory(mut persister: ResMut<Persister>, mut ctxs: EguiContexts)
 
 /// On exit, write the full current state and drain the worker before quitting.
 ///
-/// Fresh trackers force a complete registry + views write as a backstop for any
+/// A fresh tracker forces a complete registry write as a backstop for any
 /// blob optimistically tracked as persisted but not yet drained by the worker;
 /// FIFO + `shutdown` guarantee it lands last. egui memory is left to the
 /// worker's normal drain (best-effort widget state).
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
 fn flush_on_exit(
     mut exit: MessageReader<AppExit>,
     registry: Res<Registry<BoxNode>>,
-    views: Res<Views>,
     gui_state: Res<GuiState>,
     mut persister: ResMut<Persister>,
     tab_order: Res<HeadTabOrder>,
@@ -283,13 +265,10 @@ fn flush_on_exit(
         return;
     }
     let mut full = bevy_gantz::storage::PersistedRegistry::default();
-    let mut full_views = bevy_gantz_egui::storage::PersistedViews::default();
     let window = primary_window.single().ok();
     let batch = collect_batch_to_persist(
         &registry,
         &mut full,
-        &views,
-        &mut full_views,
         &gui_state,
         &tab_order,
         &focused,

@@ -9,7 +9,7 @@
 //! unreachable through the GUI's erased registry, so callers (e.g. a bevy
 //! provider system) compute this where the concrete node type is known and
 //! hand the result to the UI - the same shape as
-//! [`dsp_commits`][crate::ref_ext::dsp_commits].
+//! [`dsp_graphs`][crate::ref_ext::dsp_graphs].
 //!
 //! Classification is structural, mirroring how flattening lowers the graph
 //! (see [`flatten`][crate::flatten()]): a concrete DSP node's ports come
@@ -49,7 +49,7 @@ pub struct RootPortInfo {
 /// Memoized reference probes, shared across one [`root_port_info`] pass so
 /// repeated references stay linear overall. Stacks guard reference cycles:
 /// a chain re-entering a graph it is already resolving through contributes
-/// nothing (mirroring [`dsp_commits`][crate::ref_ext::dsp_commits]).
+/// nothing (mirroring [`dsp_graphs`][crate::ref_ext::dsp_graphs]).
 #[derive(Default)]
 struct Memos {
     inlets: HashMap<ContentAddr, Vec<bool>>,
@@ -72,7 +72,7 @@ where
 {
     let get_node = |ca: &ContentAddr| {
         registry
-            .commit_graph_ref(&(*ca).into())
+            .graph(&(*ca).into())
             .map(|g| g as &dyn gantz_core::Node)
     };
     let ctx = MetaCtx::new(&get_node);
@@ -158,7 +158,7 @@ where
     if memos.inlet_stack.contains(&ca) {
         return Vec::new();
     }
-    let Some(graph) = registry.commit_graph_ref(&ca.into()) else {
+    let Some(graph) = registry.graph(&ca.into()) else {
         memos.inlets.insert(ca, Vec::new());
         return Vec::new();
     };
@@ -199,7 +199,7 @@ where
     N: gantz_core::Node,
 {
     registry
-        .commit_graph_ref(&ca.into())
+        .graph(&ca.into())
         .map(|g| g.node_indices().filter(|&n| g[n].outlet(ctx)).count())
         .unwrap_or(0)
 }
@@ -226,7 +226,7 @@ where
     if memos.outlet_stack.contains(&key) {
         return Vec::new();
     }
-    let Some(graph) = registry.commit_graph_ref(&ca.into()) else {
+    let Some(graph) = registry.graph(&ca.into()) else {
         memos.outlets.insert(key, Vec::new());
         return Vec::new();
     };

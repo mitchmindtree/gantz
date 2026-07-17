@@ -4,8 +4,8 @@ use crate::node::Bus;
 use gantz_egui::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind};
 
 impl NodeUi for Bus {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~bus"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "~bus".into()
     }
 
     fn description(&self) -> Option<&'static str> {

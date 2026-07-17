@@ -38,7 +38,7 @@ pub use instance::{
 };
 pub use node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Sum, Unpack};
 pub use port_info::{RootPortInfo, root_port_info};
-pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, dsp_commits};
+pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, dsp_graphs};
 pub use sugar::PlyphonSugar;
 // `self::` disambiguates from the extern `egui` crate at the crate root.
 #[cfg(feature = "egui")]

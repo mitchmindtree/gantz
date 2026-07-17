@@ -7,8 +7,8 @@ use gantz_egui::{
 };
 
 impl NodeUi for Sum {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~sum"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "~sum".into()
     }
 
     fn description(&self) -> Option<&'static str> {

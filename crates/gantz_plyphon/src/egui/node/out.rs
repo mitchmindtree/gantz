@@ -8,8 +8,8 @@ use gantz_egui::{
 };
 
 impl NodeUi for Out {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~out"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "~out".into()
     }
 
     fn description(&self) -> Option<&'static str> {

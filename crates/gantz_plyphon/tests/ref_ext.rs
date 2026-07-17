@@ -1,11 +1,11 @@
-//! Tests for `dsp_commits` - the DSP-graph discovery backing the `inline`
+//! Tests for `dsp_graphs` - the DSP-graph discovery backing the `inline`
 //! ref-extension UI - and for the `DspRefExt`-driven lowering decision in
 //! `flatten_from_registry`.
 
 use gantz_ca::{CaHash, ContentAddr};
 use gantz_core::node::graph::Graph;
 use gantz_core::node::{AsRefNode, ExprCtx, ExprResult, MetaCtx, Ref, parse_expr};
-use gantz_plyphon::{NodeDsp, SinOsc, ToNodeDsp, dsp_commits};
+use gantz_plyphon::{NodeDsp, SinOsc, ToNodeDsp, dsp_graphs};
 
 /// A minimal node standing in for the app's node set: one DSP node, the
 /// reference node, boundary nodes and a non-DSP stand-in.
@@ -72,25 +72,25 @@ impl CaHash for N {
     }
 }
 
-/// Commit `graph` under `name`, returning its commit address as a
+/// Commit `graph` under `name`, returning its graph address as a
 /// `ContentAddr` (the form `Ref::content_addr` reports).
 fn commit(registry: &mut gantz_ca::Registry<Graph<N>>, name: &str, graph: Graph<N>) -> ContentAddr {
     let now = std::time::Duration::from_secs(1);
     let addr = gantz_ca::graph_addr(&graph);
     let ca = registry.commit_graph(now, None, addr, || graph);
-    registry.insert_name(name.to_string(), ca);
-    ca.into()
+    registry.set_head(name.parse().expect("infallible"), ca);
+    addr.into()
 }
 
 fn ref_node(ca: ContentAddr) -> N {
     N::Ref(Ref::new(ca))
 }
 
-/// `dsp_commits` finds directly-DSP graphs and graphs that only reach DSP
+/// `dsp_graphs` finds directly-DSP graphs and graphs that only reach DSP
 /// transitively through references, and excludes non-DSP graphs and
 /// references to missing addresses.
 #[test]
-fn dsp_commits_discovers_direct_and_transitive() {
+fn dsp_graphs_discovers_direct_and_transitive() {
     let mut registry = gantz_ca::Registry::<Graph<N>>::default();
 
     // A graph containing a DSP node directly.
@@ -118,7 +118,7 @@ fn dsp_commits_discovers_direct_and_transitive() {
     dangling.add_node(ref_node(ContentAddr::from([9u8; 32])));
     let dangling_ca = commit(&mut registry, "dangling", dangling);
 
-    let set = dsp_commits(&registry);
+    let set = dsp_graphs(&registry);
     assert!(set.contains(&dsp_ca));
     assert!(set.contains(&wrapper_ca), "one hop through a ref");
     assert!(set.contains(&wrapper2_ca), "two hops through refs");

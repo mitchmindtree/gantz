@@ -90,12 +90,13 @@ impl CaHash for N {
     }
 }
 
-/// Commit `graph`, returning its commit address as a `ContentAddr` (the form
+/// Commit `graph`, returning its graph address as a `ContentAddr` (the form
 /// `Ref::content_addr` reports).
 fn commit(registry: &mut gantz_ca::Registry<Graph<N>>, graph: Graph<N>) -> ContentAddr {
     let now = std::time::Duration::from_secs(1);
     let addr = gantz_ca::graph_addr(&graph);
-    registry.commit_graph(now, None, addr, || graph).into()
+    registry.commit_graph(now, None, addr, || graph);
+    addr.into()
 }
 
 fn shape(width: usize, rate: Rate) -> PortShape {

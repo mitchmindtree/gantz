@@ -56,7 +56,7 @@ use bevy_gantz::{EntrypointSet, EvalEpoch, Registry, VmSet};
 use bevy_gantz_egui::{EdgeStyles, ExtPanes, RefExtUis, RegisterResponseExt, SettingsTabs};
 use gantz_plyphon::{
     Config, DeriveStatus, DspEdgeStyle, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab,
-    RootPortInfo, Status, describe_parts, dsp_commits, root_port_info,
+    RootPortInfo, Status, describe_parts, root_port_info,
 };
 
 /// Editable DSP settings: the domain's [`Config`] as a bevy resource.
@@ -618,7 +618,7 @@ fn provide_dsp_ref_ext<N>(
     N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Send + Sync,
 {
     if registry.is_changed() || dsp_graphs.is_none() {
-        *dsp_graphs = Some(std::sync::Arc::new(dsp_commits(&registry)));
+        *dsp_graphs = Some(std::sync::Arc::new(gantz_plyphon::dsp_graphs(&registry)));
     }
     let dsp_graphs = dsp_graphs.clone().expect("just initialised");
     ref_ext_uis.0.push(Box::new(DspRefExtUi { dsp_graphs }));

@@ -8,7 +8,7 @@
 //! nodes.
 
 use crate::ToNodeDsp;
-use gantz_ca::{CommitAddr, ContentAddr};
+use gantz_ca::{ContentAddr, GraphAddr};
 use gantz_core::node::AsRefNode;
 use gantz_core::node::graph::Graph;
 use serde::{Deserialize, Serialize};
@@ -31,70 +31,70 @@ pub struct DspRefExt {
     pub inline: bool,
 }
 
-/// The commit addresses (as [`ContentAddr`]s, the form
+/// The graph addresses (as [`ContentAddr`]s, the form
 /// [`Ref::content_addr`](gantz_core::node::Ref::content_addr) reports) of
-/// every registry commit whose graph contains DSP nodes, directly or
-/// transitively through references.
+/// every registry graph containing DSP nodes, directly or transitively
+/// through references.
 ///
 /// Requires the concrete node type: typed probes like [`ToNodeDsp`] are
 /// unreachable through the GUI's erased registry, so callers (e.g. a bevy
 /// provider system) compute this where `N` is known and hand the set to
 /// `DspRefExtUi`.
-pub fn dsp_commits<N>(registry: &gantz_ca::Registry<Graph<N>>) -> HashSet<ContentAddr>
+pub fn dsp_graphs<N>(registry: &gantz_ca::Registry<Graph<N>>) -> HashSet<ContentAddr>
 where
     N: ToNodeDsp + AsRefNode,
 {
-    let mut memo: HashMap<CommitAddr, bool> = HashMap::new();
+    let mut memo: HashMap<GraphAddr, bool> = HashMap::new();
     registry
-        .commits()
+        .graphs()
         .keys()
         .copied()
         .collect::<Vec<_>>()
         .into_iter()
-        .filter(|&ca| is_dsp_commit(registry, ca, &mut memo))
+        .filter(|&ga| is_dsp_graph(registry, ga, &mut memo))
         .map(ContentAddr::from)
         .collect()
 }
 
-/// Whether the graph committed at `ca` contains a DSP node, directly or
-/// transitively through references. Memoized in `memo` so repeated probes over
-/// one registry (e.g. per ref during a flatten) stay linear overall.
-pub(crate) fn is_dsp_commit<N>(
+/// Whether the graph at `ga` contains a DSP node, directly or transitively
+/// through references. Memoized in `memo` so repeated probes over one
+/// registry (e.g. per ref during a flatten) stay linear overall.
+pub(crate) fn is_dsp_graph<N>(
     registry: &gantz_ca::Registry<Graph<N>>,
-    ca: CommitAddr,
-    memo: &mut HashMap<CommitAddr, bool>,
+    ga: GraphAddr,
+    memo: &mut HashMap<GraphAddr, bool>,
 ) -> bool
 where
     N: ToNodeDsp + AsRefNode,
 {
-    let mut stack: Vec<CommitAddr> = Vec::new();
-    is_dsp(registry, ca, memo, &mut stack)
+    let mut stack: Vec<GraphAddr> = Vec::new();
+    is_dsp(registry, ga, memo, &mut stack)
 }
 
-/// Whether the graph at `ca` contains a DSP node, directly or transitively
-/// through references. Memoized per commit; reference cycles are treated as
+/// Whether the graph at `ga` contains a DSP node, directly or transitively
+/// through references. Memoized per graph; reference cycles are treated as
 /// non-DSP at the point of re-entry (a cycle cannot introduce a DSP node that
 /// its members do not already contain).
 fn is_dsp<N>(
     registry: &gantz_ca::Registry<Graph<N>>,
-    ca: CommitAddr,
-    memo: &mut HashMap<CommitAddr, bool>,
-    stack: &mut Vec<CommitAddr>,
+    ga: GraphAddr,
+    memo: &mut HashMap<GraphAddr, bool>,
+    stack: &mut Vec<GraphAddr>,
 ) -> bool
 where
     N: ToNodeDsp + AsRefNode,
 {
-    if let Some(&known) = memo.get(&ca) {
+    if let Some(&known) = memo.get(&ga) {
         return known;
     }
-    if stack.contains(&ca) {
+    if stack.contains(&ga) {
         return false;
     }
-    let Some(graph) = registry.commit_graph_ref(&ca) else {
-        memo.insert(ca, false);
+    let Some(graph) = registry.graph(&ga) else {
+        memo.insert(ga, false);
         return false;
     };
-    stack.push(ca);
+    stack.push(ga);
     let dsp = graph
         .node_indices()
         .any(|ix| graph[ix].to_node_dsp().is_some())
@@ -104,6 +104,6 @@ where
                 .is_some_and(|r| is_dsp(registry, r.content_addr().into(), memo, stack))
         });
     stack.pop();
-    memo.insert(ca, dsp);
+    memo.insert(ga, dsp);
     dsp
 }

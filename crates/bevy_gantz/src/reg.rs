@@ -53,14 +53,15 @@ pub fn timestamp() -> Duration {
 
 /// Look up a node by content address.
 ///
-/// Checks commit graphs in the registry first, then falls back to builtins.
+/// Checks graphs in the registry first (a graph in the registry IS a node),
+/// then falls back to builtins.
 pub fn lookup_node<'a, N: 'static + Node + Send + Sync>(
     registry: &'a ca::Registry<Graph<N>>,
     builtins: &'a dyn Builtins<Node = N>,
     ca: &ca::ContentAddr,
 ) -> Option<&'a dyn Node> {
-    let commit_ca = ca::CommitAddr::from(*ca);
-    if let Some(graph) = registry.commit_graph_ref(&commit_ca) {
+    let graph_ca = ca::GraphAddr::from(*ca);
+    if let Some(graph) = registry.graph(&graph_ca) {
         return Some(graph as &dyn Node);
     }
     builtins.instance(ca).map(|n| n as &dyn Node)
@@ -70,7 +71,7 @@ pub fn lookup_node<'a, N: 'static + Node + Send + Sync>(
 // Systems
 // ---------------------------------------------------------------------------
 
-/// Prune unreachable graphs and commits from the registry.
+/// Prune unreachable content and metadata from the registry.
 pub fn prune_unused<N>(
     mut registry: ResMut<Registry<N>>,
     builtins: Res<BuiltinNodes<N>>,
@@ -78,8 +79,10 @@ pub fn prune_unused<N>(
 ) where
     N: 'static + Node + Send + Sync,
 {
-    let get_node = |ca: &ca::ContentAddr| lookup_node(&registry, &**builtins, ca);
-    let head_iter = heads.iter().map(|h| &**h);
-    let required = gantz_core::reg::required_commits(&get_node, &registry, head_iter);
-    registry.prune_unreachable(&required);
+    let live = {
+        let get_node = |ca: &ca::ContentAddr| lookup_node(&registry, &**builtins, ca);
+        let head_iter = heads.iter().map(|h| &**h);
+        gantz_core::reg::live(&get_node, &registry, head_iter)
+    };
+    ca::prune(&mut registry.0, &live);
 }

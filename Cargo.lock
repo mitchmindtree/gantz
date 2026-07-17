@@ -993,6 +993,7 @@ dependencies = [
 name = "bevy_gantz"
 version = "0.4.0"
 dependencies = [
+ "base64",
  "bevy_app",
  "bevy_ecs",
  "bevy_input",

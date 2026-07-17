@@ -145,8 +145,6 @@ where
             .init_resource::<TraceCapture>()
             .init_resource::<PerfVm>()
             .init_resource::<PerfGui>()
-            .init_resource::<Views>()
-            .init_resource::<Demos>()
             .init_resource::<WindowedPanesRequested>()
             .init_resource::<SettingsTabs>()
             .init_resource::<ExtPanes>()
@@ -257,22 +255,12 @@ pub struct PerfGui(pub gantz_egui::widget::PerfCapture);
 #[derive(Resource, Default)]
 pub struct GuiState(pub gantz_egui::widget::GantzState);
 
-/// Views (layout + camera) for all known commits.
-#[derive(Resource, Default)]
-pub struct Views(pub HashMap<ca::CommitAddr, gantz_egui::SceneView>);
-
-/// Demo graph associations: maps a graph *name* to its associated `demo-*`
-/// graph name. Keyed by name (not commit) so the association survives edits,
-/// which mint a new commit but keep the name.
-#[derive(Resource, Default)]
-pub struct Demos(pub HashMap<String, String>);
-
 /// Names of base nodes baked into the binary.
 ///
 /// When present, these names are displayed with a `[base]` prefix and
 /// cannot be deleted from the Graphs pane.
 #[derive(Resource, Default)]
-pub struct BaseNames(pub gantz_ca::registry::Names);
+pub struct BaseNames(pub gantz_egui::reg::Names);
 
 /// Whether base node graphs are immutable (view-only) in the GUI.
 ///
@@ -382,7 +370,7 @@ pub struct ImportFileEvent {
 
 /// Event emitted when a base graph should be reset to its original state.
 #[derive(Event)]
-pub struct ResetBaseGraphEvent(pub String);
+pub struct ResetBaseGraphEvent(pub ca::Name);
 
 // ----------------------------------------------------------------------------
 // Response dispatch
@@ -573,32 +561,6 @@ impl DerefMut for GuiState {
     }
 }
 
-impl Deref for Views {
-    type Target = HashMap<ca::CommitAddr, gantz_egui::SceneView>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Views {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Deref for Demos {
-    type Target = HashMap<String, String>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Demos {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
 impl Deref for GraphView {
     type Target = gantz_egui::SceneView;
     fn deref(&self) -> &Self::Target {
@@ -619,9 +581,8 @@ impl DerefMut for GraphView {
 pub fn registry_ref<'a, N: 'static + Send + Sync>(
     registry: &'a Registry<N>,
     builtins: &'a BuiltinNodes<N>,
-    demos: &'a Demos,
 ) -> RegistryRef<'a, N> {
-    RegistryRef::new(&**registry, &*builtins.0, &demos.0)
+    RegistryRef::new(&**registry, &*builtins.0)
 }
 
 // ----------------------------------------------------------------------------
@@ -638,11 +599,11 @@ fn on_eval_entry_complete(trigger: On<EvalEntryComplete>, mut perf_vm: ResMut<Pe
 
 /// Initialize GUI state entry and components for opened head.
 ///
-/// Loads views from the `Views` resource and spawns `GraphView` + `HeadGuiState` components.
+/// Loads the view from the registry's view section and spawns `GraphView` +
+/// `HeadGuiState` components.
 pub fn on_head_opened<N: 'static + Send + Sync>(
     trigger: On<head::OpenedEvent>,
     registry: Res<Registry<N>>,
-    views: Res<Views>,
     mut gui_state: ResMut<GuiState>,
     mut cmds: Commands,
 ) {
@@ -652,7 +613,7 @@ pub fn on_head_opened<N: 'static + Send + Sync>(
     // Load the view for this head's commit.
     let head_view = registry
         .head_commit_ca(&event.head)
-        .and_then(|ca| views.get(ca).cloned())
+        .and_then(|ca| gantz_egui::section::view(&registry, &ca))
         .unwrap_or_default();
 
     cmds.entity(event.entity)
@@ -665,8 +626,7 @@ pub fn on_head_opened<N: 'static + Send + Sync>(
 /// Loads views for the new head and updates `GraphView` + `HeadGuiState` components.
 pub fn on_head_changed<N: 'static + ca::CaHash + Send + Sync>(
     trigger: On<head::ChangedEvent>,
-    registry: Res<Registry<N>>,
-    mut views: ResMut<Views>,
+    mut registry: ResMut<Registry<N>>,
     mut gui_state: ResMut<GuiState>,
     mut ctxs: EguiContexts,
     graph_views: Query<&GraphView>,
@@ -685,7 +645,9 @@ pub fn on_head_changed<N: 'static + ca::CaHash + Send + Sync>(
     // falling back to an empty layout - which the scene would destructively
     // auto-layout - and seed the store so the commit has a view before any
     // same-frame session announce.
-    let stored = event.new_commit.and_then(|ca| views.get(&ca).cloned());
+    let stored = event
+        .new_commit
+        .and_then(|ca| gantz_egui::section::view(&registry, &ca));
     let mut head_view = match stored {
         Some(view) => view,
         None => {
@@ -705,7 +667,7 @@ pub fn on_head_changed<N: 'static + ca::CaHash + Send + Sync>(
             };
             if let Some(new) = event.new_commit {
                 if !carried.layout.is_empty() {
-                    views.insert(new, carried.clone());
+                    gantz_egui::section::set_view(&mut registry.0, new, &carried);
                 }
             }
             carried
@@ -769,12 +731,11 @@ pub fn on_head_committed_resync<N>(
     _trigger: On<head::CommittedEvent>,
     mut registry: ResMut<Registry<N>>,
     mut heads: Query<head::OpenHeadData<N>, With<head::OpenHead>>,
-    mut views: ResMut<Views>,
 ) where
     N: 'static + Clone + ca::CaHash + gantz_egui::sync::AsNamedRefMut + Send + Sync,
 {
     let moves = gantz_egui::sync::resync(&mut registry, bevy_gantz::reg::timestamp());
-    refresh_moved_heads(&moves, &registry, &mut heads, &mut views);
+    refresh_moved_heads(&moves, &mut registry, &mut heads);
 }
 
 /// On a fork (branch from a head), give the fork independent nested children:
@@ -784,7 +745,6 @@ pub fn on_branched_head_fork_nested<N>(
     trigger: On<head::BranchedHeadEvent>,
     mut registry: ResMut<Registry<N>>,
     mut heads: Query<head::OpenHeadData<N>, With<head::OpenHead>>,
-    mut views: ResMut<Views>,
 ) where
     N: 'static + Clone + ca::CaHash + gantz_egui::sync::AsNamedRefMut + Send + Sync,
 {
@@ -802,7 +762,7 @@ pub fn on_branched_head_fork_nested<N>(
         old,
         new,
     ));
-    refresh_moved_heads(&moves, &registry, &mut heads, &mut views);
+    refresh_moved_heads(&moves, &mut registry, &mut heads);
 }
 
 /// Carry moved graphs' views forward to their new commits, and refresh any open
@@ -811,9 +771,8 @@ pub fn on_branched_head_fork_nested<N>(
 /// since the registry already holds this graph).
 fn refresh_moved_heads<N>(
     moves: &[gantz_egui::sync::Moved],
-    registry: &Registry<N>,
+    registry: &mut Registry<N>,
     heads: &mut Query<head::OpenHeadData<N>, With<head::OpenHead>>,
-    views: &mut Views,
 ) where
     N: 'static + Clone + Send + Sync,
 {
@@ -821,8 +780,10 @@ fn refresh_moved_heads<N>(
         return;
     }
     for m in moves {
-        if let Some(gv) = views.0.get(&m.old_commit).cloned() {
-            views.0.entry(m.new_commit).or_insert(gv);
+        if gantz_egui::section::view(registry, &m.new_commit).is_none() {
+            if let Some(gv) = gantz_egui::section::view(registry, &m.old_commit) {
+                gantz_egui::section::set_view(&mut registry.0, m.new_commit, &gv);
+            }
         }
     }
     for mut data in heads.iter_mut() {
@@ -844,7 +805,6 @@ pub fn on_create_node<N>(
     trigger: On<ForHead<gantz_egui::CreateNode>>,
     mut registry: ResMut<Registry<N>>,
     builtins: Res<BuiltinNodes<N>>,
-    demos: Res<Demos>,
     mut gui_state: ResMut<GuiState>,
     mut vms: NonSendMut<head::HeadVms>,
     mut cmds: Commands,
@@ -866,7 +826,7 @@ pub fn on_create_node<N>(
         return;
     };
     let editing = match &**data.head_ref {
-        ca::Head::Branch(name) => Some(name.clone()),
+        ca::Head::Branch(name) => Some(name.to_string()),
         ca::Head::Commit(_) => None,
     };
     let Ok(mut views) = views_query.get_mut(event.head) else {
@@ -882,7 +842,7 @@ pub fn on_create_node<N>(
         return;
     };
 
-    let node_reg = registry_ref(&registry, &builtins, &demos);
+    let node_reg = registry_ref(&registry, &builtins);
     let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
     gantz_egui::ops::create_node(
         node_reg.ca_registry(),
@@ -1008,7 +968,6 @@ pub fn on_inspect_edge<N>(
     trigger: On<ForHead<gantz_egui::InspectEdge>>,
     mut registry: ResMut<Registry<N>>,
     builtins: Res<BuiltinNodes<N>>,
-    demos: Res<Demos>,
     mut vms: NonSendMut<head::HeadVms>,
     mut cmds: Commands,
     mut heads: Query<head::OpenHeadData<N>, With<head::OpenHead>>,
@@ -1030,7 +989,7 @@ pub fn on_inspect_edge<N>(
         return;
     };
 
-    let node_reg = registry_ref(&registry, &builtins, &demos);
+    let node_reg = registry_ref(&registry, &builtins);
     let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
     gantz_egui::ops::inspect_edge(
         &get_node,
@@ -1058,7 +1017,6 @@ pub fn on_inspect_edge<N>(
 pub fn on_copy_nodes<N>(
     trigger: On<ForHead<gantz_egui::CopyNodes>>,
     registry: Res<Registry<N>>,
-    views: Res<Views>,
     mut clipboard: ResMut<bevy_egui::EguiClipboard>,
     mut heads: Query<(&mut head::WorkingGraph<N>, &GraphView), With<head::OpenHead>>,
 ) where
@@ -1078,7 +1036,7 @@ pub fn on_copy_nodes<N>(
         return;
     };
 
-    let text = gantz_egui::ops::copy_nodes(&registry, &views, &wg, gv, &event.data.0);
+    let text = gantz_egui::ops::copy_nodes(&registry, &wg, gv, &event.data.0);
     if let Some(text) = text {
         clipboard.set_text(&text);
     }
@@ -1095,8 +1053,6 @@ pub fn on_paste<N>(
     mut registry: ResMut<Registry<N>>,
     builtins: Res<BuiltinNodes<N>>,
     mut gui_state: ResMut<GuiState>,
-    mut views: ResMut<Views>,
-    mut demos: ResMut<Demos>,
     mut vms: NonSendMut<head::HeadVms>,
     mut clipboard: ResMut<bevy_egui::EguiClipboard>,
     mut cmds: Commands,
@@ -1129,7 +1085,7 @@ pub fn on_paste<N>(
         return;
     };
     let editing = match &**head_ref {
-        ca::Head::Branch(name) => Some(name.clone()),
+        ca::Head::Branch(name) => Some(name.to_string()),
         ca::Head::Commit(_) => None,
     };
     let Some(head_state) = gui_state.open_heads.get_mut(&**head_ref) else {
@@ -1140,8 +1096,6 @@ pub fn on_paste<N>(
     let pasted = gantz_egui::ops::paste(
         &mut registry,
         editing.as_deref(),
-        &mut views,
-        &mut demos,
         &mut wg,
         &mut gv,
         head_state,
@@ -1154,7 +1108,7 @@ pub fn on_paste<N>(
     // for existing nodes.
     if pasted {
         if let Some(vm) = vms.get_mut(&event.head) {
-            let node_reg = registry_ref(&registry, &builtins, &demos);
+            let node_reg = registry_ref(&registry, &builtins);
             let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
             gantz_core::graph::register(&get_node, &**wg, &[], vm);
         }
@@ -1168,7 +1122,6 @@ pub fn on_paste<N>(
 pub fn on_cut_nodes<N>(
     trigger: On<ForHead<gantz_egui::CutNodes>>,
     mut registry: ResMut<Registry<N>>,
-    views: Res<Views>,
     mut gui_state: ResMut<GuiState>,
     mut vms: NonSendMut<head::HeadVms>,
     mut clipboard: ResMut<bevy_egui::EguiClipboard>,
@@ -1208,7 +1161,6 @@ pub fn on_cut_nodes<N>(
 
     let text = gantz_egui::ops::cut_nodes(
         &registry,
-        &views,
         &mut wg,
         vm,
         &mut gv,
@@ -1230,8 +1182,6 @@ pub fn on_duplicate_nodes<N>(
     mut registry: ResMut<Registry<N>>,
     builtins: Res<BuiltinNodes<N>>,
     mut gui_state: ResMut<GuiState>,
-    mut views: ResMut<Views>,
-    mut demos: ResMut<Demos>,
     mut vms: NonSendMut<head::HeadVms>,
     mut cmds: Commands,
     mut heads: Query<
@@ -1260,7 +1210,7 @@ pub fn on_duplicate_nodes<N>(
         return;
     };
     let editing = match &**head_ref {
-        ca::Head::Branch(name) => Some(name.clone()),
+        ca::Head::Branch(name) => Some(name.to_string()),
         ca::Head::Commit(_) => None,
     };
     let Some(head_state) = gui_state.open_heads.get_mut(&**head_ref) else {
@@ -1271,8 +1221,6 @@ pub fn on_duplicate_nodes<N>(
     let duplicated = gantz_egui::ops::duplicate_nodes(
         &mut registry,
         editing.as_deref(),
-        &mut views,
-        &mut demos,
         &mut wg,
         &mut gv,
         head_state,
@@ -1283,7 +1231,7 @@ pub fn on_duplicate_nodes<N>(
     // initialized. Idempotent for existing nodes.
     if duplicated {
         if let Some(vm) = vms.get_mut(&event.head) {
-            let node_reg = registry_ref(&registry, &builtins, &demos);
+            let node_reg = registry_ref(&registry, &builtins);
             let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
             gantz_core::graph::register(&get_node, &**wg, &[], vm);
         }
@@ -1305,8 +1253,6 @@ pub fn on_merge_head<N>(
     trigger: On<ForHead<gantz_egui::MergeHead>>,
     mut registry: ResMut<Registry<N>>,
     builtins: Res<BuiltinNodes<N>>,
-    views: Res<Views>,
-    demos: Res<Demos>,
     mut gui_state: ResMut<GuiState>,
     mut vms: NonSendMut<head::HeadVms>,
     mut cmds: Commands,
@@ -1338,7 +1284,6 @@ pub fn on_merge_head<N>(
     let old_head = head_ref.0.clone();
     let outcome = gantz_egui::ops::merge_head(
         &mut registry,
-        &views,
         bevy_gantz::reg::timestamp(),
         &mut head_ref.0,
         &mut wg,
@@ -1362,7 +1307,7 @@ pub fn on_merge_head<N>(
             );
             // Re-register the root graph so merged-in nodes get their state
             // initialized. Idempotent for existing nodes.
-            let node_reg = registry_ref(&registry, &builtins, &demos);
+            let node_reg = registry_ref(&registry, &builtins);
             let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
             gantz_core::graph::register(&get_node, &**wg, &[], vm);
             // The op already committed (with both parents), so fire the
@@ -1435,8 +1380,6 @@ pub fn on_export_head<N>(
     trigger: On<ExportHeadEvent>,
     registry: Res<Registry<N>>,
     builtins: Res<BuiltinNodes<N>>,
-    views: Res<Views>,
-    demos: Res<Demos>,
     heads: Query<&head::HeadRef, With<head::OpenHead>>,
 ) where
     N: 'static
@@ -1455,16 +1398,10 @@ pub fn on_export_head<N>(
     };
     let head: &ca::Head = &**head_ref;
 
-    let node_reg = registry_ref(&registry, &builtins, &demos);
+    let node_reg = registry_ref(&registry, &builtins);
     let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
 
-    let text = match gantz_egui::export::export_heads_sexpr(
-        &get_node,
-        &registry,
-        &views,
-        &demos,
-        [head],
-    ) {
+    let text = match gantz_egui::export::export_heads_sexpr(&get_node, &registry, [head]) {
         Ok(s) => s,
         Err(e) => {
             log::error!("ExportHead: failed to serialize: {e}");
@@ -1500,8 +1437,6 @@ pub fn on_export_all_named<N>(
     _trigger: On<ExportAllNamedEvent>,
     registry: Res<Registry<N>>,
     builtins: Res<BuiltinNodes<N>>,
-    views: Res<Views>,
-    demos: Res<Demos>,
 ) where
     N: 'static
         + serde::Serialize
@@ -1512,13 +1447,12 @@ pub fn on_export_all_named<N>(
         + Send
         + Sync,
 {
-    let node_reg = registry_ref(&registry, &builtins, &demos);
+    let node_reg = registry_ref(&registry, &builtins);
     let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
 
     let named_heads: Vec<ca::Head> = registry
-        .names()
-        .keys()
-        .map(|name| ca::Head::Branch(name.clone()))
+        .heads()
+        .map(|(name, _)| ca::Head::Branch(name.clone()))
         .collect();
 
     if named_heads.is_empty() {
@@ -1526,19 +1460,14 @@ pub fn on_export_all_named<N>(
         return;
     }
 
-    let text = match gantz_egui::export::export_heads_sexpr(
-        &get_node,
-        &registry,
-        &views,
-        &demos,
-        named_heads.iter(),
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("ExportAllNamed: failed to serialize: {e}");
-            return;
-        }
-    };
+    let text =
+        match gantz_egui::export::export_heads_sexpr(&get_node, &registry, named_heads.iter()) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("ExportAllNamed: failed to serialize: {e}");
+                return;
+            }
+        };
 
     let dialog = rfd::AsyncFileDialog::new()
         .set_title("Export All Named Graphs")
@@ -1565,8 +1494,6 @@ pub fn on_import_file<N>(
     trigger: On<ImportFileEvent>,
     mut registry: ResMut<Registry<N>>,
     builtins: Res<BuiltinNodes<N>>,
-    mut views: ResMut<Views>,
-    mut demos: ResMut<Demos>,
     mut cmds: Commands,
 ) where
     N: 'static
@@ -1590,18 +1517,18 @@ pub fn on_import_file<N>(
 
     // Compute the root name before merge if we might open a head.
     let root_name = if event.open_head {
-        let node_reg = registry_ref(&registry, &builtins, &demos);
+        let node_reg = registry_ref(&registry, &builtins);
         let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
         gantz_egui::export::unique_root_name(&get_node, &export)
     } else {
         None
     };
 
-    let result = gantz_egui::export::merge_with(&mut registry, &mut views, &mut demos, export);
+    let report = registry.merge(export);
     log::info!(
         "Imported: {} names added, {} replaced",
-        result.names_added.len(),
-        result.names_replaced.len(),
+        report.heads_added.len(),
+        report.heads_replaced.len(),
     );
 
     if let Some(name) = root_name {
@@ -1618,6 +1545,7 @@ pub fn on_reset_base_graph<N>(
     mut registry: ResMut<Registry<N>>,
 ) where
     N: 'static
+        + Node
         + Clone
         + serde::Serialize
         + serde::de::DeserializeOwned
@@ -1633,34 +1561,39 @@ pub fn on_reset_base_graph<N>(
     // source parses at BASE_TIMESTAMP, so addresses match the startup parse.
     let Some(source) = name_sources
         .0
-        .get(name.as_str())
+        .get(&name.to_string())
         .and_then(|source_name| sources.0.iter().find(|s| s.name == *source_name))
     else {
         log::warn!("ResetBaseGraph: no base source recorded for '{name}'");
         return;
     };
-    let export: gantz_egui::export::Export<Graph<N>> =
-        match gantz_egui::export::parse_export_seeded_at::<N>(
-            source.bytes,
-            crate::base::BASE_TIMESTAMP,
-            &base_names.0,
-        ) {
-            Ok(e) => e,
-            Err(e) => {
-                log::error!(
-                    "ResetBaseGraph: failed to parse base source `{}`: {e}",
-                    source.name
-                );
-                return;
-            }
-        };
-    // Extract just the commits reachable from the target name (all parents,
+    let seed = base::seed_graph_addrs(&base_names.0, &registry);
+    let export: gantz_ca::Registry<Graph<N>> = match gantz_egui::export::parse_export_seeded_at::<N>(
+        source.bytes,
+        crate::base::BASE_TIMESTAMP,
+        &seed,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            log::error!(
+                "ResetBaseGraph: failed to parse base source `{}`: {e}",
+                source.name
+            );
+            return;
+        }
+    };
+    // Extract just the content reachable from the target name (all parents,
     // so merge ancestry survives a reset).
-    if let Some(&base_commit_ca) = export.registry.names().get(name) {
-        let required: std::collections::HashSet<_> =
-            ca::ancestors(export.registry.commits(), base_commit_ca).collect();
-        let mut subset = export.registry.export(&required);
-        subset.insert_name(name.clone(), base_commit_ca);
+    if let Some(base_commit_ca) = export.head(name) {
+        let get_node = |ca: &ca::ContentAddr| {
+            export
+                .graph(&ca::GraphAddr::from(*ca))
+                .map(|g| g as &dyn Node)
+        };
+        let live =
+            gantz_core::reg::live_for_heads(&get_node, &export, [ca::Head::Commit(base_commit_ca)]);
+        let mut subset = ca::export(&export, &live);
+        subset.set_head(name.clone(), base_commit_ca);
         registry.merge(subset);
         log::info!("Reset base graph '{name}' to original version");
     } else {
@@ -1684,21 +1617,25 @@ pub fn on_reset_base_graph<N>(
 /// (see [`settle_layout`]). The camera is excluded from undo, so it tracks the
 /// live view in place every frame.
 pub fn persist_camera_and_seed<N: 'static + Send + Sync>(
-    registry: Res<Registry<N>>,
-    mut views: ResMut<Views>,
+    mut registry: ResMut<Registry<N>>,
     heads: Query<(&head::HeadRef, &GraphView), With<head::OpenHead>>,
 ) {
     for (head_ref, head_view) in heads.iter() {
-        let Some(commit_addr) = registry.head_commit_ca(&**head_ref).copied() else {
+        let Some(commit_addr) = registry.head_commit_ca(&**head_ref) else {
             continue;
         };
-        match views.get_mut(&commit_addr) {
+        match gantz_egui::section::view(&registry, &commit_addr) {
             // Layout frozen as the undo baseline; only the camera tracks live.
-            Some(view) => view.camera = head_view.camera,
+            Some(mut view) => {
+                if view.camera != head_view.camera {
+                    view.camera = head_view.camera;
+                    gantz_egui::section::set_view(&mut registry.0, commit_addr, &view);
+                }
+            }
             // Seed the baseline once the scene has laid the graph out. Guarding
             // on a non-empty layout avoids capturing an empty pre-layout frame.
             None if !head_view.layout.is_empty() => {
-                views.insert(commit_addr, (**head_view).clone());
+                gantz_egui::section::set_view(&mut registry.0, commit_addr, head_view);
             }
             None => {}
         }
@@ -1718,7 +1655,6 @@ pub fn persist_camera_and_seed<N: 'static + Send + Sync>(
 /// [`DebouncedInputEvent`]: bevy_gantz::debounced_input::DebouncedInputEvent
 pub fn settle_layout<N>(
     mut registry: ResMut<Registry<N>>,
-    mut views: ResMut<Views>,
     mut gui_state: ResMut<GuiState>,
     mut ctxs: EguiContexts,
     mut heads: Query<(&mut head::HeadRef, &GraphView), With<head::OpenHead>>,
@@ -1729,7 +1665,6 @@ pub fn settle_layout<N>(
         let old_head = (**head_ref).clone();
         let Some(new_commit) = gantz_egui::ops::commit_layout(
             &mut registry,
-            &views,
             bevy_gantz::reg::timestamp(),
             &mut head_ref,
             head_view,
@@ -1737,8 +1672,8 @@ pub fn settle_layout<N>(
             continue;
         };
         // Freeze the new commit's layout baseline this frame, before any
-        // debounce-gated `save_views`/export reads the `Views` resource.
-        views.insert(new_commit, (**head_view).clone());
+        // debounce-gated save/export reads the registry's view section.
+        gantz_egui::section::set_view(&mut registry.0, new_commit, head_view);
         // Clear redo (a new commit invalidates it) and migrate GUI state.
         let new_head = (**head_ref).clone();
         gui_state.migrate_head(&old_head, &new_head, true);
@@ -1763,24 +1698,6 @@ fn poll_import_task(task: Option<ResMut<ImportTask>>, mut cmds: Commands) {
             });
         }
     }
-}
-
-/// Prune views for unreachable commits.
-///
-/// This should run after `reg::prune_unused` to clean up views for commits
-/// that are no longer reachable from any open head.
-pub fn prune_views<N: 'static + Node + Send + Sync>(
-    registry: Res<Registry<N>>,
-    builtins: Res<BuiltinNodes<N>>,
-    demos: Res<Demos>,
-    mut views: ResMut<Views>,
-    heads: Query<&head::HeadRef, With<head::OpenHead>>,
-) {
-    let node_reg = registry_ref(&registry, &builtins, &demos);
-    let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
-    let head_iter = heads.iter().map(|h| &**h);
-    let required = gantz_core::reg::required_commits(&get_node, &registry, head_iter);
-    views.retain(|ca, _| required.contains(ca));
 }
 
 /// Update the Gantz GUI and process widget responses.
@@ -1832,7 +1749,6 @@ pub fn update<N>(
         Res<base::BaseSources>,
         ResMut<base::BaseNameSources>,
     ),
-    mut demos: ResMut<Demos>,
     dispatchers: Res<ResponseDispatchers>,
     mut cmds: Commands,
 ) -> Result
@@ -1869,7 +1785,7 @@ where
     let mut access = HeadAccess::new(&tab_order, &mut heads_query, &mut vms);
 
     // Construct node registry on-demand for the widget (with demo + doc lookup).
-    let node_reg = registry_ref(&registry, &builtins, &demos);
+    let node_reg = registry_ref(&registry, &builtins);
 
     let level = bevy_log::tracing_subscriber::filter::LevelFilter::current();
 
@@ -1923,7 +1839,6 @@ where
                 .collect();
             let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
-                .demos(&demos.0)
                 .compile_config(current_compile_config)
                 .validate_change_tracking(current_validate_change_tracking)
                 .trace_capture(trace_capture.0.clone(), level)
@@ -1961,7 +1876,6 @@ where
         &mut focused,
         &mut heads_query,
         &mut registry,
-        &mut demos,
         &base_names,
         &mut compile_config,
         &mut change_validation,
@@ -1993,7 +1907,6 @@ pub(crate) fn handle_gantz_response<N>(
     focused: &mut head::FocusedHead,
     heads_query: &mut Query<OpenHeadViews<N>, With<head::OpenHead>>,
     registry: &mut Registry<N>,
-    demos: &mut Demos,
     base_names: &BaseNames,
     compile_config: &mut CompileConfig,
     change_validation: &mut bevy_gantz::ValidateCommitted,
@@ -2024,12 +1937,12 @@ pub(crate) fn handle_gantz_response<N>(
         for mut data in heads_query.iter_mut() {
             if let ca::Head::Branch(head_name) = &**data.core.head_ref {
                 if *head_name == name {
-                    let commit_ca = *registry.head_commit_ca(&*data.core.head_ref).unwrap();
+                    let commit_ca = registry.head_commit_ca(&data.core.head_ref).unwrap();
                     **data.core.head_ref = ca::Head::Commit(commit_ca);
                 }
             }
         }
-        registry.remove_name(&name);
+        registry.remove_head(&name);
     }
 
     // Trigger events for head operations (handled by observers).
@@ -2082,17 +1995,17 @@ pub(crate) fn handle_gantz_response<N>(
     if let Some((ca::Head::Branch(graph_name), demo_val)) = &response.demo_changed {
         match demo_val {
             Some(demo) => {
-                demos.insert(graph_name.clone(), demo.clone());
+                gantz_egui::section::set_demo(&mut registry.0, graph_name.clone(), demo.clone());
             }
             None => {
-                demos.remove(graph_name);
+                gantz_egui::section::remove_demo(&mut registry.0, graph_name);
             }
         }
     }
 
     // Handle a graph description edit (keyed by the graph's name).
     if let Some((ca::Head::Branch(name), description)) = &response.description_changed {
-        registry.set_description(name.clone(), description.clone());
+        gantz_egui::section::set_description(&mut registry.0, name.clone(), description.clone());
     }
 
     // Re-attribute a graph to a different base source. Durable wherever the
@@ -2101,7 +2014,7 @@ pub(crate) fn handle_gantz_response<N>(
     if let Some((ca::Head::Branch(name), source)) = &response.base_source_changed {
         match base_sources.0.iter().find(|s| s.name == source.as_str()) {
             Some(s) => {
-                base_name_sources.0.insert(name.clone(), s.name);
+                base_name_sources.0.insert(name.to_string(), s.name);
             }
             None => log::warn!("base source `{source}` is not registered"),
         }
@@ -2117,7 +2030,7 @@ pub(crate) fn handle_gantz_response<N>(
     // Handle "reset all demos" - re-merge every `demo-*` base graph.
     if response.reset_all_demos {
         for name in base_names.0.keys() {
-            if name.starts_with("demo-") {
+            if name.to_string().starts_with("demo-") {
                 cmds.trigger(ResetBaseGraphEvent(name.clone()));
             }
         }

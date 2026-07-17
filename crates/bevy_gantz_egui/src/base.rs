@@ -25,19 +25,11 @@
 use bevy_ecs::prelude::*;
 use bevy_gantz::reg::Registry;
 use bevy_log as log;
+use gantz_ca::Name;
 use gantz_core::node::graph::Graph;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::BaseNames;
-
-/// Fixed timestamp used to stamp the base's hand-authored (uncommitted) graphs.
-///
-/// Every base source is parsed at startup *and* again on demo reset; both must
-/// agree on the synthesized commit addresses, otherwise a reset demo's `ref`s
-/// point at commits that are absent from the already-loaded registry (its
-/// primitives were stamped at startup). A constant makes those addresses
-/// reproducible.
-pub const BASE_TIMESTAMP: gantz_ca::Timestamp = std::time::Duration::ZERO;
 
 /// One domain's baked-in base `.gantz` export.
 pub struct BaseSource {
@@ -65,98 +57,6 @@ pub struct BaseSources(pub Vec<BaseSource>);
 #[derive(Default, Resource)]
 pub struct BaseNameSources(pub HashMap<String, &'static str>);
 
-/// Startup system that deserializes each embedded base source and merges it
-/// into the registry, populating [`BaseNames`] and [`BaseNameSources`].
-///
-/// A source may reference names another source defines, so loading runs to a
-/// fixpoint: each round parses every still-pending source seeded with the
-/// names loaded so far, deferring sources whose references do not resolve
-/// yet. Push order therefore does not matter - sources load in dependency
-/// order. A source whose references never resolve (or that fails to parse
-/// outright) is logged and dropped.
-pub fn load<N>(
-    sources: Res<BaseSources>,
-    mut registry: ResMut<Registry<N>>,
-    mut base_names: ResMut<BaseNames>,
-    mut name_sources: ResMut<BaseNameSources>,
-    mut views: ResMut<crate::Views>,
-    mut demos: ResMut<crate::Demos>,
-) where
-    N: 'static
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_ca::CaHash
-        + gantz_format::NodeSugar
-        + Send
-        + Sync,
-{
-    let mut pending: Vec<&BaseSource> = sources.0.iter().collect();
-    loop {
-        let mut deferred: Vec<&BaseSource> = Vec::new();
-        for source in pending.iter().copied() {
-            let export: gantz_egui::export::Export<Graph<N>> =
-                match gantz_egui::export::parse_export_seeded_at(
-                    source.bytes,
-                    BASE_TIMESTAMP,
-                    &base_names.0,
-                ) {
-                    Ok(e) => e,
-                    // An unresolved reference may resolve once another
-                    // source loads - retry next round.
-                    Err(gantz_egui::export::ParseExportError::Format(e))
-                        if matches!(e.kind, gantz_format::ErrorKind::MissingDependency(_)) =>
-                    {
-                        deferred.push(source);
-                        continue;
-                    }
-                    Err(e) => {
-                        log::error!("base source `{}`: {e}", source.name);
-                        continue;
-                    }
-                };
-            for name in export.registry.names().keys() {
-                if let Some(prev) = name_sources.0.get(name.as_str()) {
-                    log::warn!(
-                        "base source `{}` redefines `{name}` from source `{prev}` \
-                         (last source wins)",
-                        source.name,
-                    );
-                }
-                name_sources.0.insert(name.clone(), source.name);
-            }
-            base_names.0.extend(export.registry.names().clone());
-            // NOTE: the merge's `names_replaced` is deliberately not logged -
-            // base names replacing a user's persisted edits on launch is the
-            // by-design authoritative reset, not a collision. Source-vs-source
-            // collisions are the ones worth warning about, caught above.
-            registry.merge(export.registry);
-            views.0.extend(export.views);
-            demos.0.extend(export.demos);
-        }
-        // Done, or stuck: no deferred source can make progress once a full
-        // round loads nothing new.
-        if deferred.is_empty() {
-            break;
-        }
-        if deferred.len() == pending.len() {
-            for source in deferred {
-                if let Err(err) = gantz_egui::export::parse_export_seeded_at::<N>(
-                    source.bytes,
-                    BASE_TIMESTAMP,
-                    &base_names.0,
-                ) {
-                    log::error!(
-                        "base source `{}` has unresolvable references: {err}",
-                        source.name,
-                    );
-                }
-            }
-            break;
-        }
-        pending = deferred;
-    }
-}
-
 /// Paths to write each base source back to (a [`BaseSource::name`] to file
 /// path map), plus the source that receives names with no recorded
 /// attribution (graphs created during the session).
@@ -173,6 +73,117 @@ pub struct ExportPaths {
     pub default_source: &'static str,
 }
 
+/// Fixed timestamp used to stamp the base's hand-authored (uncommitted) graphs.
+///
+/// Every base source is parsed at startup *and* again on demo reset; both must
+/// agree on the synthesized commit addresses, otherwise a reset demo's `ref`s
+/// point at commits that are absent from the already-loaded registry (its
+/// primitives were stamped at startup). A constant makes those addresses
+/// reproducible.
+pub const BASE_TIMESTAMP: gantz_ca::Timestamp = std::time::Duration::ZERO;
+
+/// Startup system that deserializes each embedded base source and merges it
+/// into the registry, populating [`BaseNames`] and [`BaseNameSources`].
+///
+/// A source may reference names another source defines, so loading runs to a
+/// fixpoint: each round parses every still-pending source seeded with the
+/// names loaded so far, deferring sources whose references do not resolve
+/// yet. Push order therefore does not matter - sources load in dependency
+/// order. A source whose references never resolve (or that fails to parse
+/// outright) is logged and dropped.
+pub fn load<N>(
+    sources: Res<BaseSources>,
+    mut registry: ResMut<Registry<N>>,
+    mut base_names: ResMut<BaseNames>,
+    mut name_sources: ResMut<BaseNameSources>,
+) where
+    N: 'static
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + gantz_ca::CaHash
+        + gantz_format::NodeSugar
+        + Send
+        + Sync,
+{
+    let mut pending: Vec<&BaseSource> = sources.0.iter().collect();
+    loop {
+        let mut deferred: Vec<&BaseSource> = Vec::new();
+        for source in pending.iter().copied() {
+            let seed = seed_graph_addrs(&base_names.0, &registry);
+            let parsed: gantz_ca::Registry<Graph<N>> =
+                match gantz_egui::export::parse_export_seeded_at(
+                    source.bytes,
+                    BASE_TIMESTAMP,
+                    &seed,
+                ) {
+                    Ok(e) => e,
+                    // An unresolved reference may resolve once another
+                    // source loads - retry next round.
+                    Err(gantz_egui::export::ParseExportError::Format(e))
+                        if matches!(e.kind, gantz_format::ErrorKind::MissingDependency(_)) =>
+                    {
+                        deferred.push(source);
+                        continue;
+                    }
+                    Err(e) => {
+                        log::error!("base source `{}`: {e}", source.name);
+                        continue;
+                    }
+                };
+            for (name, ca) in parsed.heads() {
+                let display = name.to_string();
+                if let Some(prev) = name_sources.0.get(&display) {
+                    log::warn!(
+                        "base source `{}` redefines `{name}` from source `{prev}` \
+                         (last source wins)",
+                        source.name,
+                    );
+                }
+                name_sources.0.insert(display, source.name);
+                base_names.0.insert(name.clone(), ca);
+            }
+            // The base's GUI metadata (demos, views) must win over the user's
+            // persisted entries: the demo/view sections merge KeepExisting, so
+            // reinsert the parsed entries explicitly after the merge.
+            let demos: Vec<_> = gantz_egui::section::demos(&parsed).collect();
+            let views: Vec<_> = gantz_egui::section::views(&parsed).collect();
+            // NOTE: the merge's `heads_replaced` is deliberately not logged -
+            // base names replacing a user's persisted edits on launch is the
+            // by-design authoritative reset, not a collision. Source-vs-source
+            // collisions are the ones worth warning about, caught above.
+            registry.merge(parsed);
+            for (name, demo) in demos {
+                gantz_egui::section::set_demo(&mut registry.0, name, demo);
+            }
+            for (ca, view) in views {
+                gantz_egui::section::set_view(&mut registry.0, ca, &view);
+            }
+        }
+        // Done, or stuck: no deferred source can make progress once a full
+        // round loads nothing new.
+        if deferred.is_empty() {
+            break;
+        }
+        if deferred.len() == pending.len() {
+            let seed = seed_graph_addrs(&base_names.0, &registry);
+            for source in deferred {
+                if let Err(err) = gantz_egui::export::parse_export_seeded_at::<N>(
+                    source.bytes,
+                    BASE_TIMESTAMP,
+                    &seed,
+                ) {
+                    log::error!(
+                        "base source `{}` has unresolvable references: {err}",
+                        source.name,
+                    );
+                }
+            }
+            break;
+        }
+        pending = deferred;
+    }
+}
+
 /// System that exports every named graph back to its owning source's file
 /// (see [`ExportPaths`] and [`BaseNameSources`]).
 ///
@@ -182,8 +193,6 @@ pub fn export_to_file<N>(
     paths: Res<ExportPaths>,
     name_sources: Res<BaseNameSources>,
     registry: Res<Registry<N>>,
-    views: Res<crate::Views>,
-    demos: Res<crate::Demos>,
 ) where
     N: 'static
         + serde::Serialize
@@ -194,7 +203,8 @@ pub fn export_to_file<N>(
         + Send
         + Sync,
 {
-    let partitioned = partition_names(registry.names().keys(), &name_sources, paths.default_source);
+    let names: Vec<Name> = registry.heads().map(|(name, _)| name.clone()).collect();
+    let partitioned = partition_names(&names, &name_sources, paths.default_source);
     for (source, names) in &partitioned {
         let Some(path) = paths.paths.get(source) else {
             log::warn!(
@@ -207,7 +217,8 @@ pub fn export_to_file<N>(
         // Exactly this source's names, with refs into other sources written
         // by name only (no transitive closure) - loading resolves them via
         // the seeded parse.
-        match gantz_egui::export::export_names_sexpr_named(&registry, &views, &demos.0, names) {
+        let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+        match gantz_egui::export::export_names_sexpr_named(&registry, &names) {
             Ok(text) => {
                 if let Err(e) = std::fs::write(path, text) {
                     log::error!("export_to_file: failed to write {path}: {e}");
@@ -228,8 +239,6 @@ pub fn export_to_file<N>(
 pub fn export_all_named<N>(
     registry: &Registry<N>,
     builtins: &bevy_gantz::BuiltinNodes<N>,
-    views: &crate::Views,
-    demos: &crate::Demos,
 ) -> Option<String>
 where
     N: 'static
@@ -241,23 +250,31 @@ where
         + Send
         + Sync,
 {
-    let node_reg = crate::registry_ref(registry, builtins, demos);
+    let node_reg = crate::registry_ref(registry, builtins);
     let get_node = |ca: &gantz_ca::ContentAddr| node_reg.node(ca);
 
     let named_heads: Vec<gantz_ca::Head> = registry
-        .names()
-        .keys()
-        .map(|name| gantz_ca::Head::Branch(name.clone()))
+        .heads()
+        .map(|(name, _)| gantz_ca::Head::Branch(name.clone()))
         .collect();
 
-    gantz_egui::export::export_heads_sexpr_named(
-        &get_node,
-        registry,
-        views,
-        &demos.0,
-        named_heads.iter(),
-    )
-    .ok()
+    gantz_egui::export::export_heads_sexpr_named(&get_node, registry, named_heads.iter()).ok()
+}
+
+/// The name -> head graph address seed for a seeded base parse: each known
+/// base name resolved to its head commit's graph in the given registry (see
+/// [`gantz_egui::export::parse_export_seeded_at`]).
+pub fn seed_graph_addrs<G>(
+    names: &gantz_egui::reg::Names,
+    registry: &gantz_ca::Registry<G>,
+) -> BTreeMap<String, gantz_ca::GraphAddr> {
+    names
+        .iter()
+        .filter_map(|(name, ca)| {
+            let commit = registry.commits().get(ca)?;
+            Some((name.to_string(), commit.graph))
+        })
+        .collect()
 }
 
 /// Partition base names by their owning source for per-source write-back.
@@ -268,24 +285,24 @@ where
 /// names (e.g. graphs created during an `update-base` session) are attributed
 /// to `default_source`.
 pub fn partition_names<'a>(
-    names: impl IntoIterator<Item = &'a String>,
+    names: impl IntoIterator<Item = &'a Name>,
     name_sources: &BaseNameSources,
     default_source: &'static str,
-) -> std::collections::BTreeMap<&'static str, Vec<String>> {
+) -> std::collections::BTreeMap<&'static str, Vec<Name>> {
     fn source_of(
-        name: &str,
+        name: &Name,
         name_sources: &BaseNameSources,
         default_source: &'static str,
     ) -> &'static str {
-        if let Some(&source) = name_sources.0.get(name) {
+        if let Some(&source) = name_sources.0.get(&name.to_string()) {
             return source;
         }
-        match name.rsplit_once(gantz_egui::node::NESTED_SEP) {
-            Some((parent, _)) => source_of(parent, name_sources, default_source),
+        match name.parent() {
+            Some(parent) => source_of(&parent, name_sources, default_source),
             None => default_source,
         }
     }
-    let mut partitioned = std::collections::BTreeMap::<&'static str, Vec<String>>::new();
+    let mut partitioned = std::collections::BTreeMap::<&'static str, Vec<Name>>::new();
     for name in names {
         let source = source_of(name, name_sources, default_source);
         partitioned.entry(source).or_default().push(name.clone());
@@ -297,6 +314,10 @@ pub fn partition_names<'a>(
 mod tests {
     use super::*;
 
+    fn name(s: &str) -> Name {
+        s.parse().unwrap()
+    }
+
     /// Attributed names route to their source, unattributed names to the
     /// default source.
     #[test]
@@ -304,20 +325,13 @@ mod tests {
         let mut name_sources = BaseNameSources::default();
         name_sources.0.insert("add".to_string(), "gantz");
         name_sources.0.insert("demo-sine".to_string(), "plyphon");
-        let names = [
-            "add".to_string(),
-            "demo-sine".to_string(),
-            "new".to_string(),
-        ];
+        let names = [name("add"), name("demo-sine"), name("new")];
         let partitioned = partition_names(names.iter(), &name_sources, "gantz");
         assert_eq!(
             partitioned.get("gantz"),
-            Some(&vec!["add".to_string(), "new".to_string()]),
+            Some(&vec![name("add"), name("new")]),
         );
-        assert_eq!(
-            partitioned.get("plyphon"),
-            Some(&vec!["demo-sine".to_string()])
-        );
+        assert_eq!(partitioned.get("plyphon"), Some(&vec![name("demo-sine")]));
     }
 
     /// An unrecorded nested name follows its parent's attribution, however
@@ -327,21 +341,18 @@ mod tests {
         let mut name_sources = BaseNameSources::default();
         name_sources.0.insert("demo-sine".to_string(), "plyphon");
         let names = [
-            "demo-sine:child".to_string(),
-            "demo-sine:child:grandchild".to_string(),
-            "orphan:child".to_string(),
+            name("demo-sine:child"),
+            name("demo-sine:child:grandchild"),
+            name("orphan:child"),
         ];
         let partitioned = partition_names(names.iter(), &name_sources, "gantz");
         assert_eq!(
             partitioned.get("plyphon"),
             Some(&vec![
-                "demo-sine:child".to_string(),
-                "demo-sine:child:grandchild".to_string(),
+                name("demo-sine:child"),
+                name("demo-sine:child:grandchild"),
             ]),
         );
-        assert_eq!(
-            partitioned.get("gantz"),
-            Some(&vec!["orphan:child".to_string()]),
-        );
+        assert_eq!(partitioned.get("gantz"), Some(&vec![name("orphan:child")]));
     }
 }

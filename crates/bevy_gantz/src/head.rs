@@ -200,6 +200,14 @@ pub struct FocusedHead(pub Option<Entity>);
 pub struct HeadTabOrder(pub Vec<Entity>);
 
 // ----------------------------------------------------------------------------
+// Consts
+// ----------------------------------------------------------------------------
+
+/// The id of the shared graph-description section, mirrored by the GUI
+/// layer's typed declaration (`gantz_egui::section::Descriptions`).
+pub const DESCRIPTIONS_ID: &str = "gantz.description";
+
+// ----------------------------------------------------------------------------
 // Deref impls
 // ----------------------------------------------------------------------------
 
@@ -281,6 +289,36 @@ pub fn find_entity(
         .iter()
         .find(|(_, head_ref)| &***head_ref == head)
         .map(|(entity, _)| entity)
+}
+
+/// The stored description for the named graph, if any.
+///
+/// Reads the shared `gantz.description` section (see
+/// [`DESCRIPTIONS_ID`]) directly so this crate stays independent of the
+/// GUI layer that declares the typed accessor.
+pub fn description<G>(reg: &ca::Registry<G>, name: &ca::Name) -> Option<String> {
+    let key = ca::Key::Name(name.clone());
+    reg.section_entry(DESCRIPTIONS_ID, &key)
+        .and_then(ca::section::value_from_datum)
+}
+
+/// Store a description for the named graph in the shared `gantz.description`
+/// section. An empty string removes the entry.
+pub fn set_description<G>(reg: &mut ca::Registry<G>, name: ca::Name, description: String) {
+    let key = ca::Key::Name(name);
+    if description.is_empty() {
+        reg.remove_section_entry(DESCRIPTIONS_ID, &key);
+    } else {
+        ca::section_insert_datum(
+            reg,
+            DESCRIPTIONS_ID,
+            ca::MergePolicy::KeepExisting,
+            ca::Liveness::WithName,
+            key,
+            &description,
+        )
+        .expect("a `String` always encodes as a datum");
+    }
 }
 
 /// Check if the given head is the currently focused head.
@@ -378,13 +416,11 @@ pub fn on_replace<N>(
     // for every node present on both sides) and reset the memo so `vm::sync`
     // recompiles.
     // Note: HeadGuiState and GraphViews are updated by GantzEguiPlugin observer.
-    let old_ca = old_head
-        .as_ref()
-        .and_then(|h| registry.head_commit_ca(h).copied());
+    let old_ca = old_head.as_ref().and_then(|h| registry.head_commit_ca(h));
     let old_graph = old_head
         .as_ref()
         .and_then(|h| registry.head_commit(h).map(|c| c.graph));
-    let new_ca = registry.head_commit_ca(new_head).copied();
+    let new_ca = registry.head_commit_ca(new_head);
     let new_graph = registry.head_commit(new_head).map(|c| c.graph);
     let same_graph = matches!((old_graph, new_graph), (Some(a), Some(b)) if a == b);
     if same_graph {
@@ -465,9 +501,10 @@ pub fn on_branch_head<N>(
     N: 'static + Send + Sync,
 {
     let BranchHeadEvent { original, new_name } = trigger.event();
+    let new_name: ca::Name = new_name.parse().expect("infallible");
 
     // Get commit CA from original head.
-    let Some(commit_ca) = registry.head_commit_ca(original).copied() else {
+    let Some(commit_ca) = registry.head_commit_ca(original) else {
         log::error!("Failed to get commit address for head: {:?}", original);
         return;
     };
@@ -481,12 +518,12 @@ pub fn on_branch_head<N>(
         });
 
     // Insert new branch name pointing to the fresh commit.
-    registry.insert_name(new_name.clone(), new_commit_ca);
+    registry.set_head(new_name.clone(), new_commit_ca);
 
     // Inherit the original graph's description, if any.
     if let ca::Head::Branch(orig_name) = original {
-        if let Some(desc) = registry.description(orig_name).map(str::to_string) {
-            registry.set_description(new_name.clone(), desc);
+        if let Some(desc) = description(&registry, orig_name) {
+            set_description(&mut registry, new_name.clone(), desc);
         }
     }
 
@@ -524,9 +561,9 @@ pub fn on_move_branch<N>(
     // Capture the current commit before moving the branch pointer so we can
     // detect a same-graph move (a layout-only undo/redo) and migrate node
     // state below.
-    let old_ca = registry.head_commit_ca(&head).copied();
+    let old_ca = registry.head_commit_ca(&head);
     let old_graph = registry.head_commit(&head).map(|c| c.graph);
-    registry.insert_name(event.name.clone(), event.target);
+    registry.set_head(event.name.clone(), event.target);
     let Some(graph) = registry.head_graph(&head).cloned() else {
         log::error!("MoveBranch: graph missing for target commit");
         return;

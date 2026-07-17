@@ -52,8 +52,8 @@ impl gantz_core::Node for UpdateBang {
 }
 
 impl gantz_egui::NodeUi for UpdateBang {
-    fn name(&self, _: &dyn gantz_egui::Registry) -> &str {
-        "update!"
+    fn name(&self, _: &dyn gantz_egui::Registry) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed("update!")
     }
 
     fn description(&self) -> Option<&'static str> {
@@ -165,7 +165,6 @@ pub fn drive_update_bangs<N>(
     time: Res<Time>,
     registry: Res<crate::Registry<N>>,
     builtins: Res<bevy_gantz::BuiltinNodes<N>>,
-    demos: Res<crate::Demos>,
     mut vms: NonSendMut<bevy_gantz::head::HeadVms>,
     heads: Query<(Entity, &bevy_gantz::head::WorkingGraph<N>), With<bevy_gantz::head::OpenHead>>,
     mut cmds: Commands,
@@ -175,7 +174,7 @@ pub fn drive_update_bangs<N>(
     let dt = time.delta_secs_f64();
 
     for (entity, wg) in heads.iter() {
-        let node_reg = crate::registry_ref(&registry, &builtins, &demos);
+        let node_reg = crate::registry_ref(&registry, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| node_reg.node(ca);
 
         // Collect all UpdateBang paths.

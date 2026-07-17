@@ -27,7 +27,7 @@ pub use merge::{
 #[doc(inline)]
 pub use name::{Name, SEP as NAME_SEP};
 #[doc(inline)]
-pub use reach::{LiveSet, OutRefs, closure, export, prune};
+pub use reach::{LiveSet, OutRefs, closure, closure_from, export, prune};
 #[doc(inline)]
 pub use registry::{
     Heads, MergeReport, Registry, section_get, section_insert, section_insert_datum, section_iter,

@@ -59,22 +59,34 @@ pub fn closure<G>(
     extra_commits: impl IntoIterator<Item = CommitAddr>,
     graph_out: impl Fn(&G) -> OutRefs,
 ) -> LiveSet {
+    // Roots: every commit-valued entry of every Root-liveness section.
+    let roots = reg
+        .sections()
+        .values()
+        .filter(|section| section.liveness == Liveness::Root)
+        .flat_map(|section| section.entries.values())
+        .filter_map(|value| match value {
+            Value::Commit(ca) => Some(*ca),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    closure_from(reg, roots.into_iter().chain(extra_commits), graph_out)
+}
+
+/// The live closure of `reg` from ONLY the given commit seeds, ignoring the
+/// registry's own roots.
+///
+/// For minimal exports of a specific head set. [`closure`] is this plus the
+/// `Root`-liveness section seeds.
+pub fn closure_from<G>(
+    reg: &Registry<G>,
+    seeds: impl IntoIterator<Item = CommitAddr>,
+    graph_out: impl Fn(&G) -> OutRefs,
+) -> LiveSet {
     let mut live = LiveSet::default();
     let mut commit_queue: VecDeque<CommitAddr> = VecDeque::new();
     let mut graph_queue: VecDeque<GraphAddr> = VecDeque::new();
-
-    // Roots: every commit-valued entry of every Root-liveness section.
-    for section in reg.sections().values() {
-        if section.liveness != Liveness::Root {
-            continue;
-        }
-        for value in section.entries.values() {
-            if let Value::Commit(ca) = value {
-                commit_queue.push_back(*ca);
-            }
-        }
-    }
-    commit_queue.extend(extra_commits);
+    commit_queue.extend(seeds);
 
     while let Some(ca) = commit_queue.pop_front() {
         let Some(commit) = reg.commits().get(&ca) else {

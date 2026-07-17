@@ -171,12 +171,25 @@ pub trait Node: std::any::Any {
 
     /// Returns the content addresses of external nodes this node requires.
     ///
-    /// Used during pruning to determine which commits/graphs are still in use.
-    /// Nodes that reference other graphs (like `Ref`, `NamedRef`) should return
-    /// the addresses they depend on.
+    /// Used during reachability (pruning, export closure) to determine which
+    /// graphs are still in use. Nodes that reference other graphs (like
+    /// `Ref`, `NamedRef`) should return the addresses they depend on - for
+    /// graph references this is the referenced graph's `GraphAddr`.
     ///
     /// By default, returns an empty vec (no external dependencies).
     fn required_addrs(&self) -> Vec<gantz_ca::ContentAddr> {
+        vec![]
+    }
+
+    /// Returns the blob references this node requires, as
+    /// `(blob section, content address)` pairs.
+    ///
+    /// The blob half of reachability: nodes referencing content-addressed
+    /// bytes (e.g. audio buffers) report them here so pruning and export
+    /// keep the blobs alive.
+    ///
+    /// By default, returns an empty vec (no blob dependencies).
+    fn required_blobs(&self) -> Vec<(gantz_ca::SectionId, gantz_ca::ContentAddr)> {
         vec![]
     }
 
@@ -450,6 +463,10 @@ macro_rules! impl_node_for_ptr {
 
             fn required_addrs(&self) -> Vec<gantz_ca::ContentAddr> {
                 (**self).required_addrs()
+            }
+
+            fn required_blobs(&self) -> Vec<(gantz_ca::SectionId, gantz_ca::ContentAddr)> {
+                (**self).required_blobs()
             }
 
             fn visit(&self, ctx: visit::Ctx<'_, '_>, visitor: &mut dyn Visitor) {

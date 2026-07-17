@@ -130,6 +130,48 @@ where
     addrs
 }
 
+/// Collect all blob references required by nodes in this graph, as
+/// `(blob section, content address)` pairs.
+pub fn required_blobs<'a, G>(
+    get_node: node::GetNode<'a>,
+    g: G,
+) -> HashSet<(gantz_ca::SectionId, gantz_ca::ContentAddr)>
+where
+    G: Data<EdgeWeight = Edge> + IntoEdgesDirected + IntoNodeReferences + NodeIndexable + Visitable,
+    G::NodeWeight: Node,
+{
+    let mut blobs = HashSet::new();
+    visit(
+        get_node,
+        g,
+        &[],
+        &mut visit::RequiredBlobs { blobs: &mut blobs },
+    );
+    blobs
+}
+
+/// The outgoing content references of this graph for reachability: every
+/// node-reported required address as a graph reference, plus every blob
+/// reference.
+///
+/// Addresses that are not graph addresses (e.g. builtin node addresses
+/// reported by function-value wrappers) simply fail to resolve during the
+/// walk and are ignored there.
+pub fn out_refs<'a, G>(get_node: node::GetNode<'a>, g: G) -> gantz_ca::OutRefs
+where
+    G: Data<EdgeWeight = Edge> + IntoEdgesDirected + IntoNodeReferences + NodeIndexable + Visitable,
+    G::NodeWeight: Node,
+{
+    let mut graphs: Vec<gantz_ca::GraphAddr> = required_addrs(get_node, g)
+        .into_iter()
+        .map(gantz_ca::GraphAddr::from)
+        .collect();
+    graphs.sort();
+    let mut blobs: Vec<_> = required_blobs(get_node, g).into_iter().collect();
+    blobs.sort();
+    gantz_ca::OutRefs { graphs, blobs }
+}
+
 /// Extract a subgraph containing only the selected nodes and edges between them.
 ///
 /// Nodes are visited in index order for determinism. Callers that need to

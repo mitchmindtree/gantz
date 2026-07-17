@@ -12,8 +12,8 @@ pub use diff::{Diff, DiffSummary, Matching};
 pub use gantz_ca_derive::CaHash;
 #[doc(inline)]
 pub use graph::{
-    GraphAddr, addr as graph_addr, addr_with_nodes as graph_addr_with_nodes, hash_graph,
-    hash_graph_with_nodes, node_addrs,
+    GraphAddr, GraphHash, RawGraph, addr as graph_addr, addr_with_nodes as graph_addr_with_nodes,
+    hash_graph, hash_graph_with_nodes, node_addrs,
 };
 #[doc(inline)]
 pub use hash::{CaHash, Hasher};

@@ -4,10 +4,10 @@
 //! so it is ignored by default; run manually with
 //! `cargo test -p gantz_collab -- --ignored`.
 
-use gantz_ca::{Commit, ContentAddr, GraphAddr, commit_addr};
+use gantz_ca::{Commit, ContentAddr, GraphAddr, Name, RawGraph, commit_addr};
 use gantz_collab::{
-    Access, Command, Event, Handle, Identity, PeerId, Role, Session, SessionEntry, SessionId,
-    SessionStore, SessionTicket, Want,
+    Access, Command, Event, Handle, Identity, Object, ObjectRef, PeerId, Role, Session,
+    SessionEntry, SessionId, SessionRegistry, SessionTicket, Want, store,
 };
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,7 @@ fn share_join_and_fetch_between_two_runtimes() {
     let commit = Commit::new(Duration::from_secs(1), None, graph_ca);
     let tip = commit_addr(&commit);
     let graph_blob = b"(fake serialized graph)".to_vec();
+    let jam: Name = "jam".parse().unwrap();
 
     // The host runtime serves one session with a single-commit store.
     let host = gantz_collab::spawn(Identity::generate(), Default::default());
@@ -45,10 +46,13 @@ fn share_join_and_fetch_between_two_runtimes() {
         Event::Ready { peer } => Some(peer),
         _ => None,
     });
-    let mut store = SessionStore::default();
-    store.commits.insert(tip, commit.clone());
-    store.graphs.insert(graph_ca, graph_blob.clone());
-    store.heads.insert("jam".to_string(), tip);
+    let mut served = SessionRegistry::default();
+    store::merge(
+        &mut served,
+        [(jam.clone(), tip)],
+        [(tip, commit.clone())],
+        [RawGraph::new(graph_ca, graph_blob.clone())],
+    );
     host.cmds
         .send_blocking(Command::Register(SessionEntry {
             session: Session {
@@ -58,7 +62,7 @@ fn share_join_and_fetch_between_two_runtimes() {
                 resolutions: Default::default(),
                 role: Role::Host,
             },
-            store,
+            store: served,
         }))
         .unwrap();
     host.cmds.send_blocking(Command::Share(session_id)).unwrap();
@@ -86,7 +90,7 @@ fn share_join_and_fetch_between_two_runtimes() {
                 resolutions: ticket.resolutions,
                 role: Role::Guest,
             },
-            store: SessionStore::default(),
+            store: SessionRegistry::default(),
         }))
         .unwrap();
     guest.cmds.send_blocking(Command::Join(ticket)).unwrap();
@@ -95,9 +99,14 @@ fn share_join_and_fetch_between_two_runtimes() {
         Event::Error { message, .. } => panic!("join failed: {message}"),
         _ => None,
     });
-    assert_eq!(heads, vec![("jam".to_string(), tip)]);
-    assert_eq!(objects.commits, vec![(tip, commit.clone().into())]);
-    assert_eq!(objects.graphs, vec![(graph_ca, graph_blob.clone())]);
+    assert_eq!(heads, vec![(jam.clone(), tip)]);
+    assert_eq!(
+        objects.objects,
+        vec![
+            Object::Commit(tip, commit.clone().into()),
+            Object::Graph(graph_ca, graph_blob.clone()),
+        ]
+    );
 
     // A targeted fetch over the request plane returns the same objects.
     guest
@@ -106,8 +115,7 @@ fn share_join_and_fetch_between_two_runtimes() {
             session: session_id,
             from: host_peer,
             want: Want {
-                commits: vec![tip],
-                graphs: vec![graph_ca],
+                refs: vec![ObjectRef::Commit(tip), ObjectRef::Graph(graph_ca)],
             },
         })
         .unwrap();
@@ -119,8 +127,13 @@ fn share_join_and_fetch_between_two_runtimes() {
         Event::Error { message, .. } => panic!("fetch failed: {message}"),
         _ => None,
     });
-    assert_eq!(fetched.commits, vec![(tip, commit.into())]);
-    assert_eq!(fetched.graphs, vec![(graph_ca, graph_blob)]);
+    assert_eq!(
+        fetched.objects,
+        vec![
+            Object::Commit(tip, commit.into()),
+            Object::Graph(graph_ca, graph_blob),
+        ]
+    );
 }
 
 #[test]
@@ -142,7 +155,7 @@ fn restricted_sessions_deny_unlisted_peers() {
                 resolutions: Default::default(),
                 role: Role::Host,
             },
-            store: SessionStore::default(),
+            store: SessionRegistry::default(),
         }))
         .unwrap();
     host.cmds.send_blocking(Command::Share(session_id)).unwrap();

@@ -30,8 +30,8 @@
 //! [`BothModified::KeepNewest`]: crate::merge::BothModified::KeepNewest
 
 use crate::{
-    BlobLiveness, Bytes, CaHash, Commit, CommitAddr, ContentAddr, GraphAddr, SectionId, Timestamp,
-    blob_addr, commit_addr, graph_addr,
+    BlobLiveness, Bytes, CaHash, Commit, CommitAddr, ContentAddr, GraphAddr, RawGraph, SectionId,
+    Timestamp, blob_addr, commit_addr, graph_addr,
     history::{self, MergeAnalysis},
     registry::{Commits, Registry},
 };
@@ -372,6 +372,22 @@ impl<G> Staged<G> {
             applied.commits.push(ca);
         }
         Ok(applied)
+    }
+}
+
+impl Staged<RawGraph> {
+    /// Stage a raw (undecodable) graph under a claimed address, TRUSTING an
+    /// upstream validator.
+    ///
+    /// A raw graph's address cannot be recomputed from its bytes (the
+    /// structural graph hash needs the decoded graph), so local verification
+    /// is impossible here: this path exists for serve-side relay stores that
+    /// hold what decoding peers verified. A receiving application peer must
+    /// always decode and re-verify through the typed
+    /// [`insert_graph`](Self::insert_graph) path, which is where the
+    /// security boundary lives.
+    pub fn insert_graph_claimed(&mut self, claimed: GraphAddr, bytes: impl Into<Bytes>) {
+        self.graphs.insert(claimed, RawGraph::new(claimed, bytes));
     }
 }
 
@@ -741,6 +757,26 @@ mod tests {
         let ok = Commit::new(Duration::from_secs(3), None, graph_addr_raw(1));
         staged.insert_commit_grandfathered(commit_addr(&ok), ok);
         assert_eq!(staged.grandfathered().len(), 1);
+    }
+
+    #[test]
+    fn staged_raw_graph_applies_under_claimed_addr() {
+        use crate::graph::GraphHash;
+        // A relay store holds graphs the process cannot decode: bytes apply
+        // under the claimed (upstream-validated) address as-is.
+        let mut reg = Registry::<RawGraph>::default();
+        let mut staged = Staged::<RawGraph>::new();
+        let ga = graph_addr_raw(1);
+        let commit = Commit::new(Duration::from_secs(1), None, ga);
+        let ca = commit_addr(&commit);
+        staged.insert_commit(ca, commit).unwrap();
+        staged.insert_graph_claimed(ga, &b"(app-serialized graph)"[..]);
+        assert!(staged.is_complete(&reg, ca));
+        let applied = staged.apply(&mut reg).unwrap();
+        assert_eq!(applied.graphs, vec![ga]);
+        let raw = reg.graph(&ga).unwrap();
+        assert_eq!(raw.graph_addr(), ga);
+        assert_eq!(&raw.bytes[..], b"(app-serialized graph)");
     }
 
     #[test]

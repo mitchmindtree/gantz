@@ -1,26 +1,25 @@
 //! The wire protocol: gossip messages and request/response types.
 //!
 //! Everything here is plain serde encoded with [postcard] (compact,
-//! non-self-describing; `gantz_ca` addresses serialize as raw bytes).
-//! Graphs are the exception: the application's node type needs a
-//! self-describing format, so graphs travel inside [`Objects`] as opaque
-//! pre-serialized blobs the application encodes/decodes. The blob format is
-//! entirely the application's choice; it must be a *faithful* serde codec,
-//! since a received graph only applies if its deserialized content address
-//! verifies against the announced one. The gantz app uses the same RON
-//! encoding as its persisted registry (`bevy_gantz::storage`), so wire and
-//! persistence cannot drift. The human-facing `.gantz` text format is
-//! deliberately not used here: it is a name-resolving projection for
-//! import/export (its round-trip re-seeds names and re-roots commits),
+//! non-self-describing; `gantz_ca` addresses serialize as raw bytes and
+//! names as strings). Graphs are the exception: the application's node type
+//! needs a self-describing format, so graphs travel inside [`Objects`] as
+//! opaque pre-serialized blobs the application encodes/decodes. The blob
+//! format is entirely the application's choice; it must be a *faithful*
+//! serde codec, since a received graph only applies if its deserialized
+//! content address verifies against the announced one. The gantz app uses
+//! the same RON encoding as its persisted registry (`bevy_gantz::storage`),
+//! so wire and persistence cannot drift. The human-facing `.gantz` text
+//! format is deliberately not used here: it is a name-resolving projection
+//! for import/export (its round-trip re-seeds names and re-roots commits),
 //! while sync ships bare address-keyed graphs and moves names only through
 //! the convergence rules.
 //!
 //! [postcard]: https://docs.rs/postcard
 
 use crate::session::{PeerId, SessionId};
-use gantz_ca::{Commit, CommitAddr, GraphAddr};
+use gantz_ca::{BlobLiveness, Commit, CommitAddr, ContentAddr, GraphAddr, Name, SectionId};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::collections::BTreeMap;
 
 /// A message broadcast on a session's gossip topic.
 ///
@@ -35,7 +34,7 @@ pub enum GossipMsg {
         /// Per-origin sequence number, for stale-drop only: convergence
         /// never depends on delivery order.
         seq: u64,
-        changed: Vec<(String, CommitAddr, GraphAddr)>,
+        changed: Vec<(Name, CommitAddr, GraphAddr)>,
     },
     /// Anti-entropy: a digest of the announcing peer's scoped heads (see
     /// [`heads_digest`]).
@@ -58,22 +57,47 @@ pub enum GossipMsg {
     },
 }
 
-/// Objects a peer is missing (mirrors `gantz_ca::sync::Missing`).
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+/// A kind-tagged reference to one content-addressed object.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ObjectRef {
+    Commit(CommitAddr),
+    Graph(GraphAddr),
+    /// A blob in the named blob section (the wire slot for asset transfer).
+    Blob {
+        section: SectionId,
+        addr: ContentAddr,
+    },
+}
+
+/// A fetched object under its claimed reference.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum Object {
+    Commit(CommitAddr, WireCommit),
+    /// A graph as an application-serialized (self-describing) blob.
+    Graph(GraphAddr, Vec<u8>),
+    /// Raw blob bytes, with the store liveness that stamps the section if
+    /// the receiver does not hold it yet.
+    Blob {
+        section: SectionId,
+        liveness: BlobLiveness,
+        addr: ContentAddr,
+        bytes: Vec<u8>,
+    },
+}
+
+/// Objects a peer is missing (the wire form of `gantz_ca::sync::Missing`).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Want {
-    pub commits: Vec<CommitAddr>,
-    pub graphs: Vec<GraphAddr>,
+    pub refs: Vec<ObjectRef>,
 }
 
 /// Fetched session content.
 ///
 /// Order carries no meaning: receivers validate and topologically apply via
 /// `gantz_ca::sync::Staged`.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Objects {
-    pub commits: Vec<(CommitAddr, WireCommit)>,
-    /// Graphs as application-serialized blobs (self-describing, e.g. RON).
-    pub graphs: Vec<(GraphAddr, Vec<u8>)>,
+    pub objects: Vec<Object>,
 }
 
 /// [`Commit`] mirrored without serde field-skipping.
@@ -88,28 +112,6 @@ pub struct WireCommit {
     pub parent: Option<CommitAddr>,
     pub graph: GraphAddr,
     pub merge_parents: Vec<CommitAddr>,
-}
-
-impl From<Commit> for WireCommit {
-    fn from(c: Commit) -> Self {
-        Self {
-            timestamp: c.timestamp,
-            parent: c.parent,
-            graph: c.graph,
-            merge_parents: c.merge_parents,
-        }
-    }
-}
-
-impl From<WireCommit> for Commit {
-    fn from(c: WireCommit) -> Self {
-        Self {
-            timestamp: c.timestamp,
-            parent: c.parent,
-            graph: c.graph,
-            merge_parents: c.merge_parents,
-        }
-    }
 }
 
 /// A request over the [`SYNC_ALPN`](crate::SYNC_ALPN) plane; one request per
@@ -134,11 +136,11 @@ pub enum SyncResponse {
         accepted: bool,
     },
     Snapshot {
-        heads: Vec<(String, CommitAddr)>,
+        heads: Vec<(Name, CommitAddr)>,
         objects: Objects,
     },
     Heads {
-        heads: Vec<(String, CommitAddr)>,
+        heads: Vec<(Name, CommitAddr)>,
     },
     Objects(Objects),
     /// Unknown session, failed access check or protocol mismatch.
@@ -150,7 +152,29 @@ pub enum SyncResponse {
 impl Want {
     /// Whether nothing is wanted.
     pub fn is_empty(&self) -> bool {
-        self.commits.is_empty() && self.graphs.is_empty()
+        self.refs.is_empty()
+    }
+}
+
+impl From<Commit> for WireCommit {
+    fn from(c: Commit) -> Self {
+        Self {
+            timestamp: c.timestamp,
+            parent: c.parent,
+            graph: c.graph,
+            merge_parents: c.merge_parents,
+        }
+    }
+}
+
+impl From<WireCommit> for Commit {
+    fn from(c: WireCommit) -> Self {
+        Self {
+            timestamp: c.timestamp,
+            parent: c.parent,
+            graph: c.graph,
+            merge_parents: c.merge_parents,
+        }
     }
 }
 
@@ -166,14 +190,20 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, postcard::Error> {
     postcard::from_bytes(bytes)
 }
 
-/// The digest of a scoped `name -> tip` map, for [`GossipMsg::Digest`]
-/// anti-entropy: blake3 over the sorted `(name, tip)` pairs.
-pub fn heads_digest(heads: &BTreeMap<String, CommitAddr>) -> [u8; 32] {
+/// The digest of a `name -> tip` head map, for [`GossipMsg::Digest`]
+/// anti-entropy: blake3 over the `(name, tip)` pairs in iteration order.
+///
+/// Callers must supply a name-ordered iteration (e.g.
+/// `gantz_ca::Registry::heads`) so peers holding equal heads derive equal
+/// digests. Heads-only for now: a whole-sections digest would need a
+/// canonical section byte encoding, which the registry does not define yet.
+pub fn heads_digest<'a>(heads: impl IntoIterator<Item = (&'a Name, CommitAddr)>) -> [u8; 32] {
     let mut hasher = gantz_ca::Hasher::new();
     for (name, tip) in heads {
+        let name = name.to_string();
         hasher.update(&(name.len() as u64).to_be_bytes());
         hasher.update(name.as_bytes());
-        hasher.update(&gantz_ca::ContentAddr::from(*tip).0);
+        hasher.update(&gantz_ca::ContentAddr::from(tip).0);
     }
     hasher.finalize().into()
 }
@@ -181,6 +211,11 @@ pub fn heads_digest(heads: &BTreeMap<String, CommitAddr>) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    fn name(s: &str) -> Name {
+        s.parse().unwrap()
+    }
 
     #[test]
     fn wire_types_round_trip() {
@@ -189,7 +224,7 @@ mod tests {
         let msg = GossipMsg::Tips {
             origin: PeerId([1; 32]),
             seq: 7,
-            changed: vec![("main".to_string(), ca, ga)],
+            changed: vec![(name("main"), ca, ga)],
         };
         let decoded: GossipMsg = decode(&encode(&msg)).unwrap();
         let GossipMsg::Tips {
@@ -202,17 +237,26 @@ mod tests {
         };
         assert_eq!(origin, PeerId([1; 32]));
         assert_eq!(seq, 7);
-        assert_eq!(changed, vec![("main".to_string(), ca, ga)]);
+        assert_eq!(changed, vec![(name("main"), ca, ga)]);
 
         let req = SyncRequest::Want {
             session: SessionId([2; 32]),
             want: Want {
-                commits: vec![ca],
-                graphs: vec![ga],
+                refs: vec![
+                    ObjectRef::Commit(ca),
+                    ObjectRef::Graph(ga),
+                    ObjectRef::Blob {
+                        section: "dsp.buffer".to_string(),
+                        addr: gantz_ca::ContentAddr::from([5; 32]),
+                    },
+                ],
             },
         };
         let decoded: SyncRequest = decode(&encode(&req)).unwrap();
-        assert!(matches!(decoded, SyncRequest::Want { .. }));
+        let SyncRequest::Want { want, .. } = decoded else {
+            panic!("wrong variant");
+        };
+        assert_eq!(want.refs.len(), 3);
     }
 
     #[test]
@@ -224,25 +268,35 @@ mod tests {
         let commit = Commit::new(std::time::Duration::from_secs(5), None, ga);
         let ca = gantz_ca::commit_addr(&commit);
         let objects = Objects {
-            commits: vec![(ca, commit.clone().into())],
-            graphs: vec![(ga, b"blob".to_vec())],
+            objects: vec![
+                Object::Commit(ca, commit.clone().into()),
+                Object::Graph(ga, b"blob".to_vec()),
+                Object::Blob {
+                    section: "dsp.buffer".to_string(),
+                    liveness: BlobLiveness::ContentReferenced,
+                    addr: gantz_ca::blob_addr(b"pcm"),
+                    bytes: b"pcm".to_vec(),
+                },
+            ],
         };
         let decoded: Objects = decode(&encode(&objects)).unwrap();
-        assert_eq!(decoded.commits, vec![(ca, commit.into())]);
-        assert_eq!(decoded.graphs, objects.graphs);
+        assert_eq!(decoded, objects);
     }
 
     #[test]
     fn heads_digest_is_order_independent_and_content_sensitive() {
         let ca = |n| CommitAddr::from(gantz_ca::ContentAddr::from([n; 32]));
-        let a: BTreeMap<String, CommitAddr> = [("a".to_string(), ca(1)), ("b".to_string(), ca(2))]
-            .into_iter()
-            .collect();
-        let b: BTreeMap<String, CommitAddr> = [("b".to_string(), ca(2)), ("a".to_string(), ca(1))]
-            .into_iter()
-            .collect();
-        assert_eq!(heads_digest(&a), heads_digest(&b));
-        let c: BTreeMap<String, CommitAddr> = [("a".to_string(), ca(9))].into_iter().collect();
-        assert_ne!(heads_digest(&a), heads_digest(&c));
+        let digest = |entries: &[(&str, CommitAddr)]| {
+            // A `BTreeMap` supplies the required name-ordered iteration
+            // regardless of insertion order.
+            let map: BTreeMap<Name, CommitAddr> =
+                entries.iter().map(|(n, ca)| (name(n), *ca)).collect();
+            heads_digest(map.iter().map(|(n, ca)| (n, *ca)))
+        };
+        let a = digest(&[("a", ca(1)), ("b", ca(2))]);
+        let b = digest(&[("b", ca(2)), ("a", ca(1))]);
+        assert_eq!(a, b);
+        let c = digest(&[("a", ca(9))]);
+        assert_ne!(a, c);
     }
 }

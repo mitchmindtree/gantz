@@ -431,7 +431,7 @@ mod tests {
             .into_iter()
             .collect();
         let commits = [(ca0, c0), (ca1, c1), (ca2, c2)].into_iter().collect();
-        let reg = Registry::new(graphs, commits, Default::default());
+        let reg = Registry::from_parts(graphs, commits, Default::default());
         // Direct matching pairs only the content-identical node.
         assert_eq!(matching(&reg, ca0, ca2).unwrap(), Matching::from([(0, 0)]));
     }

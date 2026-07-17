@@ -111,11 +111,14 @@ where
     G::NodeId: Hash + Ord,
     G::EdgeWeight: CaHash + Ord,
 {
+    // Domain-separate graph addresses from every other kind (see the
+    // matching prefix on `Commit`'s `CaHash`).
+    hasher.update(b"gantz.graph");
     // Assign each node a canonical rank: its position in ascending-index order
     // (the order `node_references` yields for a `StableGraph`). For a hole-free
-    // graph the rank equals the raw index, so existing addresses are unchanged;
-    // vacant slots left by node removals are compacted away, making the address
-    // independent of the physical slot layout and stable across a round-trip.
+    // graph the rank equals the raw index; vacant slots left by node removals
+    // are compacted away, making the address independent of the physical slot
+    // layout and stable across a round-trip.
     let rank: HashMap<G::NodeId, u64> = g
         .node_references()
         .enumerate()

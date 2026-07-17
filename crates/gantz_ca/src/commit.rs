@@ -1,4 +1,4 @@
-use super::{CaHash, ContentAddr, GraphAddr, Hasher};
+use super::{CaHash, ContentAddr, GraphAddr, Hasher, Name};
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops, time::Duration};
 
@@ -32,7 +32,7 @@ pub struct CommitAddr(ContentAddr);
 /// Represents a name used to track a working series of commits.
 ///
 /// Users can think of this as their graph or project name.
-pub type Branch = String;
+pub type Branch = Name;
 
 /// Acts as a pointer to the current working graph, whether directly to a commit
 /// or to a name mapping.
@@ -92,14 +92,19 @@ impl Commit {
 }
 
 /// Commits addressed by timestamp, parent(s) and graph CA.
+///
+/// The `gantz.commit` prefix domain-separates commit addresses from every
+/// other kind (graphs carry their own prefix, blob addresses are raw blake3
+/// of their bytes), so no two kinds can collide on one address.
 impl CaHash for Commit {
     fn hash(&self, hasher: &mut Hasher) {
+        hasher.update(b"gantz.commit");
         self.timestamp.as_secs().hash(hasher);
         self.timestamp.subsec_nanos().hash(hasher);
         self.parent.hash(hasher);
         self.graph.hash(hasher);
-        // Folded in only when non-empty so ordinary commits hash byte-for-byte
-        // as they did before merge support existed.
+        // Folded in only when non-empty so a commit's address is unchanged
+        // by the presence of the (defaulted) field on ordinary commits.
         if !self.merge_parents.is_empty() {
             hasher.update(b"merge-parents");
             self.merge_parents.hash(hasher);
@@ -155,25 +160,19 @@ mod tests {
         CommitAddr::from(ContentAddr::from([n; 32]))
     }
 
-    /// The commit hash as it was before `merge_parents` existed. Ordinary
-    /// commits must keep hashing byte-for-byte like this so that existing
-    /// registries' commit addresses are unchanged.
-    fn pre_merge_addr(commit: &Commit) -> CommitAddr {
-        let mut hasher = Hasher::new();
-        commit.timestamp.as_secs().hash(&mut hasher);
-        commit.timestamp.subsec_nanos().hash(&mut hasher);
-        commit.parent.hash(&mut hasher);
-        commit.graph.hash(&mut hasher);
-        let bytes: [u8; 32] = hasher.finalize().into();
-        CommitAddr::from(ContentAddr::from(bytes))
-    }
-
     #[test]
-    fn ordinary_commit_addr_unchanged_by_merge_parents_field() {
+    fn commit_addr_is_domain_separated() {
+        // The kind prefix keeps a commit's address distinct from a raw
+        // blake3 hash of the same field bytes (blob addressing) and from
+        // graph addresses.
         let root = Commit::new(Duration::from_secs(1), None, graph_addr(1));
-        assert_eq!(addr(&root), pre_merge_addr(&root));
-        let child = Commit::new(Duration::from_secs(2), Some(addr(&root)), graph_addr(2));
-        assert_eq!(addr(&child), pre_merge_addr(&child));
+        let mut unprefixed = Hasher::new();
+        root.timestamp.as_secs().hash(&mut unprefixed);
+        root.timestamp.subsec_nanos().hash(&mut unprefixed);
+        root.parent.hash(&mut unprefixed);
+        root.graph.hash(&mut unprefixed);
+        let bytes: [u8; 32] = unprefixed.finalize().into();
+        assert_ne!(addr(&root), CommitAddr::from(ContentAddr::from(bytes)));
     }
 
     #[test]

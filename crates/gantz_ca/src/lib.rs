@@ -27,7 +27,12 @@ pub use merge::{
 #[doc(inline)]
 pub use name::{Name, SEP as NAME_SEP};
 #[doc(inline)]
-pub use registry::Registry;
+pub use reach::{LiveSet, OutRefs, closure, export, prune};
+#[doc(inline)]
+pub use registry::{
+    Heads, MergeReport, Registry, section_get, section_insert, section_insert_datum, section_iter,
+    section_remove,
+};
 #[doc(inline)]
 pub use section::{
     BlobDecl, BlobLiveness, BlobStore, Bytes, Key, Liveness, MergePolicy, Section, SectionDecl,
@@ -45,6 +50,8 @@ mod hash;
 pub mod history;
 pub mod merge;
 pub mod name;
+pub mod ops;
+pub mod reach;
 pub mod registry;
 pub mod section;
 pub mod serde_sorted;

@@ -471,7 +471,12 @@ fn join_snapshot_tolerates_pruned_history() {
         g.add_node("b".to_string());
     });
     let tip = host.tip;
-    host.reg.prune_unreachable(&[tip].into_iter().collect());
+    let live = gantz_ca::LiveSet {
+        commits: [tip].into_iter().collect(),
+        graphs: [host.reg.commits()[&tip].graph].into_iter().collect(),
+        blobs: Default::default(),
+    };
+    gantz_ca::prune(&mut host.reg, &live);
     assert_ne!(
         commit_addr(&host.reg.commits()[&tip]),
         tip,

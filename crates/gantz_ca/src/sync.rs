@@ -30,7 +30,8 @@
 //! [`BothModified::KeepNewest`]: crate::merge::BothModified::KeepNewest
 
 use crate::{
-    CaHash, Commit, CommitAddr, GraphAddr, Timestamp, commit_addr, graph_addr,
+    BlobLiveness, Bytes, CaHash, Commit, CommitAddr, ContentAddr, GraphAddr, SectionId, Timestamp,
+    blob_addr, commit_addr, graph_addr,
     history::{self, MergeAnalysis},
     registry::{Commits, Registry},
 };
@@ -85,6 +86,11 @@ pub enum VerifyError {
         claimed: GraphAddr,
         actual: GraphAddr,
     },
+    /// The blob's recomputed address differs from the claimed one.
+    Blob {
+        claimed: ContentAddr,
+        actual: ContentAddr,
+    },
 }
 
 /// An error preventing a [`Staged`] set from being applied to a registry.
@@ -121,9 +127,11 @@ pub struct Applied {
     pub commits: Vec<CommitAddr>,
     /// The graphs applied.
     pub graphs: Vec<GraphAddr>,
+    /// The blobs applied, as (section, address) pairs.
+    pub blobs: Vec<(SectionId, ContentAddr)>,
     /// The number of snapshot commits whose absent parents were detached on
     /// insert because the sender truncated history below them (the same
-    /// semantic a local [`Registry::prune_unreachable`] leaves behind).
+    /// semantic a local [`prune`](crate::reach::prune) leaves behind).
     pub truncated: usize,
 }
 
@@ -142,6 +150,7 @@ pub struct Applied {
 pub struct Staged<G> {
     commits: BTreeMap<CommitAddr, StagedCommit>,
     graphs: BTreeMap<GraphAddr, G>,
+    blobs: BTreeMap<(SectionId, ContentAddr), (BlobLiveness, Bytes)>,
     grandfathered: Vec<CommitAddr>,
 }
 
@@ -239,6 +248,28 @@ impl<G> Staged<G> {
         Ok(())
     }
 
+    /// Stage a blob for the given blob section, verifying that its raw
+    /// bytes hash to the claimed address. Always strict (blake3 of the
+    /// bytes is cheap).
+    ///
+    /// `liveness` stamps the section if the receiving registry does not
+    /// hold it yet (an existing section's stored liveness wins on apply).
+    pub fn insert_blob(
+        &mut self,
+        section: SectionId,
+        liveness: BlobLiveness,
+        claimed: ContentAddr,
+        bytes: impl Into<Bytes>,
+    ) -> Result<(), VerifyError> {
+        let bytes = bytes.into();
+        let actual = blob_addr(&bytes);
+        if actual != claimed {
+            return Err(VerifyError::Blob { claimed, actual });
+        }
+        self.blobs.insert((section, claimed), (liveness, bytes));
+        Ok(())
+    }
+
     /// The commits and graphs still required to complete `tip`'s closure,
     /// walking ancestry through the staged set and the registry.
     ///
@@ -307,6 +338,12 @@ impl<G> Staged<G> {
             reg.insert_graph_at(ga, graph);
             applied.graphs.push(ga);
         }
+        // Blobs are leaves with no referential invariants: apply alongside
+        // graphs, before any commit.
+        for ((section, addr), (liveness, bytes)) in self.blobs {
+            reg.insert_blob_at(section.clone(), liveness, addr, bytes);
+            applied.blobs.push((section, addr));
+        }
         let mut commits = self.commits;
         for ca in order {
             let Some(staged) = commits.remove(&ca) else {
@@ -343,6 +380,7 @@ impl<G> Default for Staged<G> {
         Self {
             commits: BTreeMap::new(),
             graphs: BTreeMap::new(),
+            blobs: BTreeMap::new(),
             grandfathered: Vec::new(),
         }
     }
@@ -356,6 +394,9 @@ impl fmt::Display for VerifyError {
             }
             Self::Graph { claimed, actual } => {
                 write!(f, "graph claimed as {claimed} hashes to {actual}")
+            }
+            Self::Blob { claimed, actual } => {
+                write!(f, "blob claimed as {claimed} hashes to {actual}")
             }
         }
     }

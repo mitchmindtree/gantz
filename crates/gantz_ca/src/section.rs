@@ -41,8 +41,21 @@ pub trait SectionDecl {
     const LIVENESS: Liveness;
     /// The key type (converted through [`Key`]).
     type Key: Into<Key> + TryFromKey;
-    /// The value type (encoded through [`Datum`]).
+    /// The value type (encoded through [`Datum`] by default).
     type Value: Serialize + serde::de::DeserializeOwned;
+
+    /// Encode a typed value as a section [`Value`]. Defaults to an inline
+    /// datum. Override to use a typed [`Value`] form (e.g. the `heads`
+    /// section encodes values as [`Value::Commit`]).
+    fn encode(value: &Self::Value) -> Result<Value, datum::DatumError> {
+        value_to_datum(value)
+    }
+
+    /// Decode a typed value from a section [`Value`], `None` on shape
+    /// mismatch. Must invert [`encode`](Self::encode).
+    fn decode(value: &Value) -> Option<Self::Value> {
+        value_from_datum(value)
+    }
 }
 
 /// A typed declaration of a blob store section, implemented by the owning

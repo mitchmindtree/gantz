@@ -1158,8 +1158,8 @@ mod tests {
         let (mut reg, o, t, res) = merge_two(&base, &ours, &theirs);
         let out = diverged(res);
         assert!(out.conflicts.is_empty());
-        reg.insert_name("alpha".to_string(), o);
-        let mut head = Head::Branch("alpha".to_string());
+        reg.set_head("alpha".parse().unwrap(), o);
+        let mut head = Head::Branch("alpha".parse().unwrap());
         let merge_ca = reg.commit_merge_to_head(
             Duration::from_secs(4),
             graph_addr(&out.graph),

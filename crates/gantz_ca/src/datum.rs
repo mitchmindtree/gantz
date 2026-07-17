@@ -208,7 +208,7 @@ impl std::hash::Hash for Datum {
     }
 }
 
-impl gantz_ca::CaHash for Datum {
+impl crate::CaHash for Datum {
     /// Content-address folding over the datum's structure.
     ///
     /// A variant marker byte plus length-prefixed variable-size contents keep
@@ -217,8 +217,8 @@ impl gantz_ca::CaHash for Datum {
     /// pattern, matching the bitwise `Eq`/`Hash` semantics. Identity-sensitive
     /// callers hash the [canonical](Datum::canonicalize) form so one logical
     /// value has exactly one address.
-    fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-        fn len(hasher: &mut gantz_ca::Hasher, n: usize) {
+    fn hash(&self, hasher: &mut crate::Hasher) {
+        fn len(hasher: &mut crate::Hasher, n: usize) {
             hasher.update(&(n as u64).to_be_bytes());
         }
         match self {
@@ -258,7 +258,7 @@ impl gantz_ca::CaHash for Datum {
                 hasher.update(&[8]);
                 len(hasher, items.len());
                 for item in items {
-                    gantz_ca::CaHash::hash(item, hasher);
+                    crate::CaHash::hash(item, hasher);
                 }
             }
             Datum::Map(entries) => {
@@ -267,7 +267,7 @@ impl gantz_ca::CaHash for Datum {
                 for (k, v) in entries {
                     len(hasher, k.len());
                     hasher.update(k.as_bytes());
-                    gantz_ca::CaHash::hash(v, hasher);
+                    crate::CaHash::hash(v, hasher);
                 }
             }
         }
@@ -1614,8 +1614,8 @@ mod tests {
     /// prefixes prevent adjacency and cross-variant collisions.
     #[test]
     fn ca_hash_distinctness() {
-        fn ca(d: &Datum) -> gantz_ca::ContentAddr {
-            gantz_ca::content_addr(d)
+        fn ca(d: &Datum) -> crate::ContentAddr {
+            crate::content_addr(d)
         }
         // Same numeric value, different variant.
         assert_ne!(ca(&Datum::I64(1)), ca(&Datum::U64(1)));
@@ -1652,7 +1652,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            gantz_ca::content_addr(&d).to_string(),
+            crate::content_addr(&d).to_string(),
             "62ff57c18727d269cad8e0cfd62856b57efbecec761aadc2caad0073445dd09d",
             "Datum CaHash scheme changed - this breaks existing ext-carrying addresses",
         );

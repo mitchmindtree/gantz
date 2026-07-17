@@ -1,13 +1,13 @@
 pub use builtin::{Builtin, BuiltinSet, Builtins, FromNode};
 pub use diagnostic::Diagnostic;
 pub use edge::Edge;
+pub use gantz_ca::datum;
 pub use node::Node;
 pub use steel;
 
 pub mod args;
 pub mod builtin;
 pub mod compile;
-pub mod datum;
 pub mod diagnostic;
 pub mod edge;
 pub mod graph;

@@ -19,8 +19,11 @@ pub mod node;
 pub mod ops;
 pub mod reg;
 pub mod response;
+pub mod section;
 pub mod sugar;
 pub mod sync;
+#[cfg(test)]
+mod test_node;
 pub mod ui_tree;
 pub mod view;
 pub mod widget;
@@ -81,7 +84,7 @@ pub trait Registry: NameRegistry + FnNodeNames + NodeTypeRegistry + GraphRegistr
     }
 
     /// Get the demo graph name associated with the graph of the given name.
-    fn demo_graph(&self, name: &str) -> Option<&str> {
+    fn demo_graph(&self, name: &str) -> Option<String> {
         let _ = name;
         None
     }
@@ -120,8 +123,8 @@ pub trait Registry: NameRegistry + FnNodeNames + NodeTypeRegistry + GraphRegistr
     ///
     /// Used to seed the description editor in the graph config pane. The
     /// standard [`RegistryRef`] impl reads it from the content-addressed
-    /// registry; the default has none.
-    fn graph_description(&self, name: &str) -> Option<&str> {
+    /// registry's description section; the default has none.
+    fn graph_description(&self, name: &str) -> Option<String> {
         let _ = name;
         None
     }
@@ -327,7 +330,7 @@ pub struct HeadDataMut<'a, N> {
 /// only costs a redundant hash, so when in doubt, mark it.
 pub trait NodeUi {
     /// The name used to present the node within the inspector.
-    fn name(&self, _registry: &dyn Registry) -> &str;
+    fn name(&self, _registry: &dyn Registry) -> Cow<'_, str>;
 
     /// Instantiate the `Ui` for the given node.
     ///
@@ -403,7 +406,7 @@ pub trait NodeUi {
     }
 
     /// Look up the demo graph name associated with this node, if any.
-    fn demo_graph<'a>(&self, _registry: &'a dyn Registry) -> Option<&'a str> {
+    fn demo_graph(&self, _registry: &dyn Registry) -> Option<String> {
         None
     }
 
@@ -669,7 +672,7 @@ impl<'a, N> NodeUi for &'a mut N
 where
     N: ?Sized + NodeUi,
 {
-    fn name(&self, registry: &dyn Registry) -> &str {
+    fn name(&self, registry: &dyn Registry) -> Cow<'_, str> {
         (**self).name(registry)
     }
 
@@ -705,7 +708,7 @@ where
         (**self).flow(registry)
     }
 
-    fn demo_graph<'b>(&self, registry: &'b dyn Registry) -> Option<&'b str> {
+    fn demo_graph(&self, registry: &dyn Registry) -> Option<String> {
         (**self).demo_graph(registry)
     }
 
@@ -737,7 +740,7 @@ macro_rules! impl_node_ui_for_ptr {
         where
             T: ?Sized + NodeUi,
         {
-            fn name(&self, registry: &dyn Registry) -> &str {
+            fn name(&self, registry: &dyn Registry) -> Cow<'_, str> {
                 (**self).name(registry)
             }
 
@@ -769,7 +772,7 @@ macro_rules! impl_node_ui_for_ptr {
                 (**self).flow(registry)
             }
 
-            fn demo_graph<'a>(&self, registry: &'a dyn Registry) -> Option<&'a str> {
+            fn demo_graph(&self, registry: &dyn Registry) -> Option<String> {
                 (**self).demo_graph(registry)
             }
 

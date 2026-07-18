@@ -45,6 +45,12 @@ pub(crate) struct RequiredAddrs<'a> {
     pub addrs: &'a mut HashSet<gantz_ca::ContentAddr>,
 }
 
+/// Visitor that collects all required blob references from nodes.
+pub(crate) struct RequiredBlobs<'a> {
+    /// The set of collected (blob section, address) pairs.
+    pub blobs: &'a mut HashSet<(gantz_ca::SectionId, gantz_ca::ContentAddr)>,
+}
+
 impl<'env, 'data> Ctx<'env, 'data> {
     /// Create a `Ctx` instance. Exclusively for use by `Visitor`
     /// implementations.
@@ -100,5 +106,11 @@ impl Visitor for Register<'_> {
 impl Visitor for RequiredAddrs<'_> {
     fn visit_pre(&mut self, _ctx: Ctx<'_, '_>, node: &dyn Node) {
         self.addrs.extend(node.required_addrs());
+    }
+}
+
+impl Visitor for RequiredBlobs<'_> {
+    fn visit_pre(&mut self, _ctx: Ctx<'_, '_>, node: &dyn Node) {
+        self.blobs.extend(node.required_blobs());
     }
 }

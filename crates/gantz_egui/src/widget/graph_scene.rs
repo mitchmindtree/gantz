@@ -733,7 +733,7 @@ where
             if let Some(name) = demo_name {
                 if demo_btn.on_hover_text(format!("opens {name}")).clicked() {
                     responses.push(DynResponse::new(OpenHead(gantz_ca::Head::Branch(
-                        name.to_string(),
+                        name.parse().expect("infallible"),
                     ))));
                     ui.close();
                 }

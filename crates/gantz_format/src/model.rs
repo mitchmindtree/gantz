@@ -18,8 +18,8 @@ pub struct Document {
     pub commits: Vec<CommitDecl>,
     /// Name -> commit mappings.
     pub names: Vec<NameDecl>,
-    /// Name -> human-facing description mappings.
-    pub descriptions: Vec<DescriptionDecl>,
+    /// Generic metadata sections (`(section ...)` forms).
+    pub sections: Vec<SectionForm>,
     /// Unrecognised top-level forms, preserved verbatim for extenders.
     pub extra: Vec<Form>,
 }
@@ -148,11 +148,37 @@ pub struct NameDecl {
     pub commit: Addr,
 }
 
-/// A single entry in the `(descriptions ...)` table.
+/// A generic metadata section form:
+/// `(section "<id>" (policy <p>) (liveness <l>) (entry <key> <datum>) ...)`.
+///
+/// Carries a registry section - including sections from domains the reading
+/// application does not know - with its merge policy and liveness rule as
+/// data, so unknown sections round-trip through text.
 #[derive(Clone, Debug)]
-pub struct DescriptionDecl {
-    /// The registry name (branch) the description applies to.
-    pub name: String,
-    /// The human-facing description text.
-    pub description: String,
+pub struct SectionForm {
+    /// The section id, e.g. `"laser.palette"`.
+    pub id: String,
+    /// The section's merge policy.
+    pub policy: gantz_ca::MergePolicy,
+    /// The section's liveness rule.
+    pub liveness: gantz_ca::Liveness,
+    /// The entries: a key plus an inline datum value.
+    pub entries: Vec<(SectionKey, Datum)>,
+}
+
+/// A section entry key in text form.
+///
+/// Address keys are FULL hex (no prefix resolution): section entries are
+/// advisory metadata, so a key whose subject was re-rooted simply goes dead
+/// and is dropped by the next prune.
+#[derive(Clone, Debug)]
+pub enum SectionKey {
+    /// Keyed by a registry name.
+    Name(String),
+    /// Keyed by a commit address (full hex).
+    Commit(String),
+    /// Keyed by a graph address (full hex).
+    Graph(String),
+    /// Keyed by an arbitrary content address (full hex).
+    Addr(String),
 }

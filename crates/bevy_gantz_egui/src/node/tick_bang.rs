@@ -236,8 +236,8 @@ impl gantz_core::Node for TickBang {
 }
 
 impl gantz_egui::NodeUi for TickBang {
-    fn name(&self, _: &dyn gantz_egui::Registry) -> &str {
-        "tick!"
+    fn name(&self, _: &dyn gantz_egui::Registry) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed("tick!")
     }
 
     fn description(&self) -> Option<&'static str> {
@@ -437,7 +437,6 @@ pub fn drive_tick_bangs<N>(
     epoch: Res<bevy_gantz::EvalEpoch>,
     registry: Res<crate::Registry<N>>,
     builtins: Res<bevy_gantz::BuiltinNodes<N>>,
-    demos: Res<crate::Demos>,
     mut vms: NonSendMut<bevy_gantz::head::HeadVms>,
     heads: Query<(Entity, &bevy_gantz::head::WorkingGraph<N>), With<bevy_gantz::head::OpenHead>>,
     mut cmds: Commands,
@@ -449,7 +448,7 @@ pub fn drive_tick_bangs<N>(
     let now = epoch.now_secs();
 
     for (entity, wg) in heads.iter() {
-        let node_reg = crate::registry_ref(&registry, &builtins, &demos);
+        let node_reg = crate::registry_ref(&registry, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| node_reg.node(ca);
 
         // Collect all TickBang paths + durations.

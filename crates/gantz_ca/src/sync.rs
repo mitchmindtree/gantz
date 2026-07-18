@@ -30,7 +30,8 @@
 //! [`BothModified::KeepNewest`]: crate::merge::BothModified::KeepNewest
 
 use crate::{
-    CaHash, Commit, CommitAddr, GraphAddr, Timestamp, commit_addr, graph_addr,
+    BlobLiveness, Bytes, CaHash, Commit, CommitAddr, ContentAddr, GraphAddr, RawGraph, SectionId,
+    Timestamp, blob_addr, commit_addr, graph_addr,
     history::{self, MergeAnalysis},
     registry::{Commits, Registry},
 };
@@ -85,6 +86,11 @@ pub enum VerifyError {
         claimed: GraphAddr,
         actual: GraphAddr,
     },
+    /// The blob's recomputed address differs from the claimed one.
+    Blob {
+        claimed: ContentAddr,
+        actual: ContentAddr,
+    },
 }
 
 /// An error preventing a [`Staged`] set from being applied to a registry.
@@ -121,9 +127,11 @@ pub struct Applied {
     pub commits: Vec<CommitAddr>,
     /// The graphs applied.
     pub graphs: Vec<GraphAddr>,
+    /// The blobs applied, as (section, address) pairs.
+    pub blobs: Vec<(SectionId, ContentAddr)>,
     /// The number of snapshot commits whose absent parents were detached on
     /// insert because the sender truncated history below them (the same
-    /// semantic a local [`Registry::prune_unreachable`] leaves behind).
+    /// semantic a local [`prune`](crate::reach::prune) leaves behind).
     pub truncated: usize,
 }
 
@@ -142,6 +150,7 @@ pub struct Applied {
 pub struct Staged<G> {
     commits: BTreeMap<CommitAddr, StagedCommit>,
     graphs: BTreeMap<GraphAddr, G>,
+    blobs: BTreeMap<(SectionId, ContentAddr), (BlobLiveness, Bytes)>,
     grandfathered: Vec<CommitAddr>,
 }
 
@@ -239,6 +248,28 @@ impl<G> Staged<G> {
         Ok(())
     }
 
+    /// Stage a blob for the given blob section, verifying that its raw
+    /// bytes hash to the claimed address. Always strict (blake3 of the
+    /// bytes is cheap).
+    ///
+    /// `liveness` stamps the section if the receiving registry does not
+    /// hold it yet (an existing section's stored liveness wins on apply).
+    pub fn insert_blob(
+        &mut self,
+        section: SectionId,
+        liveness: BlobLiveness,
+        claimed: ContentAddr,
+        bytes: impl Into<Bytes>,
+    ) -> Result<(), VerifyError> {
+        let bytes = bytes.into();
+        let actual = blob_addr(&bytes);
+        if actual != claimed {
+            return Err(VerifyError::Blob { claimed, actual });
+        }
+        self.blobs.insert((section, claimed), (liveness, bytes));
+        Ok(())
+    }
+
     /// The commits and graphs still required to complete `tip`'s closure,
     /// walking ancestry through the staged set and the registry.
     ///
@@ -307,6 +338,12 @@ impl<G> Staged<G> {
             reg.insert_graph_at(ga, graph);
             applied.graphs.push(ga);
         }
+        // Blobs are leaves with no referential invariants: apply alongside
+        // graphs, before any commit.
+        for ((section, addr), (liveness, bytes)) in self.blobs {
+            reg.insert_blob_at(section.clone(), liveness, addr, bytes);
+            applied.blobs.push((section, addr));
+        }
         let mut commits = self.commits;
         for ca in order {
             let Some(staged) = commits.remove(&ca) else {
@@ -338,11 +375,28 @@ impl<G> Staged<G> {
     }
 }
 
+impl Staged<RawGraph> {
+    /// Stage a raw (undecodable) graph under a claimed address, TRUSTING an
+    /// upstream validator.
+    ///
+    /// A raw graph's address cannot be recomputed from its bytes (the
+    /// structural graph hash needs the decoded graph), so local verification
+    /// is impossible here: this path exists for serve-side relay stores that
+    /// hold what decoding peers verified. A receiving application peer must
+    /// always decode and re-verify through the typed
+    /// [`insert_graph`](Self::insert_graph) path, which is where the
+    /// security boundary lives.
+    pub fn insert_graph_claimed(&mut self, claimed: GraphAddr, bytes: impl Into<Bytes>) {
+        self.graphs.insert(claimed, RawGraph::new(claimed, bytes));
+    }
+}
+
 impl<G> Default for Staged<G> {
     fn default() -> Self {
         Self {
             commits: BTreeMap::new(),
             graphs: BTreeMap::new(),
+            blobs: BTreeMap::new(),
             grandfathered: Vec::new(),
         }
     }
@@ -356,6 +410,9 @@ impl fmt::Display for VerifyError {
             }
             Self::Graph { claimed, actual } => {
                 write!(f, "graph claimed as {claimed} hashes to {actual}")
+            }
+            Self::Blob { claimed, actual } => {
+                write!(f, "blob claimed as {claimed} hashes to {actual}")
             }
         }
     }
@@ -700,6 +757,26 @@ mod tests {
         let ok = Commit::new(Duration::from_secs(3), None, graph_addr_raw(1));
         staged.insert_commit_grandfathered(commit_addr(&ok), ok);
         assert_eq!(staged.grandfathered().len(), 1);
+    }
+
+    #[test]
+    fn staged_raw_graph_applies_under_claimed_addr() {
+        use crate::graph::GraphHash;
+        // A relay store holds graphs the process cannot decode: bytes apply
+        // under the claimed (upstream-validated) address as-is.
+        let mut reg = Registry::<RawGraph>::default();
+        let mut staged = Staged::<RawGraph>::new();
+        let ga = graph_addr_raw(1);
+        let commit = Commit::new(Duration::from_secs(1), None, ga);
+        let ca = commit_addr(&commit);
+        staged.insert_commit(ca, commit).unwrap();
+        staged.insert_graph_claimed(ga, &b"(app-serialized graph)"[..]);
+        assert!(staged.is_complete(&reg, ca));
+        let applied = staged.apply(&mut reg).unwrap();
+        assert_eq!(applied.graphs, vec![ga]);
+        let raw = reg.graph(&ga).unwrap();
+        assert_eq!(raw.graph_addr(), ga);
+        assert_eq!(&raw.bytes[..], b"(app-serialized graph)");
     }
 
     #[test]

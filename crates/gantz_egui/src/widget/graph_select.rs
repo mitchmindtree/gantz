@@ -1,7 +1,8 @@
 //! A simple widget for selecting between, naming and creating new graphs.
 
 use super::head_row::{HeadRowType, head_row};
-use std::collections::{HashMap, HashSet};
+use gantz_ca::Name;
+use std::collections::HashSet;
 
 /// The glyph for the filter-options button (swap if it doesn't render).
 const FILTER_GLYPH: &str = "⛭";
@@ -12,9 +13,7 @@ pub struct GraphSelect<'a> {
     registry: &'a dyn crate::Registry,
     heads: &'a [gantz_ca::Head],
     focused_head: Option<usize>,
-    base_names: &'a gantz_ca::registry::Names,
-    /// Demo associations (graph name -> demo name), for the row context menu.
-    demos: Option<&'a HashMap<String, String>>,
+    base_names: &'a crate::reg::Names,
 }
 
 #[derive(Clone)]
@@ -40,8 +39,15 @@ impl Default for GraphSelectState {
 pub trait GraphRegistry {
     /// All selectable commit addresses.
     fn commits(&self) -> Vec<(&gantz_ca::CommitAddr, &gantz_ca::Commit)>;
-    /// An iterator yielding all name -> CA pairs.
-    fn names(&self) -> &gantz_ca::registry::Names;
+    /// All name -> head commit pairs, in name order.
+    fn names(&self) -> Vec<(Name, gantz_ca::CommitAddr)>;
+    /// The head commit for the given name, if any.
+    fn name_head(&self, name: &Name) -> Option<gantz_ca::CommitAddr> {
+        self.names()
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, ca)| ca)
+    }
 }
 
 /// Commands emitted from the `GraphSelect` widget.
@@ -64,7 +70,7 @@ pub struct GraphSelectResponse {
     /// Ctrl+click on a head that is already open: close this head.
     pub closed: Option<gantz_ca::Head>,
     /// The name mapping was removed.
-    pub name_removed: Option<String>,
+    pub name_removed: Option<Name>,
 }
 
 impl GraphSelectResponse {
@@ -99,7 +105,7 @@ impl<'a> GraphSelect<'a> {
     pub fn new(
         registry: &'a dyn crate::Registry,
         heads: &'a [gantz_ca::Head],
-        base_names: &'a gantz_ca::registry::Names,
+        base_names: &'a crate::reg::Names,
     ) -> Self {
         let id = egui::Id::new("gantz-graph-select");
         Self {
@@ -108,19 +114,11 @@ impl<'a> GraphSelect<'a> {
             id,
             focused_head: None,
             base_names,
-            demos: None,
         }
     }
 
     pub fn with_id(mut self, id: egui::Id) -> Self {
         self.id = id;
-        self
-    }
-
-    /// Provide demo associations so a graph's row context menu can offer to
-    /// open its associated demo.
-    pub fn demos(mut self, demos: Option<&'a HashMap<String, String>>) -> Self {
-        self.demos = demos;
         self
     }
 
@@ -165,7 +163,6 @@ impl<'a> GraphSelect<'a> {
         });
 
         let names = self.registry.names();
-        let demos = self.demos;
         // Captured by `show_named` to surface each named graph's description and
         // input/output docs on hover.
         let registry = self.registry;
@@ -181,11 +178,11 @@ impl<'a> GraphSelect<'a> {
                 // 1. User-named, non-demo
                 // 2. Base-named, non-demo
                 // 3. All demos (alphabetical, regardless of user/base)
-                let is_base = |name: &str| self.base_names.contains_key(name);
-                let is_demo = |name: &str| name.starts_with("demo-");
+                let is_base = |name: &Name| self.base_names.contains_key(name);
+                let is_demo = self::is_demo;
                 // Nested graphs (`parent:child`) are hidden from the root list;
                 // they are reached by navigating into their parent.
-                let is_nested = |name: &str| name.contains(crate::node::NESTED_SEP);
+                let is_nested = |name: &Name| name.is_nested();
                 let matches_filter = |name: &str| {
                     state.name_filter.is_empty()
                         || state
@@ -200,25 +197,31 @@ impl<'a> GraphSelect<'a> {
                 // handle clicks.
                 let show_named =
                     |ui: &mut egui::Ui,
-                     name: &str,
+                     name: &Name,
                      ca: &gantz_ca::CommitAddr,
-                     row_type: HeadRowType<'_>,
+                     base: bool,
                      heads: &[gantz_ca::Head],
                      focused_head: Option<usize>,
                      response: &mut GraphSelectResponse| {
-                        let head = gantz_ca::Head::Branch(name.to_string());
+                        let name_str = name.to_string();
+                        let row_type = if base {
+                            HeadRowType::Base(&name_str)
+                        } else {
+                            HeadRowType::Named(&name_str)
+                        };
+                        let head = gantz_ca::Head::Branch(name.clone());
                         let mut res = head_row(heads, &head, row_type, ca, focused_head, ui);
                         // Show the graph's description + input/output docs on hover.
                         res.row = res.row.on_hover_ui(|ui| {
                             // Re-assert wrap width every frame (see `socket_hover`).
                             let max_width = ui.spacing().tooltip_width;
                             ui.set_max_width(max_width);
-                            crate::node_info_ui(&registry.command_info(name), ui);
+                            crate::node_info_ui(&registry.command_info(&name_str), ui);
                         });
                         // Deletable iff the row offers an `×` (named, non-base).
                         let deletable = res.delete.is_some();
                         // The associated demo to offer, if any.
-                        let demo = demos.and_then(|d| d.get(name)).cloned();
+                        let demo = registry.demo_graph(&name_str);
                         res.row.context_menu(|ui| {
                             if ui.button("open").clicked() {
                                 response.replaced = Some(head.clone());
@@ -234,13 +237,14 @@ impl<'a> GraphSelect<'a> {
                                     .on_hover_text("open the associated demo in a new tab")
                                     .clicked()
                                 {
-                                    response.opened =
-                                        Some(gantz_ca::Head::Branch(demo_name.clone()));
+                                    response.opened = Some(gantz_ca::Head::Branch(
+                                        demo_name.parse().expect("infallible"),
+                                    ));
                                     ui.close();
                                 }
                             }
                             if deletable && ui.button("delete").clicked() {
-                                response.name_removed = Some(name.to_string());
+                                response.name_removed = Some(name.clone());
                                 ui.close();
                             }
                         });
@@ -248,7 +252,7 @@ impl<'a> GraphSelect<'a> {
                             click_head(ui, heads, focused_head, head, response);
                         } else if let Some(delete) = res.delete {
                             if delete.clicked() {
-                                response.name_removed = Some(name.to_string());
+                                response.name_removed = Some(name.clone());
                             }
                         }
                     };
@@ -258,7 +262,7 @@ impl<'a> GraphSelect<'a> {
                     .iter()
                     .filter(|(n, _)| !is_base(n) && !is_demo(n) && !is_nested(n))
                 {
-                    if !matches_filter(name) {
+                    if !matches_filter(&name.to_string()) {
                         continue;
                     }
                     visited.insert(*ca);
@@ -266,7 +270,7 @@ impl<'a> GraphSelect<'a> {
                         ui,
                         name,
                         ca,
-                        HeadRowType::Named(name),
+                        false,
                         self.heads,
                         self.focused_head,
                         &mut response,
@@ -278,7 +282,7 @@ impl<'a> GraphSelect<'a> {
                     .iter()
                     .filter(|(n, _)| state.show_base && is_base(n) && !is_demo(n) && !is_nested(n))
                 {
-                    if !matches_filter(name) {
+                    if !matches_filter(&name.to_string()) {
                         continue;
                     }
                     visited.insert(*ca);
@@ -286,7 +290,7 @@ impl<'a> GraphSelect<'a> {
                         ui,
                         name,
                         ca,
-                        HeadRowType::Base(name),
+                        true,
                         self.heads,
                         self.focused_head,
                         &mut response,
@@ -299,20 +303,15 @@ impl<'a> GraphSelect<'a> {
                     .iter()
                     .filter(|(n, _)| state.show_demo && is_demo(n) && !is_nested(n))
                 {
-                    if !matches_filter(name) {
+                    if !matches_filter(&name.to_string()) {
                         continue;
                     }
                     visited.insert(*ca);
-                    let row_type = if is_base(name) {
-                        HeadRowType::Base(name)
-                    } else {
-                        HeadRowType::Named(name)
-                    };
                     show_named(
                         ui,
                         name,
                         ca,
-                        row_type,
+                        is_base(name),
                         self.heads,
                         self.focused_head,
                         &mut response,
@@ -388,6 +387,13 @@ impl<'a> GraphSelect<'a> {
 
         response
     }
+}
+
+/// Whether the name follows the `demo-*` naming convention for demo graphs.
+pub(crate) fn is_demo(name: &Name) -> bool {
+    name.segments()
+        .first()
+        .is_some_and(|s| s.starts_with("demo-"))
 }
 
 /// Update `response` for a click on the row for `head`.

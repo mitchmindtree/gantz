@@ -39,8 +39,8 @@ impl gantz_core::Node for Inspect {
 }
 
 impl NodeUi for Inspect {
-    fn name(&self, _: &dyn crate::Registry) -> &str {
-        "inspect"
+    fn name(&self, _: &dyn crate::Registry) -> std::borrow::Cow<'_, str> {
+        "inspect".into()
     }
 
     fn ui(&mut self, mut ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {

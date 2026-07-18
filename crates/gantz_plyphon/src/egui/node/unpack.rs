@@ -7,8 +7,8 @@ use gantz_egui::{
 };
 
 impl NodeUi for Unpack {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~unpack"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "~unpack".into()
     }
 
     fn description(&self) -> Option<&'static str> {

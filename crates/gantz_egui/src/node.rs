@@ -9,7 +9,7 @@ pub use fn_named_ref::{FnNamedRef, FnNodeNames};
 #[doc(inline)]
 pub use gantz_core::node::{Id, state};
 pub use inspect::Inspect;
-pub use named_ref::{NESTED_SEP, NameRegistry, NamedRef, missing_color, outdated_color};
+pub use named_ref::{NameRegistry, NamedRef, missing_color, outdated_color};
 pub use plot::{Plot, PlotMode, PlotStyle};
 pub use ref_ext::RefExtUi;
 
@@ -35,10 +35,8 @@ where
     vec![
         Builtin::new("comment", || N::from_node(Comment::default())),
         Builtin::new("fn", move || {
-            let named_ref = NamedRef::new(
-                gantz_core::node::IDENTITY_NAME.to_string(),
-                gantz_core::node::Ref::new(identity_ca),
-            );
+            let name = gantz_core::node::IDENTITY_NAME.parse().expect("infallible");
+            let named_ref = NamedRef::new(name, gantz_core::node::Ref::new(identity_ca));
             N::from_node(gantz_core::node::Fn::new(named_ref))
         }),
         Builtin::new("inspect", || N::from_node(Inspect::default())),

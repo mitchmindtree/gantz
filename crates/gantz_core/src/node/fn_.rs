@@ -102,6 +102,10 @@ impl<N: Node> Node for Fn<N> {
         self.0.required_addrs()
     }
 
+    fn required_blobs(&self) -> Vec<(gantz_ca::SectionId, gantz_ca::ContentAddr)> {
+        self.0.required_blobs()
+    }
+
     fn visit(&self, ctx: visit::Ctx<'_, '_>, visitor: &mut dyn node::Visitor) {
         self.0.visit(ctx, visitor);
     }

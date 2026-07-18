@@ -9,7 +9,7 @@ use bevy_gantz::{
     debounced_input::{DebouncedInputEvent, DebouncedInputPlugin},
     reg, timestamp,
 };
-use bevy_gantz_egui::{GantzEguiPlugin, HeadGuiState, TraceCapture, Views};
+use bevy_gantz_egui::{GantzEguiPlugin, HeadGuiState, TraceCapture};
 use bevy_pkv::PkvStore;
 use storage::Pkv;
 
@@ -102,40 +102,33 @@ fn setup_resources(storage: Res<Pkv>, mut cmds: Commands) {
     // graphs (so they're written on first persist) and before `prune_unused`
     // (so prunes are detected on the first incremental save).
     let persisted = bevy_gantz::storage::PersistedRegistry::from_registry(&registry);
-    let views = bevy_gantz_egui::storage::load_views(&*storage);
-    // Seed the view tracker likewise: the loaded views are all on disk.
-    let persisted_views = bevy_gantz_egui::storage::PersistedViews::from_views(&views);
     let gui_state = bevy_gantz_egui::storage::load_gui_state(&*storage);
     cmds.insert_resource(registry);
     cmds.insert_resource(persisted);
-    cmds.insert_resource(views);
-    cmds.insert_resource(persisted_views);
     cmds.insert_resource(gui_state);
 }
 
 fn setup_open(
     storage: Res<Pkv>,
     mut registry: ResMut<Registry<Box<dyn node::Node>>>,
-    views: Res<Views>,
     mut cmds: Commands,
     mut tab_order: ResMut<HeadTabOrder>,
     mut focused: ResMut<FocusedHead>,
 ) {
-    let loaded =
-        bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, &*views, timestamp());
+    let loaded = bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, timestamp());
     let focused_head = bevy_gantz::storage::load_focused_head(&*storage);
 
     // Spawn entities for each open head. `OpenHead`'s required components
     // cover the compile outcome; `vm::sync` initializes the VMs on the first
     // `Update`.
-    for (head, graph, head_views) in loaded {
+    for (head, graph, head_view) in loaded {
         let is_focused = focused_head.as_ref() == Some(&head);
         let entity = cmds
             .spawn((
                 OpenHead,
                 HeadRef(head),
                 WorkingGraph(graph),
-                head_views,
+                head_view,
                 HeadGuiState::default(),
             ))
             .id();
@@ -165,7 +158,7 @@ mod tests {
 
     #[test]
     fn base_gantz_deserializes() {
-        let _export: gantz_egui::export::Export<
+        let _registry: gantz_ca::Registry<
             gantz_core::node::graph::Graph<Box<dyn super::node::Node>>,
         > = gantz_egui::export::parse_export(BASE_GANTZ).expect("valid .gantz");
     }

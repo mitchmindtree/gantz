@@ -6,8 +6,8 @@ use gantz_std::number::Number;
 use steel::SteelVal;
 
 impl NodeUi for Number {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "number"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "number".into()
     }
 
     fn description(&self) -> Option<&'static str> {

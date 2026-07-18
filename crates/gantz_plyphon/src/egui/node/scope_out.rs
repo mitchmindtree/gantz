@@ -8,8 +8,8 @@ use gantz_egui::{
 };
 
 impl NodeUi for ScopeOut {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~scopeout"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "~scopeout".into()
     }
 
     fn description(&self) -> Option<&'static str> {

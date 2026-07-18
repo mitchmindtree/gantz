@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 [dependencies]
+base64.workspace = true
 bevy_app.workspace = true
 bevy_ecs.workspace = true
 bevy_input.workspace = true

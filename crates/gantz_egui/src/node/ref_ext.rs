@@ -64,11 +64,10 @@ mod tests {
         type G = gantz_core::node::graph::Graph<NamedRef>;
         let registry = gantz_ca::Registry::<G>::default();
         let builtins = gantz_core::BuiltinSet::<NamedRef>::from_specs([]);
-        let demos = std::collections::HashMap::new();
-        let reg_ref = crate::RegistryRef::new(&registry, &builtins, &demos);
+        let reg_ref = crate::RegistryRef::new(&registry, &builtins);
         let mut vm = gantz_core::steel::steel_vm::engine::Engine::new_base();
         let mut named = NamedRef::new(
-            "x".to_string(),
+            "x".parse().unwrap(),
             gantz_core::node::Ref::new([0u8; 32].into()),
         );
         let exts: [&dyn RefExtUi; 1] = [&StubExt];

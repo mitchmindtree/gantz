@@ -109,7 +109,7 @@ mod tests {
         // A boundary/unmaterialised signal output (no recorded shape).
         info.signal_outputs.insert((4, 0), None);
         info.signal_inputs.insert((1, 0));
-        let head = gantz_ca::Head::Branch("test".to_string());
+        let head = gantz_ca::Head::Branch("test".parse().unwrap());
         let style = DspEdgeStyle {
             heads: [(head.clone(), Arc::new(info))].into_iter().collect(),
         };
@@ -140,7 +140,7 @@ mod tests {
         // feed) keeps the default.
         assert!(style.edge_styling(&ctx((2, 0), (1, 0))).is_none());
         // An unknown head keeps the default.
-        let other = gantz_ca::Head::Branch("other".to_string());
+        let other = gantz_ca::Head::Branch("other".parse().unwrap());
         let ctx = EdgeStyleCtx::new(&other, (0, 0), (1, 0));
         assert!(style.edge_styling(&ctx).is_none());
     }

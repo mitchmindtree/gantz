@@ -95,8 +95,8 @@ impl<'a> egui::Widget for ExprEdit<'a> {
 }
 
 impl NodeUi for gantz_core::node::Expr {
-    fn name(&self, _: &dyn crate::Registry) -> &str {
-        "expr"
+    fn name(&self, _: &dyn crate::Registry) -> std::borrow::Cow<'_, str> {
+        "expr".into()
     }
 
     fn description(&self) -> Option<&'static str> {

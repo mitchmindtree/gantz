@@ -3,8 +3,8 @@ use crate::{
 };
 
 impl NodeUi for gantz_std::Bang {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "!"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "!".into()
     }
 
     fn description(&self) -> Option<&'static str> {

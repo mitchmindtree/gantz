@@ -7,8 +7,8 @@ use gantz_egui::{
 };
 
 impl NodeUi for Pack {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "~pack"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "~pack".into()
     }
 
     fn description(&self) -> Option<&'static str> {

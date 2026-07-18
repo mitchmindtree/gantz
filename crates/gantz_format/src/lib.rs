@@ -80,17 +80,17 @@ where
 }
 
 /// [`from_str`], resolving names the document does not define through `seed`
-/// (externally-known name -> head commit associations).
+/// (externally-known name -> head graph associations).
 ///
 /// Lets a document reference graphs defined elsewhere, e.g. a domain's base
 /// source referencing another source's graphs. The document's own names
-/// shadow the seed. Note a seeded reference embeds the seeded commit address
+/// shadow the seed. Note a seeded reference embeds the seeded graph address
 /// in the built node, so the referring graph's content address depends on
 /// it - callers wanting reproducible addresses must seed reproducible ones.
 pub fn from_str_seeded<N>(
     text: &str,
     now: Timestamp,
-    seed: &std::collections::BTreeMap<String, gantz_ca::CommitAddr>,
+    seed: &std::collections::BTreeMap<String, gantz_ca::GraphAddr>,
 ) -> Result<Loaded<N>, FormatError>
 where
     N: Serialize + DeserializeOwned + CaHash + NodeSugar + 'static,
@@ -102,44 +102,53 @@ where
 /// Serialize a registry to `.gantz` text (with gantz's built-in node keywords),
 /// returning the text along with the per-graph label context an extender needs
 /// to emit its own forms.
-pub fn to_string<N>(registry: &Registry<Graph<N>>) -> Result<Dumped, FormatError>
+///
+/// Metadata sections are written as generic `(section ...)` forms, except
+/// the ids in `claimed`, which the caller renders itself with friendly
+/// forms (e.g. `(descriptions ...)`).
+pub fn to_string<N>(registry: &Registry<Graph<N>>, claimed: &[&str]) -> Result<Dumped, FormatError>
 where
     N: Serialize + DeserializeOwned + NodeSugar,
 {
-    to_string_with(registry, &N::sugar())
+    to_string_with(registry, &N::sugar(), claimed)
 }
 
 /// Serialize a registry to `.gantz` text using a custom keyword [`Sugar`].
 pub fn to_string_with<N>(
     registry: &Registry<Graph<N>>,
     sugar: &dyn Sugar,
+    claimed: &[&str],
 ) -> Result<Dumped, FormatError>
 where
     N: Serialize + DeserializeOwned,
 {
-    raise::raise(registry, sugar)
+    raise::raise(registry, sugar, claimed)
 }
 
 /// Serialize a registry in the inline-name format: each named graph is emitted
 /// under its registry name, with no `(commits ...)` / `(names ...)` tables and
 /// references resolved by name. Intended for hand-editable, churn-free files
-/// such as the baked-in base.
-pub fn to_string_named<N>(registry: &Registry<Graph<N>>) -> Result<Dumped, FormatError>
+/// such as the baked-in base. See [`to_string`] for `claimed`.
+pub fn to_string_named<N>(
+    registry: &Registry<Graph<N>>,
+    claimed: &[&str],
+) -> Result<Dumped, FormatError>
 where
     N: Serialize + DeserializeOwned + NodeSugar,
 {
-    to_string_named_with(registry, &N::sugar())
+    to_string_named_with(registry, &N::sugar(), claimed)
 }
 
 /// As [`to_string_named`], with a custom keyword [`Sugar`].
 pub fn to_string_named_with<N>(
     registry: &Registry<Graph<N>>,
     sugar: &dyn Sugar,
+    claimed: &[&str],
 ) -> Result<Dumped, FormatError>
 where
     N: Serialize + DeserializeOwned,
 {
-    raise::raise_named(registry, sugar)
+    raise::raise_named(registry, sugar, claimed)
 }
 
 #[cfg(test)]
@@ -191,7 +200,8 @@ mod tests {
         // `from_str`/`to_string` would instead require a `NodeSugar` impl.)
         let loaded = from_str_with::<Box<dyn Widget>>(text, std::time::Duration::ZERO, &CoreSugar)
             .expect("parse without NodeSugar");
-        let dumped = to_string_with(&loaded.registry, &CoreSugar).expect("write without NodeSugar");
+        let dumped =
+            to_string_with(&loaded.registry, &CoreSugar, &[]).expect("write without NodeSugar");
 
         // The node survived the round-trip through the generic form.
         assert!(
@@ -206,7 +216,7 @@ mod tests {
             from_str_with::<Box<dyn Widget>>(&dumped.text, std::time::Duration::ZERO, &CoreSugar)
                 .expect("reparse");
         assert_eq!(
-            to_string_with(&reloaded.registry, &CoreSugar)
+            to_string_with(&reloaded.registry, &CoreSugar, &[])
                 .expect("rewrite")
                 .text,
             dumped.text,
@@ -239,7 +249,7 @@ mod tests {
 
         // The merge parent survives a write + reparse; non-merge commits carry
         // no `merge-parents` clause.
-        let dumped = to_string_with(&loaded.registry, &CoreSugar).expect("write merge commit");
+        let dumped = to_string_with(&loaded.registry, &CoreSugar, &[]).expect("write merge commit");
         assert_eq!(dumped.text.matches("(merge-parents").count(), 1);
         let reloaded =
             from_str_with::<Box<dyn Widget>>(&dumped.text, std::time::Duration::ZERO, &CoreSugar)
@@ -295,8 +305,8 @@ mod seed_tests {
         }
     }
 
-    fn seed_commit() -> gantz_ca::CommitAddr {
-        gantz_ca::CommitAddr::from(gantz_ca::ContentAddr::from([7u8; 32]))
+    fn seed_graph() -> gantz_ca::GraphAddr {
+        gantz_ca::GraphAddr::from(gantz_ca::ContentAddr::from([7u8; 32]))
     }
 
     fn ref_addr_of(loaded: &Loaded<Box<dyn RefNode>>, name: &str) -> gantz_ca::ContentAddr {
@@ -313,7 +323,7 @@ mod seed_tests {
     }
 
     /// A reference to a name the document does not define fails with
-    /// `MissingDependency` unseeded, and resolves to the seeded commit
+    /// `MissingDependency` unseeded, and resolves to the seeded graph
     /// address when seeded.
     #[test]
     fn seed_resolves_foreign_names() {
@@ -329,19 +339,19 @@ mod seed_tests {
             "unexpected error: {err:?}",
         );
 
-        let seed = [("foreign".to_string(), seed_commit())]
+        let seed = [("foreign".to_string(), seed_graph())]
             .into_iter()
             .collect();
         let loaded = from_str_seeded::<Box<dyn RefNode>>(text, now, &seed).expect("seeded parse");
         assert_eq!(
             ref_addr_of(&loaded, "use-foreign"),
-            gantz_ca::ContentAddr::from(seed_commit()),
-            "the built ref must embed the seeded commit address",
+            gantz_ca::ContentAddr::from(seed_graph()),
+            "the built ref must embed the seeded graph address",
         );
     }
 
     /// The pinned-address arm heals through the seed too: a stale pinned
-    /// address whose name only the seed knows resolves to the seeded commit.
+    /// address whose name only the seed knows resolves to the seeded graph.
     #[test]
     fn seed_heals_stale_pinned_addr() {
         let stale = "ee".repeat(32);
@@ -354,13 +364,13 @@ mod seed_tests {
         };
         assert!(matches!(&err.kind, ErrorKind::MissingDependency(_)));
 
-        let seed = [("foreign".to_string(), seed_commit())]
+        let seed = [("foreign".to_string(), seed_graph())]
             .into_iter()
             .collect();
         let loaded = from_str_seeded::<Box<dyn RefNode>>(&text, now, &seed).expect("seeded parse");
         assert_eq!(
             ref_addr_of(&loaded, "use-foreign"),
-            gantz_ca::ContentAddr::from(seed_commit()),
+            gantz_ca::ContentAddr::from(seed_graph()),
         );
     }
 }

@@ -23,19 +23,20 @@ pub trait FnNodeNames: NameRegistry {
 }
 
 impl NodeUi for FnNamedRef {
-    fn name(&self, _registry: &dyn Registry) -> &str {
-        "fn"
+    fn name(&self, _registry: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "fn".into()
     }
 
     fn ui(&mut self, ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
         let registry = ctx.registry();
+        let name_str = self.0.name().to_string();
         let ref_ca = self.0.content_addr();
 
         // Check if the referenced CA exists in registry.
         let is_missing = !registry.node_exists(&ref_ca);
 
         // Check if outdated (name points to different CA).
-        let current_ca = registry.name_ca(self.0.name());
+        let current_ca = registry.name_ca(&name_str);
         let is_outdated = !is_missing && current_ca.map(|ca| ca != ref_ca).unwrap_or(false);
 
         // Auto-sync if enabled and outdated (skip if missing). A silent
@@ -54,7 +55,7 @@ impl NodeUi for FnNamedRef {
         let is_missing = !registry.node_exists(&ref_ca);
         let is_outdated = !is_missing
             && registry
-                .name_ca(self.0.name())
+                .name_ca(&name_str)
                 .map(|ca| ca != ref_ca)
                 .unwrap_or(false);
 
@@ -62,11 +63,11 @@ impl NodeUi for FnNamedRef {
             ui.horizontal(|ui| {
                 let fn_res = ui.add(egui::Label::new("λ").selectable(false));
                 let name_text = if is_missing {
-                    egui::RichText::new(self.0.name()).color(missing_color())
+                    egui::RichText::new(&name_str).color(missing_color())
                 } else if is_outdated {
-                    egui::RichText::new(self.0.name()).color(outdated_color())
+                    egui::RichText::new(&name_str).color(outdated_color())
                 } else {
-                    egui::RichText::new(self.0.name())
+                    egui::RichText::new(&name_str)
                 };
                 let name_res = ui.add(egui::Label::new(name_text).selectable(false));
                 fn_res.union(name_res)
@@ -95,14 +96,15 @@ impl NodeUi for FnNamedRef {
                 let registry = ctx.registry();
                 let salt = format!("λ-node-select-{:?}", ctx.path());
                 let names = registry.fn_node_names();
+                let current = self.0.name().to_string();
                 egui::ComboBox::from_id_salt(salt)
-                    .selected_text(self.0.name())
+                    .selected_text(&current)
                     .show_ui(ui, |ui| {
                         for name in names.iter() {
-                            if ui.selectable_label(self.0.name() == name, name).clicked() {
+                            if ui.selectable_label(current == *name, name).clicked() {
                                 if let Some(ca) = registry.name_ca(name) {
-                                    self.0 =
-                                        NamedRef::new(name.clone(), gantz_core::node::Ref::new(ca));
+                                    let name = name.parse().expect("infallible");
+                                    self.0 = NamedRef::new(name, gantz_core::node::Ref::new(ca));
                                     resp.mark_changed();
                                 }
                             }

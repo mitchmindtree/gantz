@@ -335,8 +335,8 @@ impl Plot {
 }
 
 impl NodeUi for Plot {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "plot"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "plot".into()
     }
 
     fn description(&self) -> Option<&'static str> {

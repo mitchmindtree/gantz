@@ -1,0 +1,45 @@
+//! A minimal node set for exercising the format/export round-trip paths in
+//! unit tests: an `Expr` leaf plus `NamedRef` for graph references.
+
+use crate::node::NamedRef;
+use dyn_clone::DynClone;
+use gantz_core::node::graph::Graph;
+use std::any::Any;
+
+pub trait TestNode: Any + DynClone + gantz_ca::CaHash + gantz_core::Node {}
+
+pub type TestGraph = Graph<Box<dyn TestNode>>;
+
+dyn_clone::clone_trait_object!(TestNode);
+
+impl TestNode for gantz_core::node::Expr {}
+impl TestNode for NamedRef {}
+impl TestNode for Box<dyn TestNode> {}
+
+gantz_format::impl_node_set_serde! {
+    dyn TestNode {
+        gantz_core::node::Expr,
+        crate::node::NamedRef,
+    }
+}
+
+impl gantz_format::NodeSugar for Box<dyn TestNode> {
+    fn sugar() -> gantz_format::Sugars<'static> {
+        gantz_format::Sugars(vec![&gantz_format::CoreSugar])
+    }
+}
+
+impl crate::sync::AsNamedRef for Box<dyn TestNode> {
+    fn as_named_ref(&self) -> Option<&NamedRef> {
+        ((&**self) as &dyn Any).downcast_ref::<NamedRef>()
+    }
+}
+
+pub fn expr(src: &str) -> Box<dyn TestNode> {
+    Box::new(gantz_core::node::Expr::new(src).unwrap())
+}
+
+pub fn named_ref(name: &str, graph_ca: gantz_ca::GraphAddr) -> Box<dyn TestNode> {
+    let ref_ = gantz_core::node::Ref::new(graph_ca.into());
+    Box::new(NamedRef::new(name.parse().unwrap(), ref_))
+}

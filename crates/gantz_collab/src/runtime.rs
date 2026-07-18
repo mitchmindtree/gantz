@@ -9,8 +9,8 @@
 //!
 //! The runtime is deliberately dumb plumbing: it subscribes gossip topics,
 //! forwards messages both ways, fetches objects on request, and serves the
-//! [`SessionStore`](crate::SessionStore) to peers. All convergence decisions
-//! (what to announce, what to fetch, how to merge) live with the
+//! [`SessionRegistry`](crate::SessionRegistry) to peers. All convergence
+//! decisions (what to announce, what to fetch, how to merge) live with the
 //! application.
 //!
 //! # Infrastructure
@@ -28,10 +28,10 @@ use crate::{
     identity::Identity,
     proto::{self, GossipMsg, Objects, SyncRequest, SyncResponse, Want},
     session::{PeerId, SessionId},
-    store::{SessionEntry, Shared},
+    store::{self, SessionEntry, Shared},
     ticket::SessionTicket,
 };
-use gantz_ca::{Commit, CommitAddr, GraphAddr};
+use gantz_ca::{Commit, CommitAddr, Name, RawGraph};
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode,
     address_lookup::{PkarrPublisher, PkarrResolver},
@@ -129,9 +129,9 @@ pub enum Command {
     /// upserts. Unknown sessions are ignored with a warning.
     Update {
         session: SessionId,
-        heads: Vec<(String, CommitAddr)>,
+        heads: Vec<(Name, CommitAddr)>,
         commits: Vec<(CommitAddr, Commit)>,
-        graphs: Vec<(GraphAddr, Vec<u8>)>,
+        graphs: Vec<RawGraph>,
     },
     /// Start serving and gossiping a session. The session must already be
     /// [`Register`](Command::Register)ed. Emits [`Event::TicketReady`].
@@ -168,7 +168,7 @@ pub enum Event {
     /// ready for staged validation.
     Joined {
         session: SessionId,
-        heads: Vec<(String, CommitAddr)>,
+        heads: Vec<(Name, CommitAddr)>,
         objects: Objects,
     },
     /// A gossip message from a session peer.
@@ -248,19 +248,16 @@ impl SyncServer {
                 accepted: proto == PROTO_VERSION,
             },
             SyncRequest::Snapshot { .. } => {
-                let (heads, objects) = entry.store.snapshot();
+                let (heads, objects) = store::snapshot(&entry.store);
                 SyncResponse::Snapshot { heads, objects }
             }
             SyncRequest::Heads { .. } => {
-                let heads = entry
-                    .store
-                    .heads
-                    .iter()
-                    .map(|(n, ca)| (n.clone(), *ca))
-                    .collect();
+                let heads = entry.store.heads().map(|(n, ca)| (n.clone(), ca)).collect();
                 SyncResponse::Heads { heads }
             }
-            SyncRequest::Want { want, .. } => SyncResponse::Objects(entry.store.objects(&want)),
+            SyncRequest::Want { want, .. } => {
+                SyncResponse::Objects(store::objects(&entry.store, &want))
+            }
         }
     }
 }
@@ -391,7 +388,7 @@ async fn drive(
                     log::warn!("collab: update for an unregistered session");
                     continue;
                 };
-                entry.store.merge(heads, commits, graphs);
+                store::merge(&mut entry.store, heads, commits, graphs);
             }
             Command::Forget(session) => {
                 let mut state = shared.lock();

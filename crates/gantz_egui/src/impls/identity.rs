@@ -1,8 +1,8 @@
 use crate::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind};
 
 impl NodeUi for gantz_core::node::Identity {
-    fn name(&self, _: &dyn Registry) -> &str {
-        gantz_core::node::IDENTITY_NAME
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        gantz_core::node::IDENTITY_NAME.into()
     }
 
     fn description(&self) -> Option<&'static str> {

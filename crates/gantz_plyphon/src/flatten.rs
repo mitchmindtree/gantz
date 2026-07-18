@@ -231,8 +231,8 @@ where
 }
 
 /// [`flatten`] resolving [`AsRefNode`] nodes through the content-addressed
-/// registry (a reference's content address is the referenced graph's commit
-/// address).
+/// registry (a reference's content address is the referenced graph's
+/// `GraphAddr`).
 ///
 /// How each ref lowers is decided here: a ref whose child (transitively)
 /// contains DSP nodes lowers as [`RefKind::Instance`] by default - its child
@@ -257,18 +257,18 @@ where
                 .unwrap_or_default()
                 .inline;
             let kind = if !inline
-                && crate::ref_ext::is_dsp_commit(registry, ca.into(), &mut dsp_memo.borrow_mut())
+                && crate::ref_ext::is_dsp_graph(registry, ca.into(), &mut dsp_memo.borrow_mut())
             {
                 RefKind::Instance
             } else {
                 RefKind::Inline
             };
-            (ca, kind, registry.commit_graph_ref(&ca.into()))
+            (ca, kind, registry.graph(&ca.into()))
         })
     };
     let get_node = |ca: &ContentAddr| {
         registry
-            .commit_graph_ref(&(*ca).into())
+            .graph(&(*ca).into())
             .map(|g| g as &dyn gantz_core::Node)
     };
     flatten(&get_node, graph, &resolve)
@@ -300,7 +300,7 @@ where
             continue;
         }
         let graph = registry
-            .commit_graph_ref(&ca.into())
+            .graph(&ca.into())
             .ok_or(FlattenError::Unresolved(ca))?;
         let child = flatten_from_registry(graph, registry)?;
         queue.extend(marker_cas(&child));

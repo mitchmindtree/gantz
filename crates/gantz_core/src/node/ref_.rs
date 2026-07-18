@@ -24,6 +24,12 @@ pub trait AsRefNode {
 
 /// A node that refers to another node in the environment by content address.
 ///
+/// Reference identity is CONTENT identity: a reference to another graph
+/// pins that graph's `GraphAddr`, so a referencing graph's own address
+/// depends only on the content it references, never on commit history or
+/// timestamps. (The address may also be a builtin node's content address -
+/// resolution decides, via the environment's node lookup.)
+///
 /// A reference optionally carries domain-extension data in `ext`: canonical
 /// [`Datum`]s keyed by a domain-prefixed string (e.g. `"plyphon.dsp-ref"`).
 /// Ext data serializes and content-addresses with the node, losslessly even

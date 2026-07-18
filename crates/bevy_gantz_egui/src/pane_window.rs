@@ -18,7 +18,7 @@
 //! `egui::Window`s instead.
 
 use crate::{
-    BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, Demos, EdgeStyles, ExtPanes, GuiState,
+    BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, EdgeStyles, ExtPanes, GuiState,
     HeadAccess, HostNativePaneWindows, ImportTask, OpenHeadViews, PerfGui, PerfVm, RefExtUis,
     Registry, ResponseDispatchers, SettingsTabs, TraceCapture, WindowedPanesRequested,
     handle_gantz_response, head, registry_ref,
@@ -195,7 +195,6 @@ fn render_windowed_panes<N: PaneNode>(
         mut ext_panes,
         ref_ext_uis,
         edge_styles,
-        mut demos,
         dispatchers,
         export_paths,
         base_sources,
@@ -209,7 +208,6 @@ fn render_windowed_panes<N: PaneNode>(
         ResMut<ExtPanes>,
         Res<RefExtUis>,
         Res<EdgeStyles>,
-        ResMut<Demos>,
         Res<ResponseDispatchers>,
         Option<Res<crate::base::ExportPaths>>,
         Res<crate::base::BaseSources>,
@@ -253,7 +251,7 @@ fn render_windowed_panes<N: PaneNode>(
         // rebuilt per window: each iteration's borrow of the boxes ends with
         // it (mirrors `update`, where it is built inside the panel closure).
         let mut response = {
-            let node_reg = registry_ref(&registry, &builtins, &demos);
+            let node_reg = registry_ref(&registry, &builtins);
             let mut access = HeadAccess::new(&tab_order, &mut heads_query, &mut vms);
             let mut tabs: Vec<&mut dyn gantz_egui::widget::SettingsTab> = settings_tabs
                 .0
@@ -277,7 +275,6 @@ fn render_windowed_panes<N: PaneNode>(
                 .collect();
             let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
-                .demos(&demos.0)
                 .compile_config(compile_config.0)
                 .validate_change_tracking(change_validation.0)
                 .trace_capture(trace_capture.0.clone(), level)
@@ -326,7 +323,6 @@ fn render_windowed_panes<N: PaneNode>(
             &mut focused,
             &mut heads_query,
             &mut registry,
-            &mut demos,
             &base_names,
             &mut compile_config,
             &mut change_validation,

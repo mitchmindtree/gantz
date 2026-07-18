@@ -7,8 +7,8 @@
 
 use crate::datum::{Datum, datum_text};
 use crate::model::{
-    Addr, CommitDecl, Conn, DescriptionDecl, Document, Endpoint, GraphBody, NameDecl, NodeDecl,
-    NodeSpec,
+    Addr, CommitDecl, Conn, Document, Endpoint, GraphBody, NameDecl, NodeDecl, NodeSpec,
+    SectionForm, SectionKey,
 };
 use crate::sexpr::quote;
 use crate::sugar::Sugar;
@@ -29,8 +29,8 @@ pub fn write_document(doc: &Document, sugar: &dyn Sugar) -> String {
         write_names(&mut out, &doc.names);
         out.push_str("\n\n");
     }
-    if !doc.descriptions.is_empty() {
-        write_descriptions(&mut out, &doc.descriptions);
+    for section in &doc.sections {
+        write_section(&mut out, section);
         out.push_str("\n\n");
     }
     let trimmed = out.trim_end();
@@ -166,10 +166,30 @@ fn write_names(out: &mut String, names: &[NameDecl]) {
     out.push(')');
 }
 
-fn write_descriptions(out: &mut String, descriptions: &[DescriptionDecl]) {
-    out.push_str("(descriptions");
-    for d in descriptions {
-        out.push_str(&format!("\n  ({} {})", d.name, quote(&d.description)));
+fn write_section(out: &mut String, section: &SectionForm) {
+    let policy = match section.policy {
+        gantz_ca::MergePolicy::KeepExisting => "keep-existing",
+        gantz_ca::MergePolicy::Replace => "replace",
+    };
+    let liveness = match section.liveness {
+        gantz_ca::Liveness::Root => "root",
+        gantz_ca::Liveness::WithName => "with-name",
+        gantz_ca::Liveness::WithCommit => "with-commit",
+        gantz_ca::Liveness::WithGraph => "with-graph",
+        gantz_ca::Liveness::Pinned => "pinned",
+    };
+    out.push_str(&format!(
+        "(section {}\n  (policy {policy})\n  (liveness {liveness})",
+        quote(&section.id)
+    ));
+    for (key, value) in &section.entries {
+        let key = match key {
+            SectionKey::Name(name) => format!("(name {name})"),
+            SectionKey::Commit(hex) => format!("(commit {})", quote(hex)),
+            SectionKey::Graph(hex) => format!("(graph {})", quote(hex)),
+            SectionKey::Addr(hex) => format!("(addr {})", quote(hex)),
+        };
+        out.push_str(&format!("\n  (entry {key} {})", datum_text(value)));
     }
     out.push(')');
 }

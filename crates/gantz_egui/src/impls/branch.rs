@@ -95,8 +95,8 @@ impl<'a> egui::Widget for BranchEdit<'a> {
 }
 
 impl NodeUi for gantz_core::node::Branch {
-    fn name(&self, _: &dyn crate::Registry) -> &str {
-        "branch"
+    fn name(&self, _: &dyn crate::Registry) -> std::borrow::Cow<'_, str> {
+        "branch".into()
     }
 
     fn description(&self) -> Option<&'static str> {

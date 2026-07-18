@@ -4,7 +4,7 @@ use crate::{
 };
 
 impl NodeUi for gantz_std::log::Log {
-    fn name(&self, _: &dyn Registry) -> &str {
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
         match self.level {
             log::Level::Error => "error",
             log::Level::Warn => "warn",
@@ -12,6 +12,7 @@ impl NodeUi for gantz_std::log::Log {
             log::Level::Debug => "debug",
             log::Level::Trace => "trace",
         }
+        .into()
     }
 
     fn description(&self) -> Option<&'static str> {

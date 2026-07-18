@@ -5,8 +5,8 @@ use crate::{
 use gantz_core::node;
 
 impl NodeUi for gantz_core::node::graph::Inlet {
-    fn name(&self, _: &dyn Registry) -> &str {
-        "in"
+    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+        "in".into()
     }
 
     fn description(&self) -> Option<&'static str> {

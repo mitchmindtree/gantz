@@ -21,13 +21,13 @@ pub struct HeadNameEditResponse {
 pub fn head_name_edit(
     head: &gantz_ca::Head,
     name: &mut String,
-    names: &gantz_ca::registry::Names,
+    names: &[(gantz_ca::Name, gantz_ca::CommitAddr)],
     ui: &mut egui::Ui,
 ) -> HeadNameEditResponse {
-    let name_exists = names.contains_key(name.as_str());
-    let is_current_name = matches!(head, gantz_ca::Head::Branch(n) if n == name);
+    let name_exists = names.iter().any(|(n, _)| n.to_string() == *name);
+    let is_current_name = matches!(head, gantz_ca::Head::Branch(n) if n.to_string() == *name);
     let is_empty = name.is_empty();
-    let has_separator = name.contains(crate::node::NESTED_SEP);
+    let has_separator = name.contains(gantz_ca::name::SEP);
     let is_invalid = is_empty || (!is_current_name && (name_exists || has_separator));
 
     let text_color = if is_invalid && !is_current_name {
@@ -44,7 +44,7 @@ pub fn head_name_edit(
     if has_separator && !is_current_name {
         response = response.on_hover_text(format!(
             "'{}' is reserved for nested graphs; use a plain name",
-            crate::node::NESTED_SEP,
+            gantz_ca::name::SEP,
         ));
     }
 
@@ -70,7 +70,7 @@ pub fn head_name_edit(
 
 pub fn head_name(head: &gantz_ca::Head) -> String {
     match head {
-        gantz_ca::Head::Branch(n) => n.clone(),
+        gantz_ca::Head::Branch(n) => n.to_string(),
         gantz_ca::Head::Commit(_) => String::new(),
     }
 }

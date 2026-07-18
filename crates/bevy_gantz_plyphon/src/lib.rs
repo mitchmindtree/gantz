@@ -288,6 +288,13 @@ struct DspEngine {
     stream: cpal::Stream,
 }
 
+/// The audio-buffer blob entries: content address -> canonical encoded PCM
+/// (the registry's `dsp.buffer` section entries).
+type BufferBlobs = std::collections::BTreeMap<ca::ContentAddr, ca::Bytes>;
+
+/// The empty buffer store, for registries with no `dsp.buffer` section.
+static EMPTY_BUFFERS: BufferBlobs = BufferBlobs::new();
+
 /// Per-head synth bookkeeping (which committed graph produced the currently
 /// installed synthdef and running synth, so we only re-derive on change), plus the
 /// allocator of global scope-stream indices for `~scopeout`s. A NonSend resource - a
@@ -297,6 +304,12 @@ struct HeadSynths {
     heads: HashMap<Entity, HeadParts>,
     scope_alloc: ScopeAlloc,
     bus_alloc: BusAlloc,
+    /// Allocator of global buffer-table indices (bufnums) for resident assets.
+    buffer_alloc: BufferAlloc,
+    /// Assets currently installed in the engine's buffer table, keyed by
+    /// address, shared read-only across every synth referencing them. Loaded
+    /// once and refcounted; freed when the last reference retires.
+    resident: HashMap<ca::ContentAddr, ResidentBuffer>,
     /// Installed synthdef names -> `(refcount, structural_sig)`. A def is
     /// installed once per name and reused while its structure is unchanged;
     /// a structural edit (same name, different sig) re-installs (retiring the
@@ -455,6 +468,9 @@ struct FadingSynth {
     deadline: Instant,
     /// The synth's cued scope streams, closed + freed only at `deadline`.
     scopes: Vec<ScopeSlot>,
+    /// The assets whose refcount this synth still holds, released at `deadline`
+    /// (not at fade-out) so the buffer stays resident through the crossfade.
+    buffers: Vec<ca::ContentAddr>,
 }
 
 /// Allocates globally-unique scope-stream indices (plyphon recording-slot ids) for
@@ -478,6 +494,58 @@ impl ScopeAlloc {
     /// Return an index for reuse.
     fn free(&mut self, index: usize) {
         self.free.push(index);
+    }
+}
+
+/// How long a freed bufnum is quarantined before reuse: a just-retired
+/// `PlayBuf`'s trailing blocks and its `buffer_free` command may still be in
+/// flight when the index is handed out again, so a reuse must not `buffer_set`
+/// over an index a fading reader can still see (mirrors the bus-run graveyard).
+const BUFFER_GRACE: Duration = Duration::from_millis(200);
+
+/// An asset installed in the engine's buffer table: the bufnum it occupies and
+/// how many live-or-fading synths still reference it. Freed at refcount 0.
+struct ResidentBuffer {
+    bufnum: usize,
+    refcount: usize,
+}
+
+/// Allocates global buffer-table indices (bufnums) for resident assets, reusing
+/// freed ones. A freed index is quarantined for [`BUFFER_GRACE`] before it can
+/// be reused, so a fading `PlayBuf` never reads a bufnum re-`buffer_set` under it.
+#[derive(Default)]
+struct BufferAlloc {
+    free: Vec<usize>,
+    next: usize,
+    /// Freed indices awaiting the end of their grace before returning to `free`.
+    graveyard: Vec<(usize, Instant)>,
+}
+
+impl BufferAlloc {
+    /// A free bufnum (reused if available, else a fresh one).
+    fn alloc(&mut self) -> usize {
+        self.free.pop().unwrap_or_else(|| {
+            let index = self.next;
+            self.next += 1;
+            index
+        })
+    }
+
+    /// Quarantine `index` until `now + BUFFER_GRACE`, after which [`sweep`](Self::sweep)
+    /// returns it to the free list.
+    fn free(&mut self, index: usize, now: Instant) {
+        self.graveyard.push((index, now + BUFFER_GRACE));
+    }
+
+    /// Return quarantined bufnums whose grace has passed to the free list.
+    fn sweep(&mut self, now: Instant) {
+        self.graveyard.retain(|(index, deadline)| {
+            let due = *deadline <= now;
+            if due {
+                self.free.push(*index);
+            }
+            !due
+        });
     }
 }
 
@@ -506,6 +574,12 @@ struct PartSynth {
     /// The def's driver-owned fade gains (one per sink), used to fade the synth
     /// in on spawn and out across a crossfaded replacement.
     gains: Vec<GainRef>,
+    /// The distinct assets this synth references, each holding one refcount on
+    /// its [`ResidentBuffer`]. Released (decrementing the refcount) only when
+    /// the synth is finally freed - immediately if it has no fade, else at its
+    /// [`FadingSynth`] deadline - so a crossfade respawn keeps the buffer
+    /// resident with no reload flicker.
+    buffers: Vec<ca::ContentAddr>,
 }
 
 /// Binds one synth control param to a dsp node's VM state value.
@@ -742,6 +816,7 @@ fn drive_synths<N>(
                 Ok((flat, children)) => structural_sync(
                     &mut dsp.controller,
                     state,
+                    buffer_blobs(&registry),
                     entity,
                     graph_ca,
                     &flat,
@@ -852,8 +927,10 @@ fn drive_synths<N>(
     for f in expire_fades(&mut state.fading, Instant::now()) {
         let _ = Embedded::new(&mut dsp.controller).free_node(f.node_id);
         free_scopes(&mut dsp.controller, &mut state.scope_alloc, f.scopes);
+        free_buffers(&mut dsp.controller, state, &f.buffers, Instant::now());
     }
     state.bus_alloc.sweep(Instant::now());
+    state.buffer_alloc.sweep(Instant::now());
 }
 
 /// Split the fade backlog: drains and returns the entries due for freeing - those
@@ -916,10 +993,20 @@ fn park_head(state: &mut HeadSynths, entity: Entity, graph_ca: ca::GraphAddr) {
 /// node tree), else at the tail. On install/spawn failure the old synth is left
 /// playing - strictly better than going silent.
 ///
+/// The registry's audio-buffer blob entries, or the empty store when the
+/// `dsp.buffer` section is absent.
+fn buffer_blobs<G>(reg: &ca::Registry<G>) -> &BufferBlobs {
+    reg.blobs()
+        .get(gantz_plyphon::BUFFER_SECTION)
+        .map(|store| &store.entries)
+        .unwrap_or(&EMPTY_BUFFERS)
+}
+
 /// Returns the sync's outcome as the head's [`DspHead`], for the GUI.
 fn structural_sync<N>(
     controller: &mut Controller,
     state: &mut HeadSynths,
+    assets: &BufferBlobs,
     entity: Entity,
     graph_ca: ca::GraphAddr,
     graph: &Graph<gantz_plyphon::Flat<N>>,
@@ -1075,7 +1162,16 @@ where
         match plan {
             Plan::Keep(k) => parts.push(k),
             Plan::Spawn(r, wiring, old) => {
-                match spawn_part(controller, state, entity, r, wiring, sample_rate, anchor) {
+                match spawn_part(
+                    controller,
+                    state,
+                    assets,
+                    entity,
+                    r,
+                    wiring,
+                    sample_rate,
+                    anchor,
+                ) {
                     Ok(synth) => {
                         // The replacement is live: fade the old out (the gain
                         // overlap is the crossfade) and release its def
@@ -1157,6 +1253,7 @@ fn wiring_hash(part: &ResolvedPart) -> u64 {
 fn spawn_part(
     controller: &mut Controller,
     state: &mut HeadSynths,
+    assets: &BufferBlobs,
     entity: Entity,
     part: ResolvedPart,
     wiring: u64,
@@ -1171,6 +1268,7 @@ fn spawn_part(
         params,
         monitors,
         gains,
+        buffers,
         bus_writes,
         bus_reads,
         shapes: _,
@@ -1214,6 +1312,25 @@ fn spawn_part(
         }
     }
 
+    // Make each referenced asset resident (shared + refcounted) and wire the
+    // node's driver-owned bufnum + rate. A missing/undecodable asset is wired to
+    // a missing buffer (`-1`) so the node plays silence rather than a wrong buffer.
+    let mut part_assets: Vec<ca::ContentAddr> = Vec::new();
+    for binding in &buffers {
+        match resolve_resident(controller, state, assets, &mut part_assets, binding.asset) {
+            Some(bufnum) => {
+                set_after_spawn.push((binding.bufnum_param, bufnum as f32));
+                let rate = if sample_rate > 0.0 {
+                    (binding.sample_rate / sample_rate) as f32
+                } else {
+                    1.0
+                };
+                set_after_spawn.push((binding.rate_param, rate));
+            }
+            None => set_after_spawn.push((binding.bufnum_param, -1.0)),
+        }
+    }
+
     let def_name = def.name.clone();
     let mut backend = Embedded::new(controller);
     // Install the def unless an identical one (same name AND structural sig) is
@@ -1229,6 +1346,7 @@ fn spawn_part(
             log::error!("bevy_gantz_plyphon: synthdef install failed: {e:?}");
             drop(backend);
             free_scopes(controller, &mut state.scope_alloc, scopes);
+            free_buffers(controller, state, &part_assets, now);
             return Err(SpawnError::Permanent);
         }
     }
@@ -1279,6 +1397,7 @@ fn spawn_part(
                 params,
                 scopes,
                 gains,
+                buffers: part_assets,
             })
         }
         Err(e) => {
@@ -1290,6 +1409,7 @@ fn spawn_part(
             drop(backend);
             release_def(controller, &mut state.shared_defs, &def_name);
             free_scopes(controller, &mut state.scope_alloc, scopes);
+            free_buffers(controller, state, &part_assets, now);
             Err(spawn_err)
         }
     }
@@ -1303,6 +1423,8 @@ fn fade_out(controller: &mut Controller, state: &mut HeadSynths, entity: Entity,
     if synth.gains.is_empty() {
         let _ = Embedded::new(controller).free_node(synth.node_id);
         free_scopes(controller, &mut state.scope_alloc, synth.scopes);
+        // No fade to ride through: release the buffer refcounts now.
+        free_buffers(controller, state, &synth.buffers, Instant::now());
         return;
     }
     let mut backend = Embedded::new(controller);
@@ -1313,11 +1435,15 @@ fn fade_out(controller: &mut Controller, state: &mut HeadSynths, entity: Entity,
             log::error!("bevy_gantz_plyphon: fade-out set_control failed: {e:?}");
         }
     }
+    // The buffers ride into the fading entry: their refcounts drop only at the
+    // deadline (below), keeping the buffer resident through the crossfade so a
+    // respawn on the same asset never reloads.
     state.fading.push(FadingSynth {
         entity,
         node_id: synth.node_id,
         deadline: Instant::now() + FADE_GRACE.max(Duration::from_secs_f32(max_lag)),
         scopes: synth.scopes,
+        buffers: synth.buffers,
     });
 }
 
@@ -1327,6 +1453,75 @@ fn free_scopes(controller: &mut Controller, scope_alloc: &mut ScopeAlloc, scopes
     for scope in scopes {
         let _ = controller.close_recording(scope.index);
         scope_alloc.free(scope.index);
+    }
+}
+
+/// Ensure `asset` is resident (installing its buffer from the content-addressed
+/// blob on first use), take a refcount for the spawning part, and return its
+/// bufnum - or `None` if the blob is missing/undecodable or installation failed
+/// (the caller then wires the node to a missing buffer so it plays silence).
+///
+/// `part_assets` records the distinct assets this part already holds a refcount
+/// for, so a part with two nodes playing the same asset shares one bufnum and
+/// takes one refcount (released once when the synth is freed).
+fn resolve_resident(
+    controller: &mut Controller,
+    state: &mut HeadSynths,
+    assets: &BufferBlobs,
+    part_assets: &mut Vec<ca::ContentAddr>,
+    asset: ca::ContentAddr,
+) -> Option<usize> {
+    if let Some(rb) = state.resident.get(&asset) {
+        let bufnum = rb.bufnum;
+        if !part_assets.contains(&asset) {
+            state.resident.get_mut(&asset).unwrap().refcount += 1;
+            part_assets.push(asset);
+        }
+        return Some(bufnum);
+    }
+    let Some(blob) = assets.get(&asset) else {
+        log::error!("bevy_gantz_plyphon: asset {asset} not in the registry; playing silence");
+        return None;
+    };
+    let audio = gantz_plyphon::AudioAsset::decode(blob.as_ref())
+        .map_err(|e| log::error!("bevy_gantz_plyphon: asset {asset} decode failed: {e}"))
+        .ok()?;
+    let bufnum = state.buffer_alloc.alloc();
+    if let Err(e) = controller.buffer_set(bufnum, Box::new(audio.into())) {
+        log::error!("bevy_gantz_plyphon: buffer_set failed for {asset}: {e:?}");
+        state.buffer_alloc.free(bufnum, Instant::now());
+        return None;
+    }
+    state.resident.insert(
+        asset,
+        ResidentBuffer {
+            bufnum,
+            refcount: 1,
+        },
+    );
+    part_assets.push(asset);
+    Some(bufnum)
+}
+
+/// Release each asset's refcount as a retired synth is freed; a buffer whose
+/// last reference is gone is freed from the engine and its bufnum quarantined
+/// (see [`BufferAlloc::free`]) before reuse.
+fn free_buffers(
+    controller: &mut Controller,
+    state: &mut HeadSynths,
+    assets: &[ca::ContentAddr],
+    now: Instant,
+) {
+    for asset in assets {
+        if let Some(rb) = state.resident.get_mut(asset) {
+            rb.refcount -= 1;
+            if rb.refcount == 0 {
+                let bufnum = rb.bufnum;
+                state.resident.remove(asset);
+                let _ = controller.buffer_free(bufnum);
+                state.buffer_alloc.free(bufnum, now);
+            }
+        }
     }
 }
 
@@ -1508,6 +1703,7 @@ mod tests {
             node_id: 0,
             deadline,
             scopes: Vec::new(),
+            buffers: Vec::new(),
         }
     }
 
@@ -1519,6 +1715,94 @@ mod tests {
     fn entities(n: usize) -> Vec<Entity> {
         let mut world = bevy_ecs::world::World::new();
         (0..n).map(|_| world.spawn_empty().id()).collect()
+    }
+
+    /// A one-asset store plus its address, for the resident-buffer tests.
+    fn one_asset() -> (BufferBlobs, ca::ContentAddr) {
+        let audio = gantz_plyphon::AudioAsset::from_interleaved(vec![0.5; 8], 1, 48_000.0);
+        let addr = audio.addr();
+        let bytes = ca::Bytes::from(audio.encode());
+        (std::iter::once((addr, bytes)).collect(), addr)
+    }
+
+    fn test_controller() -> Controller {
+        plyphon::engine(plyphon::Options::default()).0
+    }
+
+    /// A freed bufnum is quarantined (not reused immediately) and only returns
+    /// to the pool once its grace has passed.
+    #[test]
+    fn buffer_alloc_quarantines_then_reuses() {
+        let mut a = BufferAlloc::default();
+        let b0 = a.alloc();
+        let _b1 = a.alloc();
+        let base = Instant::now();
+        a.free(b0, base);
+        // Immediately, a fresh index is handed out - not the quarantined one.
+        assert_ne!(a.alloc(), b0);
+        // A sweep before the grace expires keeps it quarantined.
+        a.sweep(base);
+        assert_ne!(a.alloc(), b0);
+        // After the grace, the freed index returns to the pool.
+        a.sweep(base + BUFFER_GRACE + Duration::from_millis(1));
+        assert_eq!(a.alloc(), b0);
+    }
+
+    /// An asset shared by two synths is installed once, refcounted, and freed
+    /// only when the last reference drops.
+    #[test]
+    fn resident_buffer_shares_and_refcounts() {
+        let mut controller = test_controller();
+        let mut state = HeadSynths::default();
+        let (assets, addr) = one_asset();
+
+        let mut a_refs = Vec::new();
+        let bufnum =
+            resolve_resident(&mut controller, &mut state, &assets, &mut a_refs, addr).unwrap();
+        assert_eq!(a_refs, vec![addr]);
+        assert_eq!(state.resident.get(&addr).unwrap().refcount, 1);
+
+        // A second synth shares the same bufnum and bumps the refcount.
+        let mut b_refs = Vec::new();
+        let bufnum2 =
+            resolve_resident(&mut controller, &mut state, &assets, &mut b_refs, addr).unwrap();
+        assert_eq!(bufnum2, bufnum);
+        assert_eq!(state.resident.get(&addr).unwrap().refcount, 2);
+
+        // Freeing the first keeps the buffer resident for the second.
+        free_buffers(&mut controller, &mut state, &a_refs, Instant::now());
+        assert_eq!(state.resident.get(&addr).unwrap().refcount, 1);
+
+        // Freeing the last drops it and quarantines the bufnum.
+        free_buffers(&mut controller, &mut state, &b_refs, Instant::now());
+        assert!(!state.resident.contains_key(&addr));
+    }
+
+    /// Two references to the same asset within one part take a single refcount.
+    #[test]
+    fn resolve_resident_dedups_within_a_part() {
+        let mut controller = test_controller();
+        let mut state = HeadSynths::default();
+        let (assets, addr) = one_asset();
+        let mut refs = Vec::new();
+        resolve_resident(&mut controller, &mut state, &assets, &mut refs, addr).unwrap();
+        resolve_resident(&mut controller, &mut state, &assets, &mut refs, addr).unwrap();
+        assert_eq!(refs, vec![addr]);
+        assert_eq!(state.resident.get(&addr).unwrap().refcount, 1);
+    }
+
+    /// An asset absent from the store resolves to `None` (the node plays silence).
+    #[test]
+    fn resolve_resident_missing_asset_is_none() {
+        let mut controller = test_controller();
+        let mut state = HeadSynths::default();
+        let (assets, _addr) = one_asset();
+        let mut refs = Vec::new();
+        let missing = ca::blob_addr(b"absent");
+        assert!(
+            resolve_resident(&mut controller, &mut state, &assets, &mut refs, missing).is_none()
+        );
+        assert!(refs.is_empty());
     }
 
     /// Entries past their deadline drain; the rest stay, in order.
@@ -1660,10 +1944,12 @@ mod tests {
             ..plyphon::Options::default()
         });
         let mut state = HeadSynths::default();
+        let assets = BufferBlobs::default();
         let entity = entities(1)[0];
         let synth = spawn_part(
             &mut controller,
             &mut state,
+            &assets,
             entity,
             part,
             wiring,
@@ -1682,6 +1968,70 @@ mod tests {
             rms > 0.05,
             "sin -> out must sound via spawn_part: rms={rms}"
         );
+    }
+
+    /// End-to-end: a `~playbuf -> ~out` graph plays a content-addressed asset.
+    /// Exercises the whole chain - node -> derive -> `BufferBinding` -> resident
+    /// install -> `PlayBuf` reads the buffer -> `Out` - and confirms it sounds.
+    #[test]
+    fn playbuf_sounds_through_out() {
+        use gantz_core::edge::Edge;
+        use gantz_core::node::graph::Graph;
+        use gantz_plyphon::flatten::{Flat, RefKind, flatten};
+
+        // An alternating +/-0.5 waveform (nonzero RMS), content-addressed and
+        // placed in the store the driver reads.
+        let samples = (0..64)
+            .map(|i| if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
+        let audio = gantz_plyphon::AudioAsset::from_interleaved(samples, 1, 48_000.0);
+        let addr = audio.addr();
+        let bytes = ca::Bytes::from(audio.encode());
+        let assets: BufferBlobs = std::iter::once((addr, bytes)).collect();
+
+        let mut g = Graph::<TestN>::default();
+        let p = g.add_node(TestN::PlayBuf(gantz_plyphon::PlayBuf::new(
+            addr, 1, 48_000.0,
+        )));
+        let o = g.add_node(TestN::Out(gantz_plyphon::Out::default()));
+        g.add_edge(p, o, Edge::new(0.into(), 0.into()));
+        let resolve =
+            |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> { None };
+        let flat: Graph<Flat<TestN>> = flatten(&|_| None, &g, &resolve).expect("flatten");
+
+        let mut cache = DefCache::new();
+        let template = derive_template(&flat, 1, &|_| None, &mut cache).expect("derive");
+        let part = instantiate(&template, &cache).into_iter().next().unwrap();
+        let wiring = wiring_hash(&part);
+
+        let (mut controller, _nrt, mut world) = plyphon::engine(plyphon::Options {
+            sample_rate: 48_000.0,
+            output_channels: 1,
+            ..plyphon::Options::default()
+        });
+        let mut state = HeadSynths::default();
+        let entity = entities(1)[0];
+        let synth = spawn_part(
+            &mut controller,
+            &mut state,
+            &assets,
+            entity,
+            part,
+            wiring,
+            48_000.0,
+            None,
+        )
+        .expect("spawn_part");
+        // The asset was made resident with a single refcount, held by this synth.
+        assert_eq!(state.resident.get(&addr).map(|r| r.refcount), Some(1));
+        assert_eq!(synth.buffers, vec![addr]);
+
+        let mut out = vec![0.0f32; 48_000 / 2];
+        for block in out.chunks_mut(64) {
+            world.fill(block, 1);
+        }
+        let rms = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(rms > 0.05, "playbuf -> out must sound: rms={rms}");
     }
 
     /// Multi-frame `structural_sync`: a `~sinosc -> ~out` head graph sounds,
@@ -1721,6 +2071,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             ca1,
             &flat1,
@@ -1748,6 +2099,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             ca2,
             &flat2,
@@ -1802,6 +2154,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             ca1,
             &flatten_no_refs(&g1),
@@ -1828,6 +2181,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             ca2,
             &flatten_no_refs(&g2),
@@ -1855,6 +2209,7 @@ mod tests {
         Out(gantz_plyphon::Out),
         Pack(gantz_plyphon::Pack),
         Unpack(gantz_plyphon::Unpack),
+        PlayBuf(gantz_plyphon::PlayBuf),
         Inlet,
         Outlet,
         Ref(gantz_ca::ContentAddr, usize, usize, bool),
@@ -1867,6 +2222,7 @@ mod tests {
                 TestN::Out(o) => gantz_ca::CaHash::hash(o, hasher),
                 TestN::Pack(p) => gantz_ca::CaHash::hash(p, hasher),
                 TestN::Unpack(u) => gantz_ca::CaHash::hash(u, hasher),
+                TestN::PlayBuf(p) => gantz_ca::CaHash::hash(p, hasher),
                 TestN::Inlet => {
                     hasher.update(b"inlet");
                 }
@@ -1891,6 +2247,7 @@ mod tests {
                 TestN::Out(o) => Some(o),
                 TestN::Pack(p) => Some(p),
                 TestN::Unpack(u) => Some(u),
+                TestN::PlayBuf(p) => Some(p),
                 TestN::Inlet | TestN::Outlet | TestN::Ref(..) => None,
             }
         }
@@ -2009,6 +2366,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             gantz_ca::graph_addr(&g1),
             &flat1,
@@ -2029,6 +2387,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             gantz_ca::graph_addr(&g2),
             &flat2,
@@ -2090,6 +2449,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             gantz_ca::graph_addr(&g1),
             &flat1,
@@ -2109,6 +2469,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             gantz_ca::graph_addr(&g2),
             &flat2,
@@ -2168,6 +2529,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             gantz_ca::graph_addr(&g1),
             &flat1,
@@ -2189,6 +2551,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             gantz_ca::graph_addr(&g2),
             &flat2,
@@ -2225,6 +2588,7 @@ mod tests {
         structural_sync(
             &mut controller,
             &mut state,
+            &Default::default(),
             entity,
             gantz_ca::graph_addr(&g),
             &flat,

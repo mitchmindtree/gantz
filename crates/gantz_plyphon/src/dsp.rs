@@ -292,6 +292,47 @@ pub struct ScopeOutBinding {
     pub bufnum_param: usize,
 }
 
+/// Records a buffer-playing node's (`~playbuf`) asset reference, so the audio
+/// driver can make the referenced [`AssetAddr`](gantz_ca::ContentAddr) resident,
+/// allocate a bufnum, install the buffer, and set the node's `bufnum`/`rate`
+/// params after spawning.
+///
+/// The buffer analogue of [`ScopeOutBinding`], but where a scope stream is
+/// per-synth read-back, a resident buffer is shared read-only across every
+/// synth referencing the same asset (loaded once, refcounted). `bufnum_param`
+/// and `rate_param` are no-lag control params (see
+/// [`push_control_param`](DspBuilder::push_control_param)) the driver sets via
+/// `set_control` after spawning (no def mutation) - the rate to
+/// `sample_rate / engine_sample_rate` so `PlayBuf` advances at the right pitch.
+#[derive(Clone, Debug)]
+pub struct BufferBinding {
+    /// The buffer node's path within the graph (where its state lives).
+    pub node_path: Vec<usize>,
+    /// The content-addressed audio asset the node plays.
+    pub asset: gantz_ca::ContentAddr,
+    /// The no-lag control param the driver sets to the resident bufnum.
+    pub bufnum_param: usize,
+    /// The no-lag control param the driver sets to the playback rate.
+    pub rate_param: usize,
+    /// The asset's own sample rate, for the driver's rate correction.
+    pub sample_rate: f64,
+}
+
+/// The finished output of a [`DspBuilder`]: the compiled synthdef plus the
+/// bindings the audio driver uses to bridge node state and the running synth.
+pub struct Finished {
+    /// The compiled synth definition.
+    pub def: SynthDef,
+    /// One binding per control param, in param-index order.
+    pub params: Vec<ParamBinding>,
+    /// One binding per monitor (`~scopeout`).
+    pub monitors: Vec<ScopeOutBinding>,
+    /// The params gating the def's whole output (fade gains).
+    pub gains: Vec<GainRef>,
+    /// One binding per buffer reference (`~playbuf`).
+    pub buffers: Vec<BufferBinding>,
+}
+
 /// Accumulates the [`UnitSpec`]s and [`Param`]s of a synthdef as nodes emit them.
 ///
 /// Also carries the engine's output-channel count so a sink node (`~out`) can
@@ -303,6 +344,7 @@ pub struct DspBuilder {
     bindings: Vec<ParamBinding>,
     monitors: Vec<ScopeOutBinding>,
     gains: Vec<GainRef>,
+    buffers: Vec<BufferBinding>,
     out_channels: usize,
 }
 
@@ -315,6 +357,7 @@ impl DspBuilder {
             bindings: Vec::new(),
             monitors: Vec::new(),
             gains: Vec::new(),
+            buffers: Vec::new(),
             out_channels: out_channels.max(1),
         }
     }
@@ -394,6 +437,30 @@ impl DspBuilder {
         });
     }
 
+    /// Declare a buffer reference for the dsp node at `path`, recording a
+    /// [`BufferBinding`] so the driver can make `asset` resident and set the
+    /// node's `bufnum`/`rate` params after spawning. `bufnum_param` and
+    /// `rate_param` are no-lag control params (from
+    /// [`push_control_param`](Self::push_control_param)); `sample_rate` is the
+    /// asset's own rate, which the driver divides by the engine rate to set
+    /// `rate`.
+    pub fn push_buffer(
+        &mut self,
+        path: &[usize],
+        asset: gantz_ca::ContentAddr,
+        bufnum_param: u32,
+        rate_param: u32,
+        sample_rate: f64,
+    ) {
+        self.buffers.push(BufferBinding {
+            node_path: path.to_vec(),
+            asset,
+            bufnum_param: bufnum_param as usize,
+            rate_param: rate_param as usize,
+            sample_rate,
+        });
+    }
+
     /// The number of output-bus channels a sink should fan its signal across.
     pub fn out_channels(&self) -> usize {
         self.out_channels
@@ -427,23 +494,21 @@ impl DspBuilder {
         }
     }
 
-    /// Consume the builder into a finished [`SynthDef`], its param bindings, its
-    /// monitor bindings, and its gain refs.
-    pub fn finish(
-        self,
-        name: impl Into<String>,
-    ) -> (
-        SynthDef,
-        Vec<ParamBinding>,
-        Vec<ScopeOutBinding>,
-        Vec<GainRef>,
-    ) {
+    /// Consume the builder into a [`Finished`] synthdef and its param, monitor,
+    /// gain and buffer bindings.
+    pub fn finish(self, name: impl Into<String>) -> Finished {
         let def = SynthDef {
             name: name.into(),
             params: self.params,
             units: self.units,
         };
-        (def, self.bindings, self.monitors, self.gains)
+        Finished {
+            def,
+            params: self.bindings,
+            monitors: self.monitors,
+            gains: self.gains,
+            buffers: self.buffers,
+        }
     }
 }
 
@@ -465,6 +530,7 @@ pub fn node_dsp_of(any: &dyn std::any::Any) -> Option<&dyn NodeDsp> {
         .or_else(|| probe::<crate::Sum>(any))
         .or_else(|| probe::<crate::Unpack>(any))
         .or_else(|| probe::<crate::Bus>(any))
+        .or_else(|| probe::<crate::PlayBuf>(any))
 }
 
 /// The signal at dsp input `i` of a [`NodeDsp::ugens`] `inputs` slice, or mono
@@ -614,6 +680,7 @@ mod tests {
         check::<crate::Sum>();
         check::<crate::Unpack>();
         check::<crate::Bus>();
+        check::<crate::PlayBuf>();
     }
 
     /// A unit-backed mono wire at `rate` to feed the summing helpers.

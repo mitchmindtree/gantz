@@ -76,8 +76,8 @@ use crate::compile::{
     DeriveError, content_def_name, derive_synthdefs, dsp_sinks, merged_pull_order, structural_sig,
 };
 use crate::dsp::{
-    DspBuilder, GainRef, ParamBinding, PortShapes, ScopeOutBinding, Signal, ToNodeDsp,
-    record_port_shapes, sum_signals,
+    BufferBinding, DspBuilder, Finished, GainRef, ParamBinding, PortShapes, ScopeOutBinding,
+    Signal, ToNodeDsp, record_port_shapes, sum_signals,
 };
 use crate::flatten::Flat;
 
@@ -179,6 +179,8 @@ pub struct TemplateRegion {
     pub monitors: Vec<ScopeOutBinding>,
     /// The def's driver-ramped fade gains.
     pub gains: Vec<GainRef>,
+    /// Buffer bindings (template-relative node paths).
+    pub buffers: Vec<BufferBinding>,
     /// The buses this region's def writes.
     pub bus_writes: Vec<TemplateBus>,
     /// The buses this region's def reads.
@@ -281,6 +283,8 @@ pub struct ResolvedPart {
     pub monitors: Vec<ScopeOutBinding>,
     /// The def's driver-ramped fade gains.
     pub gains: Vec<GainRef>,
+    /// Buffer bindings with absolute node paths.
+    pub buffers: Vec<BufferBinding>,
     /// The buses this part's synth writes (absolute keys).
     pub bus_writes: Vec<ResolvedBus>,
     /// The buses this part's synth reads (absolute keys).
@@ -483,6 +487,7 @@ where
                     params: r.derived.params,
                     monitors: r.derived.monitors,
                     gains: r.derived.gains,
+                    buffers: r.derived.buffers,
                     bus_writes: r.bus_writes.into_iter().map(to_template).collect(),
                     bus_reads: r.bus_reads.into_iter().map(to_template).collect(),
                     shapes: r.derived.shapes,
@@ -1237,7 +1242,13 @@ where
     }
     let key = h.finish();
 
-    let (mut def, params, monitors, gains) = builder.finish(String::new());
+    let Finished {
+        mut def,
+        params,
+        monitors,
+        gains,
+        buffers,
+    } = builder.finish(String::new());
     let sig = structural_sig(&def);
     def.name = content_def_name(sig);
     Ok(TemplateRegion {
@@ -1247,6 +1258,7 @@ where
         params,
         monitors,
         gains,
+        buffers,
         bus_writes,
         bus_reads,
         shapes,
@@ -1469,6 +1481,14 @@ fn instantiate_into(
                         })
                         .collect(),
                     gains: r.gains.clone(),
+                    buffers: r
+                        .buffers
+                        .iter()
+                        .map(|b| BufferBinding {
+                            node_path: prefixed(&b.node_path),
+                            ..b.clone()
+                        })
+                        .collect(),
                     bus_writes: r.bus_writes.iter().map(abs_bus).collect(),
                     bus_reads: r.bus_reads.iter().map(abs_bus).collect(),
                     shapes: r

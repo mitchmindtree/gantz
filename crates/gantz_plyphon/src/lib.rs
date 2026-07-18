@@ -16,6 +16,9 @@
 //! UGens into one gantz node - or emits none, like the `~pack`/`~unpack`
 //! channel-routing pair - gets its own descriptive name instead.
 
+pub use asset::{
+    AudioAsset, AudioBuffers, BUFFER_SECTION, DecodeError, add_audio_asset, audio_asset,
+};
 pub use backend::{AddAction, Backend, BackendError, Embedded, ROOT_GROUP_ID};
 pub use builtin::builtins;
 pub use compile::{
@@ -25,8 +28,8 @@ pub use compile::{
 pub use config::{Config, DeriveStatus, Status};
 pub use describe::describe_parts;
 pub use dsp::{
-    DspBuilder, FADE_LAG, GainRef, NodeDsp, NodeRate, ParamBinding, PortShape, PortShapes,
-    ScopeOutBinding, Signal, ToNodeDsp, node_dsp_of, signal_rate,
+    BufferBinding, DspBuilder, FADE_LAG, Finished, GainRef, NodeDsp, NodeRate, ParamBinding,
+    PortShape, PortShapes, ScopeOutBinding, Signal, ToNodeDsp, node_dsp_of, signal_rate,
 };
 pub use flatten::{
     AsRefNode, Flat, FlattenError, RefKind, flatten, flatten_from_registry,
@@ -36,7 +39,7 @@ pub use instance::{
     BusKey, DefCache, GraphTemplate, InstancePart, Part, ResolvedBus, ResolvedPart, TemplateBus,
     TemplateRegion, VariantKey, derive_template, instantiate,
 };
-pub use node::{Bus, Lag, Out, Pack, ScopeOut, SinOsc, Sum, Unpack};
+pub use node::{Bus, Lag, Out, Pack, PlayBuf, ScopeOut, SinOsc, Sum, Unpack};
 pub use port_info::{RootPortInfo, root_port_info};
 pub use ref_ext::{DSP_REF_EXT_KEY, DspRefExt, dsp_graphs};
 pub use sugar::PlyphonSugar;
@@ -46,6 +49,7 @@ pub use self::egui::{
     DSP_PANE_KEY, DspEdgeStyle, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab,
 };
 
+pub mod asset;
 pub mod backend;
 pub mod builtin;
 pub mod compile;

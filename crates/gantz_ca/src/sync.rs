@@ -30,8 +30,8 @@
 //! [`BothModified::KeepNewest`]: crate::merge::BothModified::KeepNewest
 
 use crate::{
-    BlobLiveness, Bytes, CaHash, Commit, CommitAddr, ContentAddr, GraphAddr, RawGraph, SectionId,
-    Timestamp, blob_addr, commit_addr, graph_addr,
+    BlobLiveness, Bytes, CaHash, Commit, CommitAddr, ContentAddr, DataGraph, GraphAddr, RawGraph,
+    SectionId, Timestamp, blob_addr, commit_addr, graph_addr,
     history::{self, MergeAnalysis},
     registry::{Commits, Registry},
 };
@@ -91,6 +91,9 @@ pub enum VerifyError {
         claimed: ContentAddr,
         actual: ContentAddr,
     },
+    /// A data graph carries a non-canonical node, which would alias the same
+    /// logical node under a second address.
+    NonCanonicalNode { graph: GraphAddr, node_ix: usize },
 }
 
 /// An error preventing a [`Staged`] set from being applied to a registry.
@@ -391,6 +394,29 @@ impl Staged<RawGraph> {
     }
 }
 
+impl Staged<DataGraph> {
+    /// Stage a data graph: [`insert_graph`](Self::insert_graph)'s strict
+    /// address check plus canonical-form verification of every node.
+    ///
+    /// A non-canonical node hashes consistently with its own (non-canonical)
+    /// form, so the address check alone would admit it - as an alias of the
+    /// same logical node under a second network-wide address. Rejecting it
+    /// here keeps one logical node to exactly one address.
+    pub fn insert_data_graph(
+        &mut self,
+        claimed: GraphAddr,
+        graph: DataGraph,
+    ) -> Result<(), VerifyError> {
+        if let Some(node_ix) = graph.node_weights().position(|n| !n.is_canonical()) {
+            return Err(VerifyError::NonCanonicalNode {
+                graph: claimed,
+                node_ix,
+            });
+        }
+        self.insert_graph(claimed, graph)
+    }
+}
+
 impl<G> Default for Staged<G> {
     fn default() -> Self {
         Self {
@@ -413,6 +439,12 @@ impl fmt::Display for VerifyError {
             }
             Self::Blob { claimed, actual } => {
                 write!(f, "blob claimed as {claimed} hashes to {actual}")
+            }
+            Self::NonCanonicalNode { graph, node_ix } => {
+                write!(
+                    f,
+                    "graph claimed as {graph} has non-canonical node {node_ix}"
+                )
             }
         }
     }
@@ -740,6 +772,47 @@ mod tests {
             }
         );
         staged.insert_graph(crate::graph_addr(&g), g).unwrap();
+    }
+
+    /// A non-canonical node hashes consistently with its own form, so the
+    /// strict address check alone admits it. The data-graph path must reject
+    /// it: canonical form is what keeps one logical node to one address.
+    #[test]
+    fn staged_rejects_non_canonical_data_graph_node() {
+        use crate::{DataGraph, Datum, NodeData};
+
+        let node = |entries: Vec<(&str, Datum)>| {
+            NodeData::new(
+                "test",
+                Datum::Map(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect(),
+                ),
+            )
+        };
+        // Map keys deliberately out of order.
+        let bad = node(vec![("b", Datum::Null), ("a", Datum::Bool(true))]);
+        assert!(!bad.is_canonical());
+        let mut g = DataGraph::default();
+        g.add_node(bad);
+        let claimed = crate::graph_addr(&g);
+
+        let mut staged = Staged::<DataGraph>::new();
+        // The strict hash check alone would admit the aliased form.
+        staged.insert_graph(claimed, g.clone()).unwrap();
+        let err = staged.insert_data_graph(claimed, g.clone()).unwrap_err();
+        assert_eq!(
+            err,
+            VerifyError::NonCanonicalNode {
+                graph: claimed,
+                node_ix: 0,
+            }
+        );
+
+        g.node_weights_mut().for_each(NodeData::canonicalize);
+        staged.insert_data_graph(crate::graph_addr(&g), g).unwrap();
     }
 
     #[test]

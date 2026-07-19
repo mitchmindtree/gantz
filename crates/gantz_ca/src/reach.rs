@@ -17,7 +17,8 @@
 //! registry directly.
 
 use crate::{
-    BlobLiveness, CommitAddr, ContentAddr, GraphAddr, Liveness, Registry, SectionId, Value,
+    BlobLiveness, CommitAddr, ContentAddr, DataGraph, GraphAddr, Liveness, Registry, SectionId,
+    Value,
 };
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
@@ -45,6 +46,28 @@ impl LiveSet {
     pub fn blob_live(&self, section: &str, addr: &ContentAddr) -> bool {
         self.blobs.get(section).is_some_and(|s| s.contains(addr))
     }
+}
+
+/// The outgoing references of a stored data graph: the union of its nodes'
+/// structural [`refs`](crate::NodeData::refs)/[`blobs`](crate::NodeData::blobs)
+/// columns, sorted and deduplicated.
+///
+/// The `graph_out` for `Registry<DataGraph>` walks: a pure data walk, so any
+/// peer can compute reachability without the node types compiled in.
+pub fn data_graph_out(g: &DataGraph) -> OutRefs {
+    let mut graphs: Vec<GraphAddr> = g
+        .node_weights()
+        .flat_map(|n| n.refs.iter().copied().map(GraphAddr::from))
+        .collect();
+    graphs.sort();
+    graphs.dedup();
+    let mut blobs: Vec<(SectionId, ContentAddr)> = g
+        .node_weights()
+        .flat_map(|n| n.blobs.iter().cloned())
+        .collect();
+    blobs.sort();
+    blobs.dedup();
+    OutRefs { graphs, blobs }
 }
 
 /// The live closure of `reg` from its `Root`-liveness sections plus the
@@ -411,6 +434,53 @@ mod tests {
         let section = other.section("laser.palette").unwrap();
         assert_eq!(section.entries.len(), 1);
         assert_eq!(section.liveness, Liveness::Pinned);
+    }
+
+    /// The full walk over stored data graphs: nested graphs and blobs stay
+    /// live purely through the structural refs columns, with no
+    /// application-supplied callback logic.
+    #[test]
+    fn data_graph_closure_is_a_pure_data_walk() {
+        use crate::NodeData;
+
+        let node = |refs: Vec<GraphAddr>, blobs: Vec<(SectionId, ContentAddr)>| {
+            let mut n = NodeData::new("test", crate::Datum::Map(vec![]));
+            n.refs = refs.into_iter().map(Into::into).collect();
+            n.blobs = blobs;
+            n.canonicalize();
+            n
+        };
+        let mut reg: Registry<crate::DataGraph> = Registry::default();
+        let buf = reg.add_blob("dsp.buffer", BlobLiveness::ContentReferenced, &b"pcm"[..]);
+        let orphan = reg.add_blob("dsp.buffer", BlobLiveness::ContentReferenced, &b"old"[..]);
+        let nested = {
+            let mut g = crate::DataGraph::default();
+            g.add_node(node(vec![], vec![("dsp.buffer".to_string(), buf)]));
+            reg.add_graph(g)
+        };
+        let root = {
+            let mut g = crate::DataGraph::default();
+            g.add_node(node(vec![nested], vec![]));
+            reg.add_graph(g)
+        };
+        let dead = {
+            let mut g = crate::DataGraph::default();
+            g.add_node(node(vec![], vec![("dsp.buffer".to_string(), orphan)]));
+            g.add_node(node(vec![], vec![]));
+            reg.add_graph(g)
+        };
+        let c = reg.commit_graph(Duration::from_secs(1), None, root, || unreachable!());
+        reg.set_head(name("alpha"), c);
+
+        let live = closure(&reg, [], data_graph_out);
+        assert!(live.graphs.contains(&root));
+        assert!(live.graphs.contains(&nested));
+        assert!(!live.graphs.contains(&dead));
+        assert!(live.blob_live("dsp.buffer", &buf));
+        assert!(!live.blob_live("dsp.buffer", &orphan));
+        prune(&mut reg, &live);
+        assert!(reg.graph(&dead).is_none());
+        assert!(reg.blob("dsp.buffer", &orphan).is_none());
     }
 
     #[test]

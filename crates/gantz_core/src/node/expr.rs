@@ -42,6 +42,7 @@ use thiserror::Error;
 #[cahash("gantz.expr")]
 pub struct Expr {
     src: String,
+    #[serde(skip_serializing_if = "is_default_outputs")]
     outputs: u8,
     /// Unique `$` variable names in order of first appearance (cached).
     /// Skipped during serialization and recomputed on deserialization.
@@ -161,6 +162,10 @@ impl Expr {
 
 fn default_outputs() -> u8 {
     1
+}
+
+fn is_default_outputs(outputs: &u8) -> bool {
+    *outputs == default_outputs()
 }
 
 /// Collect unique `$var` names in order of first appearance.

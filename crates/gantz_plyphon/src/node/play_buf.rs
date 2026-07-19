@@ -26,14 +26,17 @@ use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
 #[derive(Clone, Debug, Serialize, Deserialize, NodeTag)]
 pub struct PlayBuf {
     /// The audio asset to play, or `None` until one is assigned.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     asset: Option<ContentAddr>,
     /// The asset's channel count (cached metadata; sizes the output group).
-    #[serde(default = "default_channels")]
+    #[serde(
+        default = "default_channels",
+        skip_serializing_if = "is_default_channels"
+    )]
     num_channels: usize,
     /// The asset's own sample rate in Hz (cached metadata; the driver divides
     /// it by the engine rate to set the playback `rate`).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::node::is_default")]
     sample_rate: f64,
 }
 
@@ -186,6 +189,10 @@ impl ToNodeDsp for PlayBuf {
 
 fn default_channels() -> usize {
     PlayBuf::DEFAULT_CHANNELS
+}
+
+fn is_default_channels(num_channels: &usize) -> bool {
+    *num_channels == default_channels()
 }
 
 #[cfg(test)]

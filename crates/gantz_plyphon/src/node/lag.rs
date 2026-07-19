@@ -20,7 +20,7 @@ use crate::param::{param_name, param_state, plyphon_param};
 /// click-free). Only the (structural) `rate` lives in the node weight.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
 pub struct Lag {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::node::is_default")]
     rate: NodeRate,
 }
 

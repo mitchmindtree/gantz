@@ -17,7 +17,7 @@ use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, input_or_silent};
 /// synthdef-derivation time (and is Steel-inert like the other dsp nodes).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
 pub struct Pack {
-    #[serde(default = "default_count")]
+    #[serde(default = "default_count", skip_serializing_if = "is_default_count")]
     count: usize,
 }
 
@@ -101,4 +101,8 @@ impl ToNodeDsp for Pack {
 
 fn default_count() -> usize {
     Pack::DEFAULT_COUNT
+}
+
+fn is_default_count(count: &usize) -> bool {
+    *count == default_count()
 }

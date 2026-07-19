@@ -20,7 +20,7 @@ use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, input_or_silent};
 /// derivation silently ignores them.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
 pub struct Unpack {
-    #[serde(default = "default_count")]
+    #[serde(default = "default_count", skip_serializing_if = "is_default_count")]
     count: usize,
 }
 
@@ -115,4 +115,8 @@ impl ToNodeDsp for Unpack {
 
 fn default_count() -> usize {
     Unpack::DEFAULT_COUNT
+}
+
+fn is_default_count(count: &usize) -> bool {
+    *count == default_count()
 }

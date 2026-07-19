@@ -214,31 +214,32 @@ mod tests {
     /// (`impl_node_set_serde!`) via this codec rather than hand-writing a
     /// parser per node type, so the mechanism must hold for every listed
     /// node - a type missing from the macro's list fails here.
-    #[test]
-    fn node_set_roundtrips_through_datum() {
-        use gantz_format::{Datum, from_datum, to_datum};
+    fn node_datum(tag: &str, fields: Vec<(&str, gantz_format::Datum)>) -> gantz_format::Datum {
+        use gantz_format::Datum;
+        let mut entries = vec![("type".to_string(), Datum::Str(tag.to_string()))];
+        entries.extend(fields.into_iter().map(|(k, v)| (k.to_string(), v)));
+        Datum::Map(entries)
+    }
 
-        fn node_datum(tag: &str, fields: Vec<(&str, Datum)>) -> Datum {
-            let mut entries = vec![("type".to_string(), Datum::Str(tag.to_string()))];
-            entries.extend(fields.into_iter().map(|(k, v)| (k.to_string(), v)));
-            Datum::Map(entries)
+    fn type_of(d: &gantz_format::Datum) -> Option<&str> {
+        use gantz_format::Datum;
+        match d {
+            Datum::Map(entries) => entries
+                .iter()
+                .find(|(k, _)| k == "type")
+                .and_then(|(_, v)| match v {
+                    Datum::Str(s) => Some(s.as_str()),
+                    _ => None,
+                }),
+            _ => None,
         }
-        fn type_of(d: &Datum) -> Option<&str> {
-            match d {
-                Datum::Map(entries) => {
-                    entries
-                        .iter()
-                        .find(|(k, _)| k == "type")
-                        .and_then(|(_, v)| match v {
-                            Datum::Str(s) => Some(s.as_str()),
-                            _ => None,
-                        })
-                }
-                _ => None,
-            }
-        }
+    }
 
-        let cases = [
+    /// Known-valid wire datums covering the node set, shared by the
+    /// round-trip and dehydration gate tests.
+    fn node_set_cases() -> Vec<gantz_format::Datum> {
+        use gantz_format::Datum;
+        vec![
             node_datum("Inlet", vec![]),
             node_datum("Outlet", vec![]),
             node_datum("Apply", vec![]),
@@ -333,8 +334,14 @@ mod tests {
             node_datum("Unpack", vec![]),
             node_datum("Unpack", vec![("count", Datum::U64(4))]),
             node_datum("Bus", vec![]),
-        ];
-        for value in cases {
+        ]
+    }
+
+    #[test]
+    fn node_set_roundtrips_through_datum() {
+        use gantz_format::{from_datum, to_datum};
+
+        for value in node_set_cases() {
             let node: Box<dyn Node> = from_datum(value.clone())
                 .unwrap_or_else(|e| panic!("from_datum failed for {value:?}: {e}"));
             let back = to_datum(&node).unwrap_or_else(|e| panic!("to_datum failed: {e}"));
@@ -350,6 +357,204 @@ mod tests {
                 "type tag changed for {value:?}",
             );
         }
+    }
+
+    /// The typed instances the erased-representation gate runs over: every
+    /// wire case above, plus types without hand-authored cases.
+    fn node_set_instances() -> Vec<Box<dyn Node>> {
+        let mut nodes: Vec<Box<dyn Node>> = node_set_cases()
+            .into_iter()
+            .map(|d| gantz_format::from_datum(d).expect("node set case"))
+            .collect();
+        nodes.push(Box::new(gantz_std::Log::default()));
+        nodes.push(Box::new(gantz_core::node::Fn(
+            gantz_egui::node::NamedRef::new(
+                name("mul"),
+                gantz_core::node::Ref::new(gantz_ca::ContentAddr([1; 32])),
+            ),
+        )));
+        nodes.push(Box::new(gantz_plyphon::PlayBuf::new(
+            gantz_ca::ContentAddr([2; 32]),
+            2,
+            48_000.0,
+        )));
+        nodes
+    }
+
+    /// Gate test for the registry's erased representation: every node in the
+    /// set must dehydrate to canonical `NodeData` whose typed round-trip is a
+    /// fixpoint (a stable content address), with structural refs matching the
+    /// graph-level reachability reporting. A node type with order- or
+    /// shape-unstable serde fails here.
+    #[test]
+    fn node_set_dehydrates_canonically() {
+        use gantz_core::data::{dehydrate_node, hydrate_node};
+
+        fn no_node(_: &gantz_ca::ContentAddr) -> Option<&'static dyn gantz_core::Node> {
+            None
+        }
+
+        for (i, node) in node_set_instances().into_iter().enumerate() {
+            let nd =
+                dehydrate_node(&node).unwrap_or_else(|e| panic!("case {i}: dehydrate failed: {e}"));
+            assert!(
+                nd.is_canonical(),
+                "case {i} (`{}`): non-canonical dehydration: {nd:?}",
+                nd.tag,
+            );
+            let back: Box<dyn Node> =
+                hydrate_node(&nd).unwrap_or_else(|e| panic!("case {i}: hydrate failed: {e}"));
+            let nd2 = dehydrate_node(&back).expect("re-dehydrate");
+            assert_eq!(
+                nd, nd2,
+                "case {i} (`{}`): typed round-trip shifts the node's data",
+                nd.tag,
+            );
+
+            // Structural refs match the graph-level reachability reporting.
+            let mut g: gantz_core::node::graph::Graph<Box<dyn Node>> = Default::default();
+            g.add_node(back);
+            let out = gantz_core::graph::out_refs(&no_node, &g);
+            let refs: Vec<_> = nd
+                .refs
+                .iter()
+                .copied()
+                .map(gantz_ca::GraphAddr::from)
+                .collect();
+            assert_eq!(out.graphs, refs, "case {i} (`{}`): refs parity", nd.tag);
+            assert_eq!(out.blobs, nd.blobs, "case {i} (`{}`): blobs parity", nd.tag);
+        }
+    }
+
+    /// Pin every node type's canonical content address (the first
+    /// `node_set_instances` case per tag): erased node addresses are
+    /// wire-stability-critical, so any serde change that shifts one - e.g.
+    /// emitting a defaulted field, renaming a field, reordering an enum -
+    /// fails here loudly and must be a deliberate decision.
+    #[test]
+    fn node_set_addr_pins() {
+        use gantz_core::data::dehydrate_node;
+
+        let mut seen = std::collections::BTreeMap::new();
+        for node in node_set_instances() {
+            let nd = dehydrate_node(&node).expect("dehydrate");
+            seen.entry(nd.tag.clone())
+                .or_insert_with(|| nd.content_addr().to_string());
+        }
+        let actual: Vec<(String, String)> = seen.into_iter().collect();
+        let expected: Vec<(String, String)> = [
+            (
+                "Apply",
+                "7efc434b814bf22f86e51c95a525c335b050cefe38a37598dd45bce0f1ebfde4",
+            ),
+            (
+                "Bang",
+                "ac2f4e3d47c7b69a188da461568e9c9c013d1458f68a259ad3c64c3e4055c825",
+            ),
+            (
+                "Branch",
+                "dfd6ba15af40df9e11f89d8b89e895154ef8dc52249797399b326430c4f2f4e2",
+            ),
+            (
+                "Bus",
+                "10ac84d365f318b5116af46dec6c5b400ebcbd3bff1751113096e43e766d791b",
+            ),
+            (
+                "Comment",
+                "ee0eb63753a269f48a387c812b4d96a2a8ef78c441c791bc9ea445613d7e514b",
+            ),
+            (
+                "Delay",
+                "45b031845977348820dd7e4b21fc53238355d94c9d682f604c1b77f199cc2940",
+            ),
+            (
+                "Expr",
+                "95d237d9e0f63806d770c79214c7a7a4f7bf92ad6c850401db772044627b9645",
+            ),
+            (
+                "FnNamedRef",
+                "71b52c706fd6459c6cced0cfd3a58035c5e0a10d1862881a37672bd1a8f9366b",
+            ),
+            (
+                "Identity",
+                "01266e1286fc7d37d4f8c4c3c1e4e99ceca5837f9094e5f628a096ffb27217b1",
+            ),
+            (
+                "Inlet",
+                "e67bf1330241ba58f249f768fd63e701f90eeed94990a113cd494368bd1e2572",
+            ),
+            (
+                "Inspect",
+                "f33771875aa2d1e58ba6d0b78508d3fbefb67bb9cea450a58c661f0c1f8c94ad",
+            ),
+            (
+                "Lag",
+                "25b2a58df0f09fbfbac24f66e392b3bbc37dac93f6be3a4615c2564ec93bc98b",
+            ),
+            (
+                "Log",
+                "e342bc3f0fbb7f89223b045a6083a84de3e099074d969aec9b5a5c9f27169c09",
+            ),
+            (
+                "NamedRef",
+                "207f946ce3dfee38b4da6616a775f7b575e4f850b4ee945c8c4d061737314cc0",
+            ),
+            (
+                "Number",
+                "d22fb1ac39321f2aefb1ab72947d22f1a1ffecaeaacab0d3b3d42bd0466837d0",
+            ),
+            (
+                "Out",
+                "5eaa263391e9171e0a7835c8bf75e64ea88f07e7b77d6ab3f8c6760d38c37be6",
+            ),
+            (
+                "Outlet",
+                "ffa3e274559c73dbc70ddf73efafb9dae72e8e3d56a84818d16e201ee543f4b6",
+            ),
+            (
+                "Pack",
+                "36a4fded818932c8bbfad7cba2748c3ea369d697398a3c1e506e46f4e10ecb42",
+            ),
+            (
+                "PlayBuf",
+                "80f30968c0021ac5a72c7c136c2d946f22768831414028672580cc629649ff99",
+            ),
+            (
+                "Plot",
+                "deb280956a42f29de5d9515537c19b57a8ccb1575e2620dd68ab2d66aaae4484",
+            ),
+            (
+                "ScopeOut",
+                "f52e55d37ad94f3c6bd37c78f55282f8b8e934c8f26e075cd1afb32a5eee133c",
+            ),
+            (
+                "SinOsc",
+                "8855fa0969785b3f32a540a882d4993aec164be346317fa0ad4563e25a36a25e",
+            ),
+            (
+                "Sum",
+                "80658975450345544a9d54870972ef3ffe60d100778adbee6113455963254389",
+            ),
+            (
+                "TickBang",
+                "5b3327a3738cae95967f9b7969d8ddf07eedf1e681e3e1a45147614fa75a1ea1",
+            ),
+            (
+                "Unpack",
+                "ad01b8b16a5f537d6054fd6fdbc3bc03dfa9b818ab3558178b2fcf51b96515d3",
+            ),
+            (
+                "UpdateBang",
+                "674ba08a023408bb47aadfd667ffb1bb6866ff4a5bdf0907b3c1620daf9dfd26",
+            ),
+        ]
+        .into_iter()
+        .map(|(t, a)| (t.to_string(), a.to_string()))
+        .collect();
+        assert_eq!(
+            actual, expected,
+            "node content addresses changed - if deliberate, repin",
+        );
     }
 
     /// Pins the exact node serde wire format in both the `Datum` codec (the
@@ -392,24 +597,20 @@ mod tests {
             (
                 expr,
                 datum(vec![
-                    ("outputs", Datum::U64(1)),
                     ("src", Datum::Str("(+ $a $b)".into())),
                     ("type", Datum::Str("Expr".into())),
                 ]),
-                r#"{"type":"Expr","src":"(+ $a $b)","outputs":1}"#.to_string(),
+                r#"{"type":"Expr","src":"(+ $a $b)"}"#.to_string(),
             ),
             (
                 fn_named_ref,
                 datum(vec![
                     ("name", Datum::Str("mul".into())),
                     ("ref_", Datum::Str(zeros.clone())),
-                    ("sync", Datum::Bool(false)),
                     ("type", Datum::Str("FnNamedRef".into())),
                 ]),
                 // RON preserves the `Ref(ContentAddr)` newtype nesting.
-                format!(
-                    r#"{{"type":"FnNamedRef","ref_":(("{zeros}")),"name":"mul","sync":false}}"#
-                ),
+                format!(r#"{{"type":"FnNamedRef","ref_":(("{zeros}")),"name":"mul"}}"#),
             ),
         ];
 

@@ -163,8 +163,12 @@ impl Hash for Interval {
 /// tick *count* stays correct even when updates are slower than the tick rate.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, NodeTag)]
 pub struct TickBang {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default_interval")]
     interval: Interval,
+}
+
+fn is_default_interval(interval: &Interval) -> bool {
+    *interval == Interval::default()
 }
 
 impl TickBang {

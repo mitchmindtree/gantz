@@ -37,8 +37,12 @@ pub struct NamedRef {
     /// Part of the content address: toggling it is a genuine edit, so the
     /// change rides the normal commit + export pipeline and persists (rather
     /// than being silently dropped by the registry's content-addressed dedup).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) sync: bool,
+}
+
+fn is_default<T: Default + PartialEq>(t: &T) -> bool {
+    *t == T::default()
 }
 
 /// Trait for environments that can check if a name maps to a content address.

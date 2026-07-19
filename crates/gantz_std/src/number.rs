@@ -19,13 +19,16 @@ use std::hash::{Hash, Hasher};
 /// undoable under the commit-on-change model.
 #[derive(Clone, Debug, Serialize, Deserialize, NodeTag)]
 pub struct Number {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     min: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     max: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     precision: Option<u8>,
-    #[serde(default = "default_push_eval")]
+    #[serde(
+        default = "default_push_eval",
+        skip_serializing_if = "is_default_push_eval"
+    )]
     push_eval_on_edit: bool,
 }
 
@@ -176,6 +179,10 @@ impl gantz_core::Node for Number {
 
 fn default_push_eval() -> bool {
     true
+}
+
+fn is_default_push_eval(push_eval_on_edit: &bool) -> bool {
+    *push_eval_on_edit == default_push_eval()
 }
 
 /// Build a Steel expression that clamps `val` to the given bounds.

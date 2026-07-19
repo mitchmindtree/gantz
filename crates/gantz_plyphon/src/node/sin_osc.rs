@@ -25,9 +25,9 @@ use crate::param::{cahash_lag, control_input_expr, param_name, param_state, plyp
 /// and the `rate` (both structural) live in the node weight.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, NodeTag)]
 pub struct SinOsc {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::node::is_default")]
     freq_lag: f32,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::node::is_default")]
     rate: NodeRate,
 }
 

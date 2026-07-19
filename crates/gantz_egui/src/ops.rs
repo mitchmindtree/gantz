@@ -10,7 +10,8 @@ use crate::sync::AsNamedRef;
 use crate::widget::gantz::OpenHeadState;
 use crate::widget::graph_scene::NodeIndex;
 use crate::{CreateNode, InspectEdge, PastePos, export, node::NamedRef};
-use gantz_ca::{CaHash, CommitAddr, GraphAddr, Name};
+use gantz_ca::{CommitAddr, GraphAddr, Name};
+use gantz_core::data::ReifiedGraphs;
 use gantz_core::node::{self, GetNode, graph::Graph};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -25,7 +26,7 @@ use steel::steel_vm::engine::Engine;
 /// The newest existing commit pointing at the graph (if any) becomes the new
 /// commit's parent, preserving the fork point's history.
 pub fn branch_node<N>(
-    registry: &mut gantz_ca::Registry<Graph<N>>,
+    registry: &mut gantz_ca::Registry,
     timestamp: std::time::Duration,
     graph: &mut Graph<N>,
     new_name: String,
@@ -69,8 +70,8 @@ pub fn branch_node<N>(
 
 /// The newest commit pointing at the given graph, if any (ties broken by
 /// address for determinism).
-fn newest_commit_for_graph<G>(
-    registry: &gantz_ca::Registry<G>,
+fn newest_commit_for_graph(
+    registry: &gantz_ca::Registry,
     graph_addr: GraphAddr,
 ) -> Option<CommitAddr> {
     registry
@@ -87,19 +88,13 @@ fn newest_commit_for_graph<G>(
 /// the cause). Writing the resulting string to the clipboard is the caller's
 /// responsibility.
 pub fn copy_nodes<N>(
-    registry: &gantz_ca::Registry<Graph<N>>,
+    registry: &gantz_ca::Registry,
     graph: &Graph<N>,
     head_view: &crate::SceneView,
     selection: &HashSet<NodeIndex>,
 ) -> Option<String>
 where
-    N: gantz_core::Node
-        + Clone
-        + Serialize
-        + DeserializeOwned
-        + CaHash
-        + gantz_format::NodeSugar
-        + 'static,
+    N: gantz_core::Node + Clone + Serialize + DeserializeOwned + gantz_format::NodeSugar,
 {
     if selection.is_empty() {
         return None;
@@ -118,8 +113,10 @@ where
 /// ensure it has a layout entry.
 ///
 /// Returns the index of the new node.
+#[allow(clippy::too_many_arguments)]
 pub fn create_node<N>(
-    registry: &gantz_ca::Registry<Graph<N>>,
+    registry: &gantz_ca::Registry,
+    reified: &ReifiedGraphs<N>,
     editing: Option<&str>,
     get_node: GetNode,
     new_node: impl FnOnce(&str) -> Option<N>,
@@ -139,7 +136,7 @@ where
     if editing.is_some_and(|editing| {
         let target: Name = node_type.parse().expect("infallible");
         let editing: Name = editing.parse().expect("infallible");
-        crate::cycle::would_cycle(registry, &target, &editing)
+        crate::cycle::would_cycle(registry, reified, &target, &editing)
     }) {
         log::warn!("CreateNode: '{node_type}' would create a reference cycle; skipping");
         return None;
@@ -177,7 +174,7 @@ where
 /// `parent` is the emitting head's name; the new graph is named with the first
 /// free `<parent>:<n>` leaf. Returns the index of the new node.
 pub fn create_nested_graph<N>(
-    registry: &mut gantz_ca::Registry<Graph<N>>,
+    registry: &mut gantz_ca::Registry,
     timestamp: std::time::Duration,
     graph: &mut Graph<N>,
     view: &mut crate::SceneView,
@@ -186,7 +183,7 @@ pub fn create_nested_graph<N>(
     parent: &Name,
 ) -> Option<NodeIndex>
 where
-    N: gantz_core::Node + From<NamedRef> + CaHash,
+    N: gantz_core::Node + From<NamedRef> + Serialize,
 {
     // Pick the first free `<parent>:<n>` leaf name.
     let mut n = 1u32;
@@ -198,9 +195,9 @@ where
         n += 1;
     };
 
-    // Commit a fresh empty graph under the chosen name.
-    let nested_graph = Graph::<N>::default();
-    let graph_ca = gantz_ca::graph_addr(&nested_graph);
+    // Commit a fresh empty graph (erased) under the chosen name.
+    let (nested_graph, graph_ca) = gantz_core::data::erase_with_addr(&Graph::<N>::default())
+        .expect("an empty graph always erases");
     registry.commit_graph_to_name(timestamp, graph_ca, || nested_graph, &name);
 
     // Insert a synced reference to the new nested graph. The referenced graph is
@@ -329,7 +326,7 @@ pub fn remove_nodes<N>(
 /// a failed copy never loses nodes. Like [`remove_nodes`], run this before the
 /// next recompile.
 pub fn cut_nodes<N>(
-    registry: &gantz_ca::Registry<Graph<N>>,
+    registry: &gantz_ca::Registry,
     graph: &mut Graph<N>,
     vm: &mut Engine,
     head_view: &mut crate::SceneView,
@@ -337,13 +334,7 @@ pub fn cut_nodes<N>(
     nodes: &HashSet<NodeIndex>,
 ) -> Option<String>
 where
-    N: gantz_core::Node
-        + Clone
-        + Serialize
-        + DeserializeOwned
-        + CaHash
-        + gantz_format::NodeSugar
-        + 'static,
+    N: gantz_core::Node + Clone + Serialize + DeserializeOwned + gantz_format::NodeSugar,
 {
     let text = copy_nodes(registry, graph, head_view, nodes)?;
     remove_nodes(
@@ -417,8 +408,10 @@ pub fn inspect_edge<N>(
 /// Returns `true` if a payload was pasted. The caller is responsible for
 /// re-registering the root graph with the VM afterwards so pasted nodes get
 /// their state initialized.
+#[allow(clippy::too_many_arguments)]
 pub fn paste<N>(
-    registry: &mut gantz_ca::Registry<Graph<N>>,
+    registry: &mut gantz_ca::Registry,
+    reified: &ReifiedGraphs<N>,
     editing: Option<&str>,
     graph: &mut Graph<N>,
     head_view: &mut crate::SceneView,
@@ -431,10 +424,8 @@ where
         + Clone
         + Serialize
         + DeserializeOwned
-        + CaHash
         + AsNamedRef
-        + gantz_format::NodeSugar
-        + 'static,
+        + gantz_format::NodeSugar,
 {
     let copied: export::Copied<N> = match export::copied_from_str(text) {
         Ok(c) => c,
@@ -455,7 +446,7 @@ where
             .graph
             .node_weights()
             .filter_map(|n| n.as_named_ref())
-            .find(|nr| crate::cycle::would_cycle(registry, nr.name(), &editing))
+            .find(|nr| crate::cycle::would_cycle(registry, reified, nr.name(), &editing))
         {
             log::warn!(
                 "Paste: '{}' would create a reference cycle in '{editing}'; skipping paste",
@@ -482,7 +473,8 @@ where
 /// re-registers the root graph with the VM afterwards so the new nodes get
 /// their state initialized.
 pub fn duplicate_nodes<N>(
-    registry: &mut gantz_ca::Registry<Graph<N>>,
+    registry: &mut gantz_ca::Registry,
+    reified: &ReifiedGraphs<N>,
     editing: Option<&str>,
     graph: &mut Graph<N>,
     head_view: &mut crate::SceneView,
@@ -494,16 +486,15 @@ where
         + Clone
         + Serialize
         + DeserializeOwned
-        + CaHash
         + AsNamedRef
-        + gantz_format::NodeSugar
-        + 'static,
+        + gantz_format::NodeSugar,
 {
     let Some(text) = copy_nodes(registry, graph, head_view, nodes) else {
         return false;
     };
     paste(
         registry,
+        reified,
         editing,
         graph,
         head_view,
@@ -518,8 +509,8 @@ where
 ///
 /// Returns `None` when the head has no parent commit to return to.
 /// Navigation itself is frontend-specific and stays with the caller.
-pub fn undo<G>(
-    registry: &gantz_ca::Registry<G>,
+pub fn undo(
+    registry: &gantz_ca::Registry,
     redo_stacks: &mut HashMap<gantz_ca::Head, Vec<CommitAddr>>,
     head: &gantz_ca::Head,
 ) -> Option<CommitAddr> {
@@ -619,7 +610,8 @@ pub enum MergeHeadOutcome {
 /// Fast-forwards mutate nothing - the caller navigates the head instead.
 #[allow(clippy::too_many_arguments)]
 pub fn merge_head<N>(
-    registry: &mut gantz_ca::Registry<Graph<N>>,
+    registry: &mut gantz_ca::Registry,
+    reified: &ReifiedGraphs<N>,
     timestamp: gantz_ca::Timestamp,
     head: &mut gantz_ca::Head,
     graph: &mut Graph<N>,
@@ -631,7 +623,7 @@ pub fn merge_head<N>(
     auto_resolve: bool,
 ) -> MergeHeadOutcome
 where
-    N: Clone + CaHash + AsNamedRef,
+    N: DeserializeOwned + AsNamedRef,
 {
     let node_id = |ix: usize| egui_graph::NodeId::from_u64(ix as u64);
     let Some(ours_tip) = registry.head_commit_ca(head) else {
@@ -654,9 +646,20 @@ where
         Ok(gantz_ca::MergeResolution::Diverged { outcome, .. }) => outcome,
     };
 
+    // The merge runs over the stored data graphs; the working graph is typed,
+    // so the merged result must reify through the node set before it can be
+    // swapped in. A failure mutates nothing.
+    let merged_graph: Graph<N> = match gantz_core::data::reify(&outcome.graph) {
+        Ok(g) => g,
+        Err(e) => {
+            log::error!("MergeHead: cannot decode the merged graph: {e}");
+            return MergeHeadOutcome::Noop;
+        }
+    };
+
     // Refuse on hard blockers, and on conflicts unless the caller opted into
     // the selected resolutions.
-    let blockers = crate::merge::merge_blockers(registry, head, &outcome.graph);
+    let blockers = crate::merge::merge_blockers(registry, reified, head, &merged_graph);
     if !blockers.is_empty() {
         return MergeHeadOutcome::Refused(blockers);
     }
@@ -710,12 +713,15 @@ where
         head_view.layout.insert(node_id(m), pos);
     }
 
-    // Swap in the merged graph and commit it with both parents.
-    *graph = outcome.graph;
+    // Swap in the merged graph and commit its (already-erased) data form with
+    // both parents. The merged data graph is exactly what the working graph
+    // erases back to, so the registry address matches the working content.
+    *graph = merged_graph;
+    let merged_data = outcome.graph;
     let new_commit = registry.commit_merge_to_head(
         timestamp,
-        gantz_ca::graph_addr(&*graph),
-        || graph.clone(),
+        gantz_ca::graph_addr(&merged_data),
+        || merged_data,
         theirs_tip,
         head,
     );
@@ -740,8 +746,8 @@ where
 /// (no baseline view yet - i.e. the head commit's view section entry has not
 /// been seeded - or no node-position change). Seeding the new commit's view,
 /// clearing the redo stack and migrating GUI state stay with the caller.
-pub fn commit_layout<G>(
-    registry: &mut gantz_ca::Registry<G>,
+pub fn commit_layout(
+    registry: &mut gantz_ca::Registry,
     timestamp: gantz_ca::Timestamp,
     head: &mut gantz_ca::Head,
     live: &crate::SceneView,
@@ -871,13 +877,25 @@ mod tests {
         assert!(view.layout.is_empty());
     }
 
-    /// A minimal node type satisfying [`merge_head`]'s bounds.
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    struct TestNode(u32);
+    /// A minimal node type satisfying [`merge_head`]'s bounds: an internally
+    /// tagged enum serializes to the `"type"`-tagged map shape node-set serde
+    /// produces, so it erases/reifies through `gantz_core::data`.
+    #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "type")]
+    enum TestNode {
+        Num { v: u32 },
+    }
 
-    impl CaHash for TestNode {
-        fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-            CaHash::hash(&self.0, hasher);
+    impl TestNode {
+        fn value(&self) -> u32 {
+            let TestNode::Num { v } = self;
+            *v
+        }
+    }
+
+    impl gantz_core::Node for TestNode {
+        fn expr(&self, _: node::ExprCtx) -> gantz_core::node::ExprResult {
+            unimplemented!("not compiled in these tests")
         }
     }
 
@@ -890,9 +908,20 @@ mod tests {
     fn test_graph(nodes: &[u32]) -> Graph<TestNode> {
         let mut g = Graph::default();
         for &n in nodes {
-            g.add_node(TestNode(n));
+            g.add_node(TestNode::Num { v: n });
         }
         g
+    }
+
+    /// Commit the erased form of `graph`, returning the new commit address.
+    fn commit_test_graph(
+        reg: &mut gantz_ca::Registry,
+        secs: u64,
+        parent: Option<CommitAddr>,
+        graph: &Graph<TestNode>,
+    ) -> CommitAddr {
+        let (dg, ga) = gantz_core::data::erase_with_addr(graph).unwrap();
+        reg.commit_graph(std::time::Duration::from_secs(secs), parent, ga, || dg)
     }
 
     fn node_id(ix: usize) -> egui_graph::NodeId {
@@ -905,15 +934,11 @@ mod tests {
         base: &[u32],
         ours: &[u32],
         theirs: &[u32],
-    ) -> (gantz_ca::Registry<Graph<TestNode>>, gantz_ca::Head) {
-        let secs = |s| std::time::Duration::from_secs(s);
+    ) -> (gantz_ca::Registry, gantz_ca::Head) {
         let mut reg = gantz_ca::Registry::default();
-        let g = test_graph(base);
-        let base_ca = reg.commit_graph(secs(1), None, gantz_ca::graph_addr(&g), || g);
-        let g = test_graph(ours);
-        let ours_ca = reg.commit_graph(secs(2), Some(base_ca), gantz_ca::graph_addr(&g), || g);
-        let g = test_graph(theirs);
-        let theirs_ca = reg.commit_graph(secs(3), Some(base_ca), gantz_ca::graph_addr(&g), || g);
+        let base_ca = commit_test_graph(&mut reg, 1, None, &test_graph(base));
+        let ours_ca = commit_test_graph(&mut reg, 2, Some(base_ca), &test_graph(ours));
+        let theirs_ca = commit_test_graph(&mut reg, 3, Some(base_ca), &test_graph(theirs));
         reg.set_head("alpha".parse().unwrap(), ours_ca);
         reg.set_head("beta".parse().unwrap(), theirs_ca);
         (reg, gantz_ca::Head::Branch("alpha".parse().unwrap()))
@@ -921,7 +946,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn run_merge(
-        reg: &mut gantz_ca::Registry<Graph<TestNode>>,
+        reg: &mut gantz_ca::Registry,
         head: &mut gantz_ca::Head,
         graph: &mut Graph<TestNode>,
         vm: &mut Engine,
@@ -931,6 +956,7 @@ mod tests {
     ) -> MergeHeadOutcome {
         merge_head(
             reg,
+            &ReifiedGraphs::new(),
             std::time::Duration::from_secs(9),
             head,
             graph,
@@ -972,7 +998,7 @@ mod tests {
         };
 
         // The merged graph keeps ours' nodes in place and appends theirs' add.
-        let weights: Vec<u32> = graph.node_weights().map(|n| n.0).collect();
+        let weights: Vec<u32> = graph.node_weights().map(|n| n.value()).collect();
         assert_eq!(weights, vec![1, 20, 3]);
         // Ours' layout and selection are untouched; the merged-in node has a
         // (fallback) layout entry.
@@ -1016,7 +1042,7 @@ mod tests {
 
         // Node 2 (ours ix 1) survives at merged ix 0.
         assert_eq!(mapping, gantz_ca::Matching::from([(1, 0)]));
-        let weights: Vec<u32> = graph.node_weights().map(|n| n.0).collect();
+        let weights: Vec<u32> = graph.node_weights().map(|n| n.value()).collect();
         assert_eq!(weights, vec![2]);
         // Its state, layout and selection followed.
         let state = node::state::extract_value(&vm, &[0]).unwrap();
@@ -1056,7 +1082,7 @@ mod tests {
         // Nothing moved.
         assert_eq!(reg.head_commit_ca(&head), Some(ours_tip));
         assert_eq!(
-            graph.node_weights().map(|n| n.0).collect::<Vec<_>>(),
+            graph.node_weights().map(|n| n.value()).collect::<Vec<_>>(),
             [1, 20]
         );
 
@@ -1072,7 +1098,7 @@ mod tests {
         );
         assert!(matches!(outcome, MergeHeadOutcome::Merged { .. }));
         assert_eq!(
-            graph.node_weights().map(|n| n.0).collect::<Vec<_>>(),
+            graph.node_weights().map(|n| n.value()).collect::<Vec<_>>(),
             [1, 20]
         );
         assert_ne!(reg.head_commit_ca(&head), Some(ours_tip));
@@ -1081,12 +1107,9 @@ mod tests {
     // A source branch that is strictly ahead fast-forwards without a commit.
     #[test]
     fn merge_head_fast_forwards() {
-        let secs = |s| std::time::Duration::from_secs(s);
         let mut reg = gantz_ca::Registry::default();
-        let g = test_graph(&[1]);
-        let base_ca = reg.commit_graph(secs(1), None, gantz_ca::graph_addr(&g), || g);
-        let g = test_graph(&[1, 2]);
-        let theirs_ca = reg.commit_graph(secs(2), Some(base_ca), gantz_ca::graph_addr(&g), || g);
+        let base_ca = commit_test_graph(&mut reg, 1, None, &test_graph(&[1]));
+        let theirs_ca = commit_test_graph(&mut reg, 2, Some(base_ca), &test_graph(&[1, 2]));
         reg.set_head("alpha".parse().unwrap(), base_ca);
         reg.set_head("beta".parse().unwrap(), theirs_ca);
         let mut head = gantz_ca::Head::Branch("alpha".parse().unwrap());

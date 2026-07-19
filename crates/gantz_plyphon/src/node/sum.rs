@@ -15,7 +15,7 @@ use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, sum_signals};
 /// concatenation is `~pack`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
 pub struct Sum {
-    #[serde(default = "default_count")]
+    #[serde(default = "default_count", skip_serializing_if = "is_default_count")]
     count: usize,
 }
 
@@ -92,4 +92,8 @@ impl ToNodeDsp for Sum {
 
 fn default_count() -> usize {
     Sum::DEFAULT_COUNT
+}
+
+fn is_default_count(count: &usize) -> bool {
+    *count == default_count()
 }

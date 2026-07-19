@@ -33,24 +33,6 @@ pub enum FileDropTarget {
 /// created like any other node but routed through the registry-aware op.
 pub const NESTED_GRAPH_TYPE: &str = "graph";
 
-/// A registry of available node types.
-///
-/// Provides the list of node type names available for creation.
-/// Actual node creation is handled via [`crate::CreateNode`].
-pub trait NodeTypeRegistry {
-    /// The unique name of each node available.
-    fn node_types(&self) -> Vec<&str>;
-
-    /// The formatted keyboard shortcut for the node palette.
-    fn command_formatted_kb_shortcut(
-        &self,
-        _ctx: &egui::Context,
-        _node_type: &str,
-    ) -> Option<String> {
-        None
-    }
-}
-
 /// The top-level gantz widget.
 pub struct Gantz<'a> {
     env: &'a dyn Registry,
@@ -1395,7 +1377,7 @@ where
             Some(head) => {
                 let merge_resolutions = &mut state.merge_resolutions;
                 let head_state = state.open_heads.entry(head.clone()).or_default();
-                let names = gantz.env.names();
+                let names = crate::reg::names(gantz.env.ca());
                 let is_base = match &head {
                     gantz_ca::Head::Branch(name) => base_names.contains_key(name),
                     _ => false,
@@ -1418,7 +1400,9 @@ where
 
                 // The graph's current description (named graphs only).
                 let current_description = match &head {
-                    gantz_ca::Head::Branch(name) => gantz.env.graph_description(&name.to_string()),
+                    gantz_ca::Head::Branch(name) => {
+                        crate::section::description(gantz.env.ca(), name)
+                    }
                     _ => None,
                 };
 
@@ -2074,7 +2058,7 @@ where
 
         let response = if is_editing {
             let head = tiles.get_pane(&tile_id).map(|GraphPane(h)| h.clone());
-            let names = self.env.names();
+            let names = crate::reg::names(self.env.ca());
 
             let name_res = head.as_ref().map(|h| {
                 ui.scope(|ui| {

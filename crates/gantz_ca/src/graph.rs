@@ -1,6 +1,5 @@
 //! The gantz content-address implementation for graphs.
 
-use crate::section::Bytes;
 pub use crate::{
     ContentAddr, content_addr,
     hash::{CaHash, Hasher},
@@ -9,47 +8,9 @@ use petgraph::visit::{Data, EdgeRef, IntoEdgeReferences, IntoNodeReferences, Nod
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt, hash::Hash, ops};
 
-/// The one capability graph stores need from a graph payload: its address.
-///
-/// Typed (petgraph-shaped) payloads compute this from content (see [`addr`]).
-/// Payloads a process cannot decode, such as [`RawGraph`], carry the address
-/// they were validated against instead.
-pub trait GraphHash {
-    /// The content address of the graph.
-    fn graph_addr(&self) -> GraphAddr;
-}
-
 /// The content address of a graph.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 pub struct GraphAddr(ContentAddr);
-
-/// A blob-at-rest graph payload for serve-side stores: application
-/// serialized bytes carried under the address they were VALIDATED against.
-///
-/// A raw graph's address cannot be recomputed from its bytes (the structural
-/// graph hash needs the decoded graph), so a store holding raw graphs holds
-/// them under CLAIMED addresses that a decoding peer validated. Such a store
-/// is a relay: it serves what decoding peers verified, and a receiving peer
-/// always re-verifies through the typed
-/// [`Staged::insert_graph`](crate::sync::Staged::insert_graph) path, which
-/// is where the security boundary lives.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RawGraph {
-    /// The address a decoding peer validated the bytes against.
-    pub addr: GraphAddr,
-    /// The application-serialized (self-describing) graph bytes.
-    pub bytes: Bytes,
-}
-
-impl RawGraph {
-    /// A raw graph from its validated address and serialized bytes.
-    pub fn new(addr: GraphAddr, bytes: impl Into<Bytes>) -> Self {
-        Self {
-            addr,
-            bytes: bytes.into(),
-        }
-    }
-}
 
 impl ops::Deref for GraphAddr {
     type Target = ContentAddr;
@@ -73,12 +34,6 @@ impl From<GraphAddr> for ContentAddr {
 impl CaHash for GraphAddr {
     fn hash(&self, hasher: &mut Hasher) {
         CaHash::hash(&self.0, hasher);
-    }
-}
-
-impl GraphHash for RawGraph {
-    fn graph_addr(&self) -> GraphAddr {
-        self.addr
     }
 }
 
@@ -124,37 +79,13 @@ where
     GraphAddr(ContentAddr(hasher.finalize().into()))
 }
 
-/// A more efficient alternative to [`addr`] for when the node content
-/// addresses are already known.
-pub fn addr_with_nodes<G>(g: G, nodes: &HashMap<G::NodeId, ContentAddr>) -> GraphAddr
-where
-    G: Data + IntoEdgeReferences + IntoNodeReferences,
-    G::NodeId: Hash + Ord,
-    G::EdgeWeight: CaHash + Ord,
-{
-    let mut hasher = Hasher::new();
-    hash_graph_with_nodes(g, nodes, &mut hasher);
-    GraphAddr(ContentAddr(hasher.finalize().into()))
-}
-
 /// The implementation of [`addr`] with hasher provided.
-pub fn hash_graph<G>(g: G, hasher: &mut Hasher)
+fn hash_graph<G>(g: G, hasher: &mut Hasher)
 where
     G: Data + IntoEdgeReferences + IntoNodeReferences,
     G::NodeId: Eq + Hash + Ord,
     G::EdgeWeight: CaHash + Ord,
     G::NodeWeight: CaHash,
-{
-    let nodes = node_addrs(g);
-    hash_graph_with_nodes(g, &nodes, hasher);
-}
-
-/// The implementation of [`addr_with_nodes`] with hasher provided.
-pub fn hash_graph_with_nodes<G>(g: G, nodes: &HashMap<G::NodeId, ContentAddr>, hasher: &mut Hasher)
-where
-    G: Data + IntoEdgeReferences + IntoNodeReferences,
-    G::NodeId: Hash + Ord,
-    G::EdgeWeight: CaHash + Ord,
 {
     // Domain-separate graph addresses from every other kind (see the
     // matching prefix on `Commit`'s `CaHash`).
@@ -173,9 +104,9 @@ where
     // Hash all nodes in rank order.
     for n_ref in g.node_references() {
         let id = n_ref.id();
-        let node_ca = &nodes[&id];
+        let node_ca = content_addr(n_ref.weight());
         CaHash::hash(&rank[&id], hasher);
-        CaHash::hash(&**node_ca, hasher);
+        CaHash::hash(&*node_ca, hasher);
     }
 
     // Collect and sort edges by (source rank, target rank, edge weight). Since
@@ -195,22 +126,6 @@ where
         CaHash::hash(&dst, hasher);
         CaHash::hash(e_ref.weight(), hasher);
     }
-}
-
-/// Hash all the nodes and return a map from node IDs to their content addresses.
-pub fn node_addrs<G>(g: G) -> HashMap<G::NodeId, ContentAddr>
-where
-    G: Data + IntoNodeReferences,
-    G::NodeId: Eq + std::hash::Hash,
-    G::NodeWeight: CaHash,
-{
-    g.node_references()
-        .map(|n_ref| {
-            let id = n_ref.id();
-            let ca = content_addr(n_ref.weight());
-            (id, ca)
-        })
-        .collect()
 }
 
 #[cfg(test)]

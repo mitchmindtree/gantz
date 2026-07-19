@@ -25,3 +25,7 @@ pub mod scope_out;
 pub mod sin_osc;
 pub mod sum;
 pub mod unpack;
+
+pub(crate) fn is_default<T: Default + PartialEq>(t: &T) -> bool {
+    *t == T::default()
+}

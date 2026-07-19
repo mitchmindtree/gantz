@@ -381,13 +381,13 @@ fn merge_select(
     egui::ComboBox::from_id_salt("merge_select")
         .selected_text("select branch\u{2026}")
         .show_ui(ui, |ui| {
-            let candidates = env.merge_candidates(head);
+            let candidates = crate::merge::merge_candidates(env.ca(), head);
             if candidates.is_empty() {
                 ui.weak("no mergeable graphs");
                 return;
             }
             let ours_tip = match head {
-                gantz_ca::Head::Branch(name) => env.name_head(name),
+                gantz_ca::Head::Branch(name) => env.ca().head(name),
                 gantz_ca::Head::Commit(ca) => Some(*ca),
             };
             for candidate in candidates {

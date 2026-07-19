@@ -26,7 +26,7 @@ use crate::dsp::{DspBuilder, NodeDsp, Signal, ToNodeDsp, input_or_silent};
 /// A `~peak`/`~rms` node placed before a `~scopeout` gives level metering.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, NodeTag)]
 pub struct ScopeOut {
-    #[serde(default = "default_size")]
+    #[serde(default = "default_size", skip_serializing_if = "is_default_size")]
     size: usize,
 }
 
@@ -159,4 +159,8 @@ impl ToNodeDsp for ScopeOut {
 
 fn default_size() -> usize {
     ScopeOut::DEFAULT_SIZE
+}
+
+fn is_default_size(size: &usize) -> bool {
+    *size == default_size()
 }

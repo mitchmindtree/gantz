@@ -11,16 +11,12 @@
 //! surface the conflicts, or accept the defaults.
 
 use crate::{
-    CaHash, CommitAddr, Diff, GraphAddr, Matching, Registry, Timestamp, content_addr, diff, history,
+    CommitAddr, DataGraph, Diff, Edge, GraphAddr, Matching, Registry, Timestamp, content_addr,
+    diff, history,
 };
-use petgraph::{
-    Directed,
-    graph::{IndexType, NodeIndex},
-};
+use petgraph::graph::NodeIndex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-
-type Graph<N, E, Ix> = petgraph::graph::Graph<N, E, Directed, Ix>;
 
 /// One side of a merge.
 #[derive(
@@ -108,7 +104,7 @@ pub struct EditTimes {
 /// applied (per the caller's [`Resolutions`]) so that the result remains
 /// usable and callers can decide whether to accept it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Conflict<E> {
+pub enum Conflict {
     /// Both sides modified the same base node with different results.
     ///
     /// Applied resolution: `kept`'s content is kept. `ours`/`theirs` are the
@@ -137,7 +133,7 @@ pub enum Conflict<E> {
         side: Side,
         src: usize,
         dst: usize,
-        edge: E,
+        edge: Edge,
     },
 }
 
@@ -152,21 +148,21 @@ pub struct NodeSrc {
 
 /// The result of a three-way graph merge.
 #[derive(Clone, Debug)]
-pub struct MergeOutcome<N, E, Ix: IndexType> {
+pub struct MergeOutcome {
     /// The merged graph: ours' surviving nodes in ours' order, followed by
     /// theirs-only nodes in ascending theirs order. When theirs removed no
     /// nodes, ours' indices are preserved exactly.
-    pub graph: Graph<N, E, Ix>,
+    pub graph: DataGraph,
     /// The provenance of each merged node, indexed by merged node index.
     pub node_srcs: Vec<NodeSrc>,
     /// The conflicts encountered, each already resolved by its documented
     /// default.
-    pub conflicts: Vec<Conflict<E>>,
+    pub conflicts: Vec<Conflict>,
 }
 
 /// The resolution of merging one commit tip into another.
 #[derive(Clone, Debug)]
-pub enum MergeResolution<N, E, Ix: IndexType> {
+pub enum MergeResolution {
     /// Theirs is an ancestor of ours: there is nothing to merge.
     AlreadyUpToDate,
     /// Ours is an ancestor of theirs: the head can simply move to theirs'
@@ -181,11 +177,11 @@ pub enum MergeResolution<N, E, Ix: IndexType> {
         /// base merged from all candidates (see [`merge_commits`]).
         base: CommitAddr,
         /// Ours' changes relative to the base.
-        ours_diff: Diff<E>,
+        ours_diff: Diff,
         /// Theirs' changes relative to the base.
-        theirs_diff: Diff<E>,
+        theirs_diff: Diff,
         /// The merged graph, provenance and conflicts.
-        outcome: MergeOutcome<N, E, Ix>,
+        outcome: MergeOutcome,
     },
 }
 
@@ -239,34 +235,24 @@ const MAX_BASE_RECURSION: usize = 5;
 /// recursively merged into a *virtual* base, so changes both tips already
 /// contain via different merge paths are part of the base rather than
 /// duplicated as parallel additions.
-pub fn merge_commits<N, E, Ix>(
-    reg: &Registry<Graph<N, E, Ix>>,
+pub fn merge_commits(
+    reg: &Registry,
     ours: CommitAddr,
     theirs: CommitAddr,
     resolutions: Resolutions,
-) -> Result<MergeResolution<N, E, Ix>, MergeError>
-where
-    N: Clone + CaHash,
-    E: Clone + Ord,
-    Ix: IndexType,
-{
+) -> Result<MergeResolution, MergeError> {
     merge_commits_recursive(reg, ours, theirs, resolutions, 0)
 }
 
 /// The implementation of [`merge_commits`]; `depth` guards the virtual-base
 /// recursion for criss-cross histories.
-fn merge_commits_recursive<N, E, Ix>(
-    reg: &Registry<Graph<N, E, Ix>>,
+fn merge_commits_recursive(
+    reg: &Registry,
     ours: CommitAddr,
     theirs: CommitAddr,
     resolutions: Resolutions,
     depth: usize,
-) -> Result<MergeResolution<N, E, Ix>, MergeError>
-where
-    N: Clone + CaHash,
-    E: Clone + Ord,
-    Ix: IndexType,
-{
+) -> Result<MergeResolution, MergeError> {
     let commits = reg.commits();
     // A tip that is itself a common ancestor is always the sole candidate,
     // so the singleton checks cover the analysis (see `history::analyze`).
@@ -332,13 +318,7 @@ where
 }
 
 /// The graph pointed to by `ca`'s commit.
-fn commit_graph_of<N, E, Ix>(
-    reg: &Registry<Graph<N, E, Ix>>,
-    ca: CommitAddr,
-) -> Result<&Graph<N, E, Ix>, MergeError>
-where
-    Ix: IndexType,
-{
+fn commit_graph_of(reg: &Registry, ca: CommitAddr) -> Result<&DataGraph, MergeError> {
     let commit = reg
         .commits()
         .get(&ca)
@@ -351,18 +331,13 @@ where
 /// [`merge_graphs`] under diffs computed by direct content matching against
 /// `base`: the path for virtual bases, which have no commit chain to track
 /// node identity along.
-fn merge_graphs_direct<N, E, Ix>(
-    base: &Graph<N, E, Ix>,
-    ours: &Graph<N, E, Ix>,
-    theirs: &Graph<N, E, Ix>,
+fn merge_graphs_direct(
+    base: &DataGraph,
+    ours: &DataGraph,
+    theirs: &DataGraph,
     resolutions: Resolutions,
     edit_times: &EditTimes,
-) -> (Diff<E>, Diff<E>, MergeOutcome<N, E, Ix>)
-where
-    N: Clone + CaHash,
-    E: Clone + Ord,
-    Ix: IndexType,
-{
+) -> (Diff, Diff, MergeOutcome) {
     let mo = diff::match_nodes(base, ours);
     let mt = diff::match_nodes(base, theirs);
     let ours_diff = diff::diff(base, ours, &mo);
@@ -381,18 +356,13 @@ where
 
 /// The merged graph of two commit tips, minting nothing: the building block
 /// for virtual bases.
-fn merged_tip_graph<N, E, Ix>(
-    reg: &Registry<Graph<N, E, Ix>>,
+fn merged_tip_graph(
+    reg: &Registry,
     a: CommitAddr,
     b: CommitAddr,
     resolutions: Resolutions,
     depth: usize,
-) -> Result<Graph<N, E, Ix>, MergeError>
-where
-    N: Clone + CaHash,
-    E: Clone + Ord,
-    Ix: IndexType,
-{
+) -> Result<DataGraph, MergeError> {
     match merge_commits_recursive(reg, a, b, resolutions, depth) {
         Ok(MergeResolution::AlreadyUpToDate) => Ok(commit_graph_of(reg, a)?.clone()),
         Ok(MergeResolution::FastForward) => Ok(commit_graph_of(reg, b)?.clone()),
@@ -402,7 +372,7 @@ where
         Err(MergeError::Unrelated) => {
             let a_g = commit_graph_of(reg, a)?;
             let b_g = commit_graph_of(reg, b)?;
-            let empty = Graph::default();
+            let empty = DataGraph::default();
             let (_, _, outcome) =
                 merge_graphs_direct(&empty, a_g, b_g, resolutions, &EditTimes::default());
             Ok(outcome.graph)
@@ -420,19 +390,14 @@ where
 ///   merged left to right into a *virtual* base.
 /// - several at the recursion cap: the deterministic tie-break candidate's
 ///   graph, directly.
-fn base_graph<N, E, Ix>(
-    reg: &Registry<Graph<N, E, Ix>>,
+fn base_graph(
+    reg: &Registry,
     candidates: &[CommitAddr],
     resolutions: Resolutions,
     depth: usize,
-) -> Result<Graph<N, E, Ix>, MergeError>
-where
-    N: Clone + CaHash,
-    E: Clone + Ord,
-    Ix: IndexType,
-{
+) -> Result<DataGraph, MergeError> {
     match candidates {
-        [] => return Ok(Graph::default()),
+        [] => return Ok(DataGraph::default()),
         [only] => return Ok(commit_graph_of(reg, *only)?.clone()),
         _ if depth >= MAX_BASE_RECURSION => {
             let last = *candidates.last().expect("non-empty");
@@ -484,21 +449,16 @@ where
 ///
 /// Construction order is deterministic, so merging the same inputs always
 /// yields the same graph address.
-pub fn merge_graphs<N, E, Ix>(
-    base: &Graph<N, E, Ix>,
-    ours: &Graph<N, E, Ix>,
-    theirs: &Graph<N, E, Ix>,
-    ours_diff: &Diff<E>,
-    theirs_diff: &Diff<E>,
+pub fn merge_graphs(
+    base: &DataGraph,
+    ours: &DataGraph,
+    theirs: &DataGraph,
+    ours_diff: &Diff,
+    theirs_diff: &Diff,
     resolutions: Resolutions,
     edit_times: &EditTimes,
-) -> MergeOutcome<N, E, Ix>
-where
-    N: Clone + CaHash,
-    E: Clone + Ord,
-    Ix: IndexType,
-{
-    let node_ix = |i: usize| NodeIndex::<Ix>::new(i);
+) -> MergeOutcome {
+    let node_ix = NodeIndex::<usize>::new;
     let mut conflicts = Vec::new();
     let keep_edit = resolutions.delete_modify == EditOrDelete::KeepEdit;
 
@@ -588,7 +548,7 @@ where
     // Ours' surviving nodes, in ours' order.
     let inv_ours: Matching = ours_diff.matched.iter().map(|(&b, &o)| (o, b)).collect();
     let inv_theirs: Matching = theirs_diff.matched.iter().map(|(&b, &t)| (t, b)).collect();
-    let mut graph = Graph::default();
+    let mut graph = DataGraph::default();
     let mut node_srcs: Vec<NodeSrc> = Vec::new();
     let mut merged_of_ours: BTreeMap<usize, usize> = BTreeMap::new();
     let mut merged_of_theirs: BTreeMap<usize, usize> = BTreeMap::new();
@@ -669,18 +629,10 @@ where
     };
 
     // Base edges survive unless a side removed them or an endpoint is gone.
-    let edge_triples = |g: &Graph<N, E, Ix>| -> BTreeSet<(usize, usize, E)> {
-        g.edge_indices()
-            .map(|e| {
-                let (s, d) = g.edge_endpoints(e).expect("edge must have endpoints");
-                (s.index(), d.index(), g[e].clone())
-            })
-            .collect()
-    };
-    let mut merged_edges: BTreeSet<(usize, usize, E)> = BTreeSet::new();
-    for (s, d, w) in edge_triples(base) {
-        let removed = ours_diff.removed_edges.contains(&(s, d, w.clone()))
-            || theirs_diff.removed_edges.contains(&(s, d, w.clone()));
+    let mut merged_edges: BTreeSet<(usize, usize, Edge)> = BTreeSet::new();
+    for (s, d, w) in diff::edge_set(base) {
+        let removed = ours_diff.removed_edges.contains(&(s, d, w))
+            || theirs_diff.removed_edges.contains(&(s, d, w));
         if removed {
             continue;
         }
@@ -692,17 +644,17 @@ where
     }
     // Union in each side's added edges; identical additions collapse.
     let mut add_edges =
-        |added: &BTreeSet<(usize, usize, E)>, merged_of: &BTreeMap<usize, usize>, side: Side| {
-            for (s, d, w) in added {
-                match (merged_of.get(s), merged_of.get(d)) {
+        |added: &BTreeSet<(usize, usize, Edge)>, merged_of: &BTreeMap<usize, usize>, side: Side| {
+            for &(s, d, w) in added {
+                match (merged_of.get(&s), merged_of.get(&d)) {
                     (Some(&ms), Some(&md)) => {
-                        merged_edges.insert((ms, md, w.clone()));
+                        merged_edges.insert((ms, md, w));
                     }
                     _ => conflicts.push(Conflict::EdgeToDeleted {
                         side,
-                        src: *s,
-                        dst: *d,
-                        edge: w.clone(),
+                        src: s,
+                        dst: d,
+                        edge: w,
                     }),
                 }
             }
@@ -723,69 +675,64 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Commit, Head, graph_addr};
+    use crate::{Commit, Datum, Head, NodeData, graph_addr};
     use std::time::Duration;
 
-    type G = petgraph::graph::Graph<String, u32, Directed, usize>;
-
-    fn graph(nodes: &[&str], edges: &[(usize, usize, u32)]) -> G {
-        let mut g = G::default();
+    fn graph(nodes: &[&str], edges: &[(usize, usize, u16)]) -> DataGraph {
+        let mut g = DataGraph::default();
         for n in nodes {
-            g.add_node(n.to_string());
+            g.add_node(NodeData::new(*n, Datum::Map(vec![])));
         }
         for &(s, d, w) in edges {
-            g.add_edge(s.into(), d.into(), w);
+            g.add_edge(s.into(), d.into(), edge(w));
         }
         g
     }
 
-    fn commit(reg: &mut Registry<G>, secs: u64, parent: Option<CommitAddr>, g: &G) -> CommitAddr {
+    fn edge(w: u16) -> Edge {
+        Edge::from((w, 0u16))
+    }
+
+    fn commit(
+        reg: &mut Registry,
+        secs: u64,
+        parent: Option<CommitAddr>,
+        g: &DataGraph,
+    ) -> CommitAddr {
         reg.commit_graph(Duration::from_secs(secs), parent, graph_addr(g), || {
             g.clone()
         })
     }
 
-    fn nodes(g: &G) -> Vec<&str> {
-        g.node_weights().map(|s| s.as_str()).collect()
+    fn nodes(g: &DataGraph) -> Vec<&str> {
+        g.node_weights().map(|n| n.tag.as_str()).collect()
     }
 
-    fn edges(g: &G) -> BTreeSet<(usize, usize, u32)> {
-        g.edge_indices()
-            .map(|e| {
-                let (s, d) = g.edge_endpoints(e).unwrap();
-                (s.index(), d.index(), g[e])
-            })
+    fn edges(g: &DataGraph) -> BTreeSet<(usize, usize, u16)> {
+        diff::edge_set(g)
+            .into_iter()
+            .map(|(s, d, e)| (s, d, e.output.0))
             .collect()
     }
 
     /// Merge two graphs that diverged from `base` by one commit each, using
     /// the default [`Resolutions`].
     fn merge_two(
-        base: &G,
-        ours: &G,
-        theirs: &G,
-    ) -> (
-        Registry<G>,
-        CommitAddr,
-        CommitAddr,
-        MergeResolution<String, u32, usize>,
-    ) {
+        base: &DataGraph,
+        ours: &DataGraph,
+        theirs: &DataGraph,
+    ) -> (Registry, CommitAddr, CommitAddr, MergeResolution) {
         merge_two_with(base, ours, theirs, Resolutions::default())
     }
 
     /// [`merge_two`] with explicit [`Resolutions`].
     fn merge_two_with(
-        base: &G,
-        ours: &G,
-        theirs: &G,
+        base: &DataGraph,
+        ours: &DataGraph,
+        theirs: &DataGraph,
         resolutions: Resolutions,
-    ) -> (
-        Registry<G>,
-        CommitAddr,
-        CommitAddr,
-        MergeResolution<String, u32, usize>,
-    ) {
-        let mut reg = Registry::<G>::default();
+    ) -> (Registry, CommitAddr, CommitAddr, MergeResolution) {
+        let mut reg = Registry::default();
         let b = commit(&mut reg, 1, None, base);
         let o = commit(&mut reg, 2, Some(b), ours);
         let t = commit(&mut reg, 3, Some(b), theirs);
@@ -793,7 +740,7 @@ mod tests {
         (reg, o, t, res)
     }
 
-    fn diverged(res: MergeResolution<String, u32, usize>) -> MergeOutcome<String, u32, usize> {
+    fn diverged(res: MergeResolution) -> MergeOutcome {
         match res {
             MergeResolution::Diverged { outcome, .. } => outcome,
             other => panic!("expected Diverged, got {other:?}"),
@@ -807,7 +754,7 @@ mod tests {
         // ancestors {a, b} predate the shared additions x and y. A single
         // tie-break base would see x (or y) as an addition on *both* sides
         // and union it twice; the virtual base already contains both.
-        let mut reg = Registry::<G>::default();
+        let mut reg = Registry::default();
         let root = commit(&mut reg, 1, None, &graph(&["n"], &[]));
         let ga = graph(&["n", "x"], &[]);
         let gb = graph(&["n", "y"], &[]);
@@ -934,7 +881,7 @@ mod tests {
             both_modified: BothModified::KeepNewest,
             ..Default::default()
         };
-        let mut reg = Registry::<G>::default();
+        let mut reg = Registry::default();
         let base = commit(&mut reg, 1, None, &graph(&["x", "y"], &[]));
         let o1 = commit(&mut reg, 2, Some(base), &graph(&["x2", "y"], &[]));
         let ours = commit(&mut reg, 5, Some(o1), &graph(&["x2", "y2"], &[]));
@@ -961,7 +908,7 @@ mod tests {
             both_modified: BothModified::KeepNewest,
             ..Default::default()
         };
-        let mut reg = Registry::<G>::default();
+        let mut reg = Registry::default();
         let base = commit(&mut reg, 1, None, &graph(&["x"], &[]));
         // Both sides edit the node at the same timestamp.
         let a = commit(&mut reg, 2, Some(base), &graph(&["x-a"], &[]));
@@ -1038,7 +985,7 @@ mod tests {
                     side: Side::Theirs,
                     src: 0,
                     dst: 1,
-                    edge: 0,
+                    edge: edge(0),
                 },
             ],
         );
@@ -1071,7 +1018,7 @@ mod tests {
                 side: Side::Theirs,
                 src: 0,
                 dst: 1,
-                edge: 0
+                edge: edge(0)
             }],
         );
     }
@@ -1126,7 +1073,7 @@ mod tests {
 
     #[test]
     fn fast_forward_and_up_to_date_and_unrelated() {
-        let mut reg = Registry::<G>::default();
+        let mut reg = Registry::default();
         let g0 = graph(&["a"], &[]);
         let g1 = graph(&["a", "b"], &[]);
         let root = commit(&mut reg, 1, None, &g0);

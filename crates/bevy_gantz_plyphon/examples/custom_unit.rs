@@ -22,7 +22,7 @@ use std::time::Duration;
 use bevy_gantz::{BuiltinNodes, GantzPlugin, Registry, head, timestamp};
 use bevy_gantz_plyphon::PlyphonPlugin;
 use bytemuck::{Pod, Zeroable};
-use gantz_ca::{CaHash, ContentAddr, Hasher, Head, graph_addr};
+use gantz_ca::{CaHash, ContentAddr, Hasher, Head};
 use gantz_core::Node as GantzNode;
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
@@ -80,7 +80,7 @@ impl UnitDef for SawCtor {
 
 /// A saw-oscillator DSP node. `gantz_core::Node` makes it a graph node (Steel-inert
 /// - audio is plyphon's job); `NodeDsp` emits its UGen graph.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct SawNode {
     freq: f32,
 }
@@ -135,9 +135,11 @@ impl ToNodeDsp for SawNode {
 // 3. The graph's node type: our source + the reused `~out` sink.
 // ---------------------------------------------------------------------------
 
-/// A minimal node type. The runtime only needs `Clone + CaHash + Node + ToNodeDsp`,
-/// so a `match`-forwarding enum suffices - no GUI/typetag machinery.
-#[derive(Clone, Debug)]
+/// A minimal node type. The runtime needs `Clone + Node + ToNodeDsp` plus a
+/// `type`-tagged serde (the registry stores graphs as erased data), so a
+/// `match`-forwarding enum with adjacent tagging suffices - no GUI machinery.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "c")]
 enum N {
     Saw(SawNode),
     Out(gantz_plyphon::Out),
@@ -252,14 +254,16 @@ fn main() {
 
 /// Build `~saw -> ~out`, commit it, and open it as a head. `drive_synths` derives a
 /// synthdef from the `~out` root and spawns it. The cpal stream then plays the saw.
-fn setup(mut registry: ResMut<Registry<N>>, mut cmds: Commands) {
+fn setup(mut registry: ResMut<Registry>, mut cmds: Commands) {
     let mut g = Graph::<N>::default();
     let saw = g.add_node(N::Saw(SawNode { freq: 220.0 }));
     let out = g.add_node(N::Out(gantz_plyphon::Out::default()));
     g.add_edge(saw, out, Edge::new(0.into(), 0.into()));
 
-    let graph_ca = graph_addr(&g);
-    let commit = registry.commit_graph(timestamp(), None, graph_ca, move || g);
+    // The registry stores graphs as erased data (the graph address is always
+    // computed on the erased form). Opening the head reifies it back.
+    let (dg, graph_ca) = gantz_core::data::erase_with_addr(&g).expect("erase");
+    let commit = registry.commit_graph(timestamp(), None, graph_ca, move || dg);
     cmds.trigger(head::OpenEvent(Head::Commit(commit)));
 
     println!("Playing a custom `Saw` UGen at 220 Hz through bevy_gantz_plyphon. Ctrl-C to stop.");

@@ -50,7 +50,7 @@ use std::collections::HashMap;
 use petgraph::Direction;
 use petgraph::visit::EdgeRef;
 
-use gantz_ca::ContentAddr;
+use gantz_ca::{ContentAddr, GraphAddr};
 use gantz_core::Edge;
 use gantz_core::node::graph::{Graph, NodeIx};
 use gantz_core::node::{GetNode, MetaCtx};
@@ -243,7 +243,7 @@ where
 /// and must dissolve.
 pub fn flatten_from_registry<'g, N>(
     graph: &'g Graph<N>,
-    registry: &'g gantz_ca::Registry<Graph<N>>,
+    reified: &'g gantz_core::data::ReifiedGraphs<N>,
 ) -> Result<Graph<Flat<N>>, FlattenError>
 where
     N: gantz_core::Node + AsRefNode + ToNodeDsp + Clone,
@@ -256,19 +256,17 @@ where
                 .ext_as::<crate::ref_ext::DspRefExt>(crate::ref_ext::DSP_REF_EXT_KEY)
                 .unwrap_or_default()
                 .inline;
-            let kind = if !inline
-                && crate::ref_ext::is_dsp_graph(registry, ca.into(), &mut dsp_memo.borrow_mut())
-            {
+            let kind = if !inline && is_dsp_graph(reified, ca.into(), &mut dsp_memo.borrow_mut()) {
                 RefKind::Instance
             } else {
                 RefKind::Inline
             };
-            (ca, kind, registry.graph(&ca.into()))
+            (ca, kind, reified.get(&ca.into()))
         })
     };
     let get_node = |ca: &ContentAddr| {
-        registry
-            .graph(&(*ca).into())
+        reified
+            .get(&(*ca).into())
             .map(|g| g as &dyn gantz_core::Node)
     };
     flatten(&get_node, graph, &resolve)
@@ -280,7 +278,7 @@ where
 /// instanced ref actually reaches are flattened.
 pub fn flatten_instance_children<N>(
     flat: &Graph<Flat<N>>,
-    registry: &gantz_ca::Registry<Graph<N>>,
+    reified: &gantz_core::data::ReifiedGraphs<N>,
 ) -> Result<HashMap<ContentAddr, Graph<Flat<N>>>, FlattenError>
 where
     N: gantz_core::Node + AsRefNode + ToNodeDsp + Clone,
@@ -299,10 +297,10 @@ where
         if out.contains_key(&ca) {
             continue;
         }
-        let graph = registry
-            .graph(&ca.into())
+        let graph = reified
+            .get(&ca.into())
             .ok_or(FlattenError::Unresolved(ca))?;
-        let child = flatten_from_registry(graph, registry)?;
+        let child = flatten_from_registry(graph, reified)?;
         queue.extend(marker_cas(&child));
         out.insert(ca, child);
     }
@@ -502,4 +500,62 @@ fn resolve_via_input<N>(
         .rev()
         .flat_map(|(s, sp)| resolve_src(levels, lvl, s, sp, stack))
         .collect()
+}
+
+/// Whether the reified graph at `ga` contains a DSP node, directly or
+/// transitively through references: the lowering decision behind
+/// [`RefKind::Instance`].
+///
+/// This is the typed twin of the data-level
+/// [`is_dsp_graph`](crate::ref_ext::is_dsp_graph) (which classifies stored
+/// registry data by wire tag): only the reified cache is in scope during a
+/// flatten, so the probe stays typed - keep the two classifications in step.
+/// Memoized in `memo` so repeated probes over one flatten stay linear
+/// overall. Graphs missing from the cache classify as non-DSP.
+fn is_dsp_graph<N>(
+    reified: &gantz_core::data::ReifiedGraphs<N>,
+    ga: GraphAddr,
+    memo: &mut HashMap<GraphAddr, bool>,
+) -> bool
+where
+    N: ToNodeDsp + AsRefNode,
+{
+    let mut stack: Vec<GraphAddr> = Vec::new();
+    is_dsp(reified, ga, memo, &mut stack)
+}
+
+/// The recursive half of [`is_dsp_graph`]: reference cycles are treated as
+/// non-DSP at the point of re-entry (a cycle cannot introduce a DSP node
+/// that its members do not already contain).
+fn is_dsp<N>(
+    reified: &gantz_core::data::ReifiedGraphs<N>,
+    ga: GraphAddr,
+    memo: &mut HashMap<GraphAddr, bool>,
+    stack: &mut Vec<GraphAddr>,
+) -> bool
+where
+    N: ToNodeDsp + AsRefNode,
+{
+    if let Some(&known) = memo.get(&ga) {
+        return known;
+    }
+    if stack.contains(&ga) {
+        return false;
+    }
+    let Some(graph) = reified.get(&ga) else {
+        memo.insert(ga, false);
+        return false;
+    };
+    stack.push(ga);
+    let dsp = graph
+        .node_indices()
+        .any(|ix| graph[ix].to_node_dsp().is_some())
+        || graph.node_indices().any(|ix| {
+            graph[ix]
+                .as_ref_node()
+                .is_some_and(|r| is_dsp(reified, r.content_addr().into(), memo, stack))
+        });
+    stack.pop();
+    memo.insert(ga, dsp);
+    dsp
 }

@@ -72,7 +72,7 @@ fn main() {
             )
                 // After `settle_layout` so a layout commit settled this frame
                 // (and its seeded view) is exported/saved in the same pass.
-                .after(bevy_gantz_egui::settle_layout::<Box<dyn node::Node>>)
+                .after(bevy_gantz_egui::settle_layout)
                 .run_if(on_message::<DebouncedInputEvent>),
         )
         .run();
@@ -115,12 +115,14 @@ fn setup_gui_state(storage: Res<Pkv>, mut cmds: Commands) {
 
 fn setup_open(
     storage: Res<Pkv>,
-    mut registry: ResMut<bevy_gantz::Registry<Box<dyn node::Node>>>,
+    mut registry: ResMut<bevy_gantz::Registry>,
+    mut cache: ResMut<bevy_gantz::GraphCache<Box<dyn node::Node>>>,
     mut cmds: Commands,
     mut tab_order: ResMut<HeadTabOrder>,
     mut focused: ResMut<FocusedHead>,
 ) {
-    let loaded = bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, timestamp());
+    let loaded =
+        bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, &mut *cache, timestamp());
     let focused_head = bevy_gantz::storage::load_focused_head(&*storage);
 
     // `OpenHead`'s required components cover the compile outcome; `vm::sync`

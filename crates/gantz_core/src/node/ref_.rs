@@ -5,6 +5,7 @@ use crate::{
     node::{self, Node},
     visit,
 };
+use gantz_nodetag::NodeTag;
 use serde::de::{self, Deserialize, DeserializeOwned, Deserializer, Visitor};
 use serde::ser::{Serialize, SerializeMap, Serializer};
 use std::collections::BTreeMap;
@@ -42,7 +43,7 @@ pub trait AsRefNode {
 /// - Ext data must not carry graph references: dependency collection
 ///   ([`Node::required_addrs`], clipboard export) cannot see inside ext, so a
 ///   smuggled content address would dangle.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, NodeTag)]
 pub struct Ref {
     addr: gantz_ca::ContentAddr,
     ext: BTreeMap<String, Datum>,

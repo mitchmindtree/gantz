@@ -96,26 +96,33 @@ fn setup_window(storage: Res<Pkv>, mut windows: Query<&mut Window, With<PrimaryW
 }
 
 fn setup_resources(storage: Res<Pkv>, mut cmds: Commands) {
-    let registry: Registry<Box<dyn node::Node>> = bevy_gantz::storage::load_registry(&*storage);
+    let registry: Registry = bevy_gantz::storage::load_registry(&*storage);
     // Seed the persist tracker from the disk-loaded registry: everything loaded
     // is, by definition, already on disk. Done before `base::load` merges base
     // graphs (so they're written on first persist) and before `prune_unused`
     // (so prunes are detected on the first incremental save).
     let persisted = bevy_gantz::storage::PersistedRegistry::from_registry(&registry);
     let gui_state = bevy_gantz_egui::storage::load_gui_state(&*storage);
+    // Reify the loaded registry's graphs so typed reads (head opens, node
+    // lookups) are served from the first frame.
+    let mut cache = bevy_gantz::GraphCache::<Box<dyn node::Node>>::default();
+    bevy_gantz::refresh_cache(&registry, &mut cache);
     cmds.insert_resource(registry);
+    cmds.insert_resource(cache);
     cmds.insert_resource(persisted);
     cmds.insert_resource(gui_state);
 }
 
 fn setup_open(
     storage: Res<Pkv>,
-    mut registry: ResMut<Registry<Box<dyn node::Node>>>,
+    mut registry: ResMut<Registry>,
+    mut cache: ResMut<bevy_gantz::GraphCache<Box<dyn node::Node>>>,
     mut cmds: Commands,
     mut tab_order: ResMut<HeadTabOrder>,
     mut focused: ResMut<FocusedHead>,
 ) {
-    let loaded = bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, timestamp());
+    let loaded =
+        bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, &mut *cache, timestamp());
     let focused_head = bevy_gantz::storage::load_focused_head(&*storage);
 
     // Spawn entities for each open head. `OpenHead`'s required components
@@ -158,8 +165,8 @@ mod tests {
 
     #[test]
     fn base_gantz_deserializes() {
-        let _registry: gantz_ca::Registry<
-            gantz_core::node::graph::Graph<Box<dyn super::node::Node>>,
-        > = gantz_egui::export::parse_export(BASE_GANTZ).expect("valid .gantz");
+        let _registry: gantz_ca::Registry =
+            gantz_egui::export::parse_export::<Box<dyn super::node::Node>>(BASE_GANTZ)
+                .expect("valid .gantz");
     }
 }

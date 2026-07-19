@@ -22,7 +22,10 @@ use crate::param::{cahash_lag, control_input_expr, param_name, param_state, plyp
 /// smoothing `gain_lag` (structural; a small de-click by default) is in the weight.
 #[derive(Clone, Debug, Serialize, Deserialize, NodeTag)]
 pub struct Out {
-    #[serde(default = "default_gain_lag")]
+    #[serde(
+        default = "default_gain_lag",
+        skip_serializing_if = "is_default_gain_lag"
+    )]
     gain_lag: f32,
 }
 
@@ -180,4 +183,8 @@ impl ToNodeDsp for Out {
 fn default_gain_lag() -> f32 {
     // A short de-click lag on the master gain (per "lag the gain, not the freq").
     Out::DEFAULT_GAIN_LAG
+}
+
+fn is_default_gain_lag(gain_lag: &f32) -> bool {
+    *gain_lag == default_gain_lag()
 }

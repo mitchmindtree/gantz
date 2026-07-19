@@ -47,7 +47,7 @@ impl Plugin for PersistPlugin {
                 persist_resources
                     // After `settle_layout` so a layout commit settled this frame
                     // (and its seeded view) is saved in the same pass.
-                    .after(bevy_gantz_egui::settle_layout::<BoxNode>)
+                    .after(bevy_gantz_egui::settle_layout)
                     .run_if(on_message::<DebouncedInputEvent>),
             )
             .add_systems(
@@ -152,7 +152,7 @@ fn setup_persister(pkv: Res<Pkv>, mut cmds: Commands) {
 /// [`PersistedRegistry`](bevy_gantz::storage::PersistedRegistry) to force a
 /// complete write); everything else is written each call.
 fn collect_batch_to_persist(
-    registry: &Registry<BoxNode>,
+    registry: &Registry,
     persisted: &mut bevy_gantz::storage::PersistedRegistry,
     gui_state: &GuiState,
     tab_order: &HeadTabOrder,
@@ -190,7 +190,7 @@ fn collect_batch_to_persist(
 }
 
 fn persist_resources(
-    registry: Res<Registry<BoxNode>>,
+    registry: Res<Registry>,
     mut persisted: ResMut<bevy_gantz::storage::PersistedRegistry>,
     gui_state: Res<GuiState>,
     mut persister: ResMut<Persister>,
@@ -253,7 +253,7 @@ fn persist_egui_memory(mut persister: ResMut<Persister>, mut ctxs: EguiContexts)
 #[cfg(not(target_arch = "wasm32"))]
 fn flush_on_exit(
     mut exit: MessageReader<AppExit>,
-    registry: Res<Registry<BoxNode>>,
+    registry: Res<Registry>,
     gui_state: Res<GuiState>,
     mut persister: ResMut<Persister>,
     tab_order: Res<HeadTabOrder>,

@@ -18,9 +18,9 @@
 //! `egui::Window`s instead.
 
 use crate::{
-    BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, EdgeStyles, ExtPanes, GuiState,
-    HeadAccess, HostNativePaneWindows, ImportTask, OpenHeadViews, PerfGui, PerfVm, RefExtUis,
-    Registry, ResponseDispatchers, SettingsTabs, TraceCapture, WindowedPanesRequested,
+    BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, EdgeStyles, ExtPanes, GraphCache,
+    GuiState, HeadAccess, HostNativePaneWindows, ImportTask, OpenHeadViews, PerfGui, PerfVm,
+    RefExtUis, Registry, ResponseDispatchers, SettingsTabs, TraceCapture, WindowedPanesRequested,
     handle_gantz_response, head, registry_ref,
 };
 use bevy_app::prelude::*;
@@ -51,7 +51,8 @@ trait PaneNode:
     'static
     + Node
     + Clone
-    + ca::CaHash
+    + serde::Serialize
+    + serde::de::DeserializeOwned
     + gantz_egui::NodeUi
     + gantz_egui::sync::AsNamedRef
     + Send
@@ -62,7 +63,8 @@ impl<N> PaneNode for N where
     N: 'static
         + Node
         + Clone
-        + ca::CaHash
+        + serde::Serialize
+        + serde::de::DeserializeOwned
         + gantz_egui::NodeUi
         + gantz_egui::sync::AsNamedRef
         + Send
@@ -178,7 +180,8 @@ fn render_windowed_panes<N: PaneNode>(
     trace_capture: Res<TraceCapture>,
     mut perf_vm: ResMut<PerfVm>,
     mut perf_gui: ResMut<PerfGui>,
-    mut registry: ResMut<Registry<N>>,
+    mut registry: ResMut<Registry>,
+    mut cache: ResMut<GraphCache<N>>,
     builtins: Res<BuiltinNodes<N>>,
     mut gui_state: ResMut<GuiState>,
     mut vms: NonSendMut<head::HeadVms>,
@@ -251,7 +254,7 @@ fn render_windowed_panes<N: PaneNode>(
         // rebuilt per window: each iteration's borrow of the boxes ends with
         // it (mirrors `update`, where it is built inside the panel closure).
         let mut response = {
-            let node_reg = registry_ref(&registry, &builtins);
+            let node_reg = registry_ref(&registry, &cache, &builtins);
             let mut access = HeadAccess::new(&tab_order, &mut heads_query, &mut vms);
             let mut tabs: Vec<&mut dyn gantz_egui::widget::SettingsTab> = settings_tabs
                 .0
@@ -323,6 +326,7 @@ fn render_windowed_panes<N: PaneNode>(
             &mut focused,
             &mut heads_query,
             &mut registry,
+            &mut cache,
             &base_names,
             &mut compile_config,
             &mut change_validation,

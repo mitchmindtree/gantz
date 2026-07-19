@@ -28,10 +28,9 @@ pub mod ui_tree;
 pub mod view;
 pub mod widget;
 
-// Re-export traits that make up the Registry supertrait.
 pub use egui_graph::SocketKind;
 pub use keybind::{Action, Keymap};
-pub use node::{FnNodeNames, NameRegistry, builtins};
+pub use node::builtins;
 pub use reg::RegistryRef;
 pub use response::{
     ContextMenuResponse, DynResponse, InspectorRowsResponse, InspectorUiResponse, NodeUiResponse,
@@ -39,38 +38,60 @@ pub use response::{
 };
 pub use sugar::EguiSugar;
 pub use view::{Camera, SceneView};
-pub use widget::gantz::NodeTypeRegistry;
-pub use widget::graph_select::GraphRegistry;
 
-/// Combined registry trait for UI operations.
+/// The registry trait required by the gantz_egui widgets and nodes.
 ///
-/// Brings together the different lookup capabilities required by the various
-/// gantz_egui widgets. Each supertrait is defined alongside the widget that
-/// requires it:
-///
-/// - [`NameRegistry`] (`node/named_ref.rs`) — resolves named references to
-///   content addresses. Required by [`node::NamedRef`] to check whether a
-///   referenced graph still exists and to display up-to-date status.
-///
-/// - [`FnNodeNames`] (`node/fn_named_ref.rs`) — lists names eligible for
-///   use in `Fn`-style node references (stateless, branchless, single-output).
-///   Required by [`node::FnNamedRef`]'s UI dropdown.
-///
-/// - [`NodeTypeRegistry`] (`widget/gantz.rs`) — enumerates all creatable node
-///   types. Required by the node palette for node creation.
-///
-/// - [`GraphRegistry`] (`widget/graph_select.rs`) — provides access to commits
-///   and branch names. Required by the graph selector and history view.
-///
-/// The `node` method provides direct node lookup by content address, used
-/// throughout for resolving graph references during compilation, evaluation,
-/// and UI rendering.
+/// The data side of the registry is concrete: [`ca`](Self::ca) exposes the
+/// content-addressed [`gantz_ca::Registry`] directly, and widgets read commits,
+/// heads and sections from it without trait indirection (see e.g.
+/// [`section::description`], [`merge::merge_candidates`] and
+/// [`widget::graph_select::commits_by_recency`]). The trait methods cover what
+/// remains genuinely implementation-dependent: resolving content addresses and
+/// names to typed nodes, and builtin-aware queries (creatable node types,
+/// docs, demo associations).
 ///
 /// See [`reg::RegistryRef`] for the standard implementation combining a
 /// [`gantz_ca::Registry`] with [`gantz_core::Builtins`].
-pub trait Registry: NameRegistry + FnNodeNames + NodeTypeRegistry + GraphRegistry {
+pub trait Registry {
+    /// The underlying content-addressed data registry.
+    fn ca(&self) -> &gantz_ca::Registry;
+
     /// Look up a node by content address.
+    ///
+    /// Used throughout for resolving graph references during compilation,
+    /// evaluation, and UI rendering.
     fn node(&self, ca: &gantz_ca::ContentAddr) -> Option<&dyn gantz_core::Node>;
+
+    /// Returns the current content address for the given name, if it exists.
+    ///
+    /// Required by [`node::NamedRef`] to check whether a referenced graph
+    /// still exists and to display up-to-date status.
+    fn name_ca(&self, name: &str) -> Option<gantz_ca::ContentAddr>;
+
+    /// Returns true if a node with the given content address exists in the
+    /// environment.
+    fn node_exists(&self, ca: &gantz_ca::ContentAddr) -> bool;
+
+    /// Names of nodes that can be used with `Fn`.
+    /// Filters to: stateless, branchless, single-output nodes.
+    ///
+    /// Required by [`node::FnNamedRef`]'s UI dropdown.
+    fn fn_node_names(&self) -> Vec<String>;
+
+    /// The unique name of each node available.
+    ///
+    /// Provides the list of node type names available for creation via the
+    /// node palette. Actual node creation is handled via [`CreateNode`].
+    fn node_types(&self) -> Vec<&str>;
+
+    /// The formatted keyboard shortcut for the node palette.
+    fn command_formatted_kb_shortcut(
+        &self,
+        _ctx: &egui::Context,
+        _node_type: &str,
+    ) -> Option<String> {
+        None
+    }
 
     /// Whether referencing the graph named `target` from the graph named
     /// `editing` would create a reference cycle (see [`cycle::would_cycle`]).
@@ -119,33 +140,12 @@ pub trait Registry: NameRegistry + FnNodeNames + NodeTypeRegistry + GraphRegistr
         }
     }
 
-    /// The stored description for the named graph `name`, if any.
-    ///
-    /// Used to seed the description editor in the graph config pane. The
-    /// standard [`RegistryRef`] impl reads it from the content-addressed
-    /// registry's description section; the default has none.
-    fn graph_description(&self, name: &str) -> Option<String> {
-        let _ = name;
-        None
-    }
-
     /// A concise description of the creatable node type `name`, for inline
     /// display in the node palette. Lighter than [`command_info`](Self::command_info)
     /// (it derives no input/output docs); the default has none.
     fn node_description(&self, name: &str) -> Option<Cow<'static, str>> {
         let _ = name;
         None
-    }
-
-    /// The named graphs that can be merged into `ours` (see
-    /// [`merge::merge_candidates`]).
-    ///
-    /// Drives the graph config pane's merge row. The default has none (hiding
-    /// the row's candidates); the standard [`RegistryRef`] impl queries the
-    /// content-addressed registry.
-    fn merge_candidates(&self, ours: &gantz_ca::Head) -> Vec<merge::MergeCandidate> {
-        let _ = ours;
-        vec![]
     }
 
     /// Dry-run the merge of the branch named `source` into `ours` under the

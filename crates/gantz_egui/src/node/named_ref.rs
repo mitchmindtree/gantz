@@ -37,16 +37,12 @@ pub struct NamedRef {
     /// Part of the content address: toggling it is a genuine edit, so the
     /// change rides the normal commit + export pipeline and persists (rather
     /// than being silently dropped by the registry's content-addressed dedup).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) sync: bool,
 }
 
-/// Trait for environments that can check if a name maps to a content address.
-pub trait NameRegistry {
-    /// Returns the current content address for the given name, if it exists.
-    fn name_ca(&self, name: &str) -> Option<gantz_ca::ContentAddr>;
-    /// Returns true if a node with the given content address exists in the environment.
-    fn node_exists(&self, ca: &gantz_ca::ContentAddr) -> bool;
+fn is_default<T: Default + PartialEq>(t: &T) -> bool {
+    *t == T::default()
 }
 
 impl NamedRef {

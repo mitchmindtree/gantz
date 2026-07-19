@@ -163,8 +163,12 @@ impl Hash for Interval {
 /// tick *count* stays correct even when updates are slower than the tick rate.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, NodeTag)]
 pub struct TickBang {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default_interval")]
     interval: Interval,
+}
+
+fn is_default_interval(interval: &Interval) -> bool {
+    *interval == Interval::default()
 }
 
 impl TickBang {
@@ -435,7 +439,8 @@ where
 pub fn drive_tick_bangs<N>(
     time: Res<Time>,
     epoch: Res<bevy_gantz::EvalEpoch>,
-    registry: Res<crate::Registry<N>>,
+    registry: Res<crate::Registry>,
+    cache: Res<bevy_gantz::GraphCache<N>>,
     builtins: Res<bevy_gantz::BuiltinNodes<N>>,
     mut vms: NonSendMut<bevy_gantz::head::HeadVms>,
     heads: Query<(Entity, &bevy_gantz::head::WorkingGraph<N>), With<bevy_gantz::head::OpenHead>>,
@@ -448,7 +453,7 @@ pub fn drive_tick_bangs<N>(
     let now = epoch.now_secs();
 
     for (entity, wg) in heads.iter() {
-        let node_reg = crate::registry_ref(&registry, &builtins);
+        let node_reg = crate::registry_ref(&registry, &cache, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| node_reg.node(ca);
 
         // Collect all TickBang paths + durations.

@@ -10,6 +10,8 @@ pub use delay::Delay;
 pub use expr::{Expr, ExprNewError};
 pub use fn_::{Fn, FnNodeTag};
 use gantz_ca::CaHash;
+#[doc(inline)]
+pub use gantz_ca::{Input, Output};
 pub use id::{IDENTITY_NAME, Identity};
 pub use pull::{Pull, WithPullEval};
 pub use push::{Push, WithPushEval};
@@ -274,18 +276,6 @@ pub struct ExprCtx<'env, 'data> {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EvalFn;
 
-/// Represents an input of a node via an index.
-#[derive(
-    Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord, Deserialize, Serialize, CaHash,
-)]
-pub struct Input(pub u16);
-
-/// Represents an output of a node via an index.
-#[derive(
-    Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord, Deserialize, Serialize, CaHash,
-)]
-pub struct Output(pub u16);
-
 /// Error during expression generation.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{0}")]
@@ -488,18 +478,6 @@ impl<'env, 'data> Clone for ExprCtx<'env, 'data> {
             inputs: self.inputs,
             outputs: self.outputs,
         }
-    }
-}
-
-impl From<u16> for Input {
-    fn from(u: u16) -> Self {
-        Input(u)
-    }
-}
-
-impl From<u16> for Output {
-    fn from(u: u16) -> Self {
-        Output(u)
     }
 }
 

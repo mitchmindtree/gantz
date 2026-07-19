@@ -8,11 +8,11 @@ pub use steel;
 pub mod args;
 pub mod builtin;
 pub mod compile;
+pub mod data;
 pub mod diagnostic;
 pub mod edge;
 pub mod graph;
 pub mod node;
-pub mod reg;
 pub mod visit;
 pub mod vm;
 

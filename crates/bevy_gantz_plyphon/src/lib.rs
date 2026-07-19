@@ -52,7 +52,7 @@ pub use plyphon;
 type UnitRegistrar = Box<dyn Fn(&mut plyphon::UnitRegistry) + Send + Sync>;
 
 use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
-use bevy_gantz::{EntrypointSet, EvalEpoch, Registry, VmSet};
+use bevy_gantz::{EntrypointSet, EvalEpoch, GraphCache, Registry, VmSet};
 use bevy_gantz_egui::{EdgeStyles, ExtPanes, RefExtUis, RegisterResponseExt, SettingsTabs};
 use gantz_plyphon::{
     Config, DeriveStatus, DspEdgeStyle, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab,
@@ -214,7 +214,7 @@ where
                 (
                     sync_dsp_settings,
                     provide_dsp_pane,
-                    provide_dsp_ref_ext::<N>,
+                    provide_dsp_ref_ext,
                     provide_dsp_edge_style::<N>,
                 ),
             );
@@ -680,17 +680,14 @@ fn provide_dsp_pane(
 /// toggle for references to DSP graphs (see [`RefExtUis`] for the
 /// First/PreUpdate schedule contract).
 ///
-/// The DSP-graph set requires the concrete node type (typed probes like
-/// [`ToNodeDsp`] are unreachable through the GUI's erased registry), so it is
-/// computed here and handed to the UI - recomputed only when the registry
-/// changes.
-fn provide_dsp_ref_ext<N>(
-    registry: Res<Registry<N>>,
+/// The DSP-graph set is a pure walk over the stored registry data (see
+/// [`gantz_plyphon::dsp_graphs`]), recomputed only when the registry changes
+/// and handed to the UI.
+fn provide_dsp_ref_ext(
+    registry: Res<Registry>,
     mut dsp_graphs: Local<Option<std::sync::Arc<std::collections::HashSet<ca::ContentAddr>>>>,
     mut ref_ext_uis: ResMut<RefExtUis>,
-) where
-    N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Send + Sync,
-{
+) {
     if registry.is_changed() || dsp_graphs.is_none() {
         *dsp_graphs = Some(std::sync::Arc::new(gantz_plyphon::dsp_graphs(&registry)));
     }
@@ -707,7 +704,8 @@ fn provide_dsp_ref_ext<N>(
 /// recomputed per head only when the registry, the head's working graph or
 /// its [`DspHead`] change.
 fn provide_dsp_edge_style<N>(
-    registry: Res<Registry<N>>,
+    registry: Res<Registry>,
+    reified: Res<GraphCache<N>>,
     heads: Query<(&HeadRef, Ref<WorkingGraph<N>>, Option<Ref<DspHead>>), With<OpenHead>>,
     mut cache: Local<HashMap<ca::Head, std::sync::Arc<RootPortInfo>>>,
     mut edge_styles: ResMut<EdgeStyles>,
@@ -718,12 +716,13 @@ fn provide_dsp_edge_style<N>(
     for (head_ref, wg, dsp) in heads.iter() {
         let head = head_ref.0.clone();
         let stale = registry.is_changed()
+            || reified.is_changed()
             || wg.is_changed()
             || dsp.as_ref().is_some_and(|d| d.is_changed())
             || !cache.contains_key(&head);
         if stale {
             let shapes = dsp.as_ref().map(|d| d.shapes.clone()).unwrap_or_default();
-            let info = root_port_info(&wg.0, &registry.0, &shapes);
+            let info = root_port_info(&wg.0, &reified.0, &shapes);
             cache.insert(head.clone(), std::sync::Arc::new(info));
         }
         styled.insert(head.clone(), cache[&head].clone());
@@ -749,7 +748,8 @@ fn provide_dsp_edge_style<N>(
 ///
 /// Also tears down synths for closed heads.
 fn drive_synths<N>(
-    registry: Res<Registry<N>>,
+    registry: Res<Registry>,
+    reified: Res<GraphCache<N>>,
     dsp: Option<NonSendMut<DspEngine>>,
     dsp_config: Res<DspConfig>,
     mut enabled_applied: Local<Option<bool>>,
@@ -808,8 +808,8 @@ fn drive_synths<N>(
             .get(&entity)
             .is_none_or(|h| h.graph != graph_ca || h.retry);
         if stale {
-            let flat_children = flatten_from_registry(&wg.0, &registry).and_then(|flat| {
-                let children = flatten_instance_children(&flat, &registry)?;
+            let flat_children = flatten_from_registry(&wg.0, &reified).and_then(|flat| {
+                let children = flatten_instance_children(&flat, &reified)?;
                 Ok((flat, children))
             });
             let dsp_head = match flat_children {
@@ -995,7 +995,7 @@ fn park_head(state: &mut HeadSynths, entity: Entity, graph_ca: ca::GraphAddr) {
 ///
 /// The registry's audio-buffer blob entries, or the empty store when the
 /// `dsp.buffer` section is absent.
-fn buffer_blobs<G>(reg: &ca::Registry<G>) -> &BufferBlobs {
+fn buffer_blobs(reg: &ca::Registry) -> &BufferBlobs {
     reg.blobs()
         .get(gantz_plyphon::BUFFER_SECTION)
         .map(|store| &store.entries)

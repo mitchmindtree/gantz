@@ -7,13 +7,15 @@
 
 use crate::BuiltinNodes;
 use crate::head;
-use crate::reg::{Registry, lookup_node};
+use crate::reg::{GraphCache, Registry, lookup_node};
 use bevy_ecs::prelude::*;
 use bevy_log as log;
 use gantz_ca as ca;
+use gantz_core::data::erase_with_addr;
 use gantz_core::node::{self, GetNode, graph::Graph};
 use gantz_core::vm::{CompileError, Compiled};
 use gantz_core::{Node, compile as core_compile, diagnostic};
+use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
 use steel::steel_vm::engine::Engine;
 
@@ -184,14 +186,11 @@ where
 /// back to direct content matching for divergent navigation (e.g. across
 /// history-pane jumps). `None` only when an endpoint commit or graph is
 /// missing from the registry.
-pub fn navigation_matching<N>(
-    registry: &ca::Registry<Graph<N>>,
+pub fn navigation_matching(
+    registry: &ca::Registry,
     from: ca::CommitAddr,
     to: ca::CommitAddr,
-) -> Option<ca::Matching>
-where
-    N: ca::CaHash,
-{
+) -> Option<ca::Matching> {
     let commits = registry.commits();
     if ca::history::first_parent_chain_to(commits, to, from).is_some() {
         ca::diff::matching(registry, from, to)
@@ -214,15 +213,13 @@ where
 ///
 /// The VM is dropped - falling back to a fresh init - only when no mapping
 /// can be derived or the state fails to remap.
-pub fn migrate_vm_state<N>(
-    registry: &ca::Registry<Graph<N>>,
+pub fn migrate_vm_state(
+    registry: &ca::Registry,
     vms: &mut head::HeadVms,
     entity: Entity,
     from: Option<ca::CommitAddr>,
     to: Option<ca::CommitAddr>,
-) where
-    N: ca::CaHash,
-{
+) {
     let (Some(from), Some(to)) = (from, to) else {
         vms.remove(&entity);
         return;
@@ -301,16 +298,24 @@ pub fn on_eval_entry(
 /// turn lets [`sync`] recompile from the committed address without re-hashing.
 /// This is the single place a working graph is content-addressed.
 pub fn commit_working_graph<N>(
-    registry: &mut Registry<N>,
+    registry: &mut Registry,
     cmds: &mut Commands,
     entity: Entity,
     head: &mut ca::Head,
     graph: &Graph<N>,
 ) -> bool
 where
-    N: Clone + ca::CaHash,
+    N: Serialize + Node,
 {
-    let graph_ca = ca::graph_addr(graph);
+    // Registry graph addresses are always computed on the erased form; the
+    // erased graph doubles as the commit content.
+    let (dg, graph_ca) = match erase_with_addr(graph) {
+        Ok(res) => res,
+        Err(e) => {
+            log::error!("failed to erase working graph for commit: {e}");
+            return false;
+        }
+    };
     let Some(head_commit) = registry.head_commit(head) else {
         return false;
     };
@@ -318,12 +323,8 @@ where
         return false;
     }
     let old_head = head.clone();
-    let new_commit_ca = registry.commit_graph_to_head(
-        crate::reg::timestamp(),
-        graph_ca,
-        || crate::clone_graph(graph),
-        head,
-    );
+    let new_commit_ca =
+        registry.commit_graph_to_head(crate::reg::timestamp(), graph_ca, || dg, head);
     log::debug!("Graph changed -> {}", new_commit_ca.display_short());
     cmds.trigger(head::CommittedEvent {
         entity,
@@ -351,14 +352,15 @@ where
 /// present means an in-place compile, preserving node state (graph edits and
 /// config changes).
 pub fn sync<N>(
-    registry: Res<Registry<N>>,
+    registry: Res<Registry>,
+    mut cache: ResMut<GraphCache<N>>,
     builtins: Res<BuiltinNodes<N>>,
     ep_fns: Res<EntrypointFns<N>>,
     config: Res<CompileConfig>,
     mut vms: NonSendMut<head::HeadVms>,
     mut heads_query: Query<head::OpenHeadData<N>, With<head::OpenHead>>,
 ) where
-    N: 'static + Node + Clone + ca::CaHash + Send + Sync,
+    N: 'static + Node + Clone + DeserializeOwned + Send + Sync,
 {
     for mut data in heads_query.iter_mut() {
         // The committed graph CA - the working graph already matches it (the
@@ -374,13 +376,23 @@ pub fn sync<N>(
             continue;
         }
 
+        // The mutation-site refresh policy keeps the cache fresh, but ensure
+        // the committed graph's transitive references anyway (the working
+        // graph matches the committed one) so compilation never observes a
+        // stale miss. Failure to reify a referenced graph logs and skips the
+        // head this frame.
+        if let Err(e) = cache.ensure(&registry, [graph_ca.into()]) {
+            log::error!("cannot compile head: {e}");
+            continue;
+        }
+
         // Rebuild the VM. On an in-place compile error the VM is kept (its
         // previous module remains evaluable) and the error surfaces via the
         // module/diagnostics components; a failed init leaves no VM, so eval
         // systems (e.g. `drive_update_bangs`, `on_eval_entry`) skip the head
         // rather than driving a stale graph.
         let graph: &Graph<N> = &*data.working_graph;
-        let get_node = |ca: &ca::ContentAddr| lookup_node(&registry, &**builtins, ca);
+        let get_node = |ca: &ca::ContentAddr| lookup_node(&cache, &**builtins, ca);
         let entrypoints = collect_entrypoints(&ep_fns, &get_node, graph);
         let result = match vms.get_mut(&data.entity) {
             None => init(&get_node, graph, &entrypoints, &config.0).map(|(vm, module)| {
@@ -408,16 +420,26 @@ pub fn sync<N>(
 /// when disabled, which is the default.
 pub fn validate_committed<N>(
     validate: Res<ValidateCommitted>,
-    registry: Res<Registry<N>>,
+    registry: Res<Registry>,
     heads: Query<head::OpenHeadDataReadOnly<N>, With<head::OpenHead>>,
 ) where
-    N: 'static + ca::CaHash + Send + Sync,
+    N: 'static + Serialize + Node + Send + Sync,
 {
     if !validate.0 {
         return;
     }
     for data in heads.iter() {
-        let working = ca::graph_addr(&data.working_graph.0);
+        // Addresses are computed on the erased form, like the commit path.
+        let working = match erase_with_addr(&data.working_graph.0) {
+            Ok((_, addr)) => addr,
+            Err(e) => {
+                log::warn!(
+                    "WorkingGraph invariant check: head {:?} working graph failed to erase: {e}",
+                    data.entity,
+                );
+                continue;
+            }
+        };
         let committed = registry.head_commit(&data.head_ref.0).map(|c| c.graph);
         if committed != Some(working) {
             log::warn!(
@@ -435,22 +457,37 @@ pub fn validate_committed<N>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gantz_ca::{DataGraph, Datum, NodeData};
     use std::time::Duration;
+
+    /// A minimal erased node distinguished by its payload value.
+    fn nd(v: i64) -> NodeData {
+        let mut n = NodeData {
+            tag: "Num".to_string(),
+            data: Datum::Map(vec![("v".to_string(), Datum::I64(v))]),
+            refs: vec![],
+            blobs: vec![],
+        };
+        n.canonicalize();
+        n
+    }
+
+    fn graph(vals: &[i64]) -> DataGraph {
+        let mut g = DataGraph::default();
+        for &v in vals {
+            g.add_node(nd(v));
+        }
+        g
+    }
 
     /// A minimal registry: base `[10, 20, 30]`, then a child commit deleting
     /// index 1 (swap-removal: `[10, 30]`).
-    fn base_and_child() -> (ca::Registry<Graph<u32>>, ca::CommitAddr, ca::CommitAddr) {
+    fn base_and_child() -> (ca::Registry, ca::CommitAddr, ca::CommitAddr) {
         let mut reg = ca::Registry::default();
-        let mut g = Graph::<u32>::default();
-        for w in [10u32, 20, 30] {
-            g.add_node(w);
-        }
+        let g = graph(&[10, 20, 30]);
         let base_ca = ca::graph_addr(&g);
         let base = reg.commit_graph(Duration::from_secs(1), None, base_ca, || g);
-        let mut g = Graph::<u32>::default();
-        for w in [10u32, 30] {
-            g.add_node(w);
-        }
+        let g = graph(&[10, 30]);
         let child_ca = ca::graph_addr(&g);
         let child = reg.commit_graph(Duration::from_secs(2), Some(base), child_ca, || g);
         (reg, base, child)
@@ -475,14 +512,11 @@ mod tests {
 
     #[test]
     fn navigation_matching_falls_back_to_content_for_divergent_commits() {
-        let mut reg = ca::Registry::<Graph<u32>>::default();
-        let mut g = Graph::<u32>::default();
-        g.add_node(7);
+        let mut reg = ca::Registry::default();
+        let g = graph(&[7]);
         let a_ca = ca::graph_addr(&g);
         let a = reg.commit_graph(Duration::from_secs(1), None, a_ca, || g);
-        let mut g = Graph::<u32>::default();
-        g.add_node(9);
-        g.add_node(7);
+        let g = graph(&[9, 7]);
         let b_ca = ca::graph_addr(&g);
         let b = reg.commit_graph(Duration::from_secs(2), None, b_ca, || g);
         // Unrelated commits: direct content matching pairs the equal node.

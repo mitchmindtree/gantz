@@ -18,6 +18,7 @@ iroh-tickets.workspace = true
 log.workspace = true
 n0-future.workspace = true
 postcard.workspace = true
+ron.workspace = true
 serde.workspace = true
 url.workspace = true
 

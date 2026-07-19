@@ -14,10 +14,11 @@
 //!   merge policy and liveness rules as data so unknown sections are
 //!   merged, pruned, exported and round-tripped correctly.
 //!
-//! Content forms a pure Merkle DAG: graphs reference nested graphs by
-//! [`GraphAddr`] and blobs by content address, so content identity depends
-//! only on content. Commits form the history DAG above it (timestamps live
-//! there). Names point at commits, naming lines of history.
+//! Content forms a pure Merkle DAG: graphs are [`DataGraph`]s of erased
+//! [`NodeData`] nodes referencing nested graphs by [`GraphAddr`] and blobs
+//! by content address, so content identity depends only on content. Commits
+//! form the history DAG above it (timestamps live there). Names point at
+//! commits, naming lines of history.
 //!
 //! Registry invariant: commits are parent-closed and graph-complete. Every
 //! stored commit's parents are present or detached (never dangling) and its
@@ -30,25 +31,20 @@
 
 use crate::section::{TryFromKey, value_to_datum};
 use crate::{
-    BlobLiveness, BlobStore, Bytes, CaHash, Commit, CommitAddr, ContentAddr, GraphAddr, Head, Key,
-    Liveness, MergePolicy, Name, Section, SectionDecl, SectionId, Timestamp, Value, commit_addr,
-    datum::DatumError, graph_addr,
+    BlobLiveness, BlobStore, Bytes, Commit, CommitAddr, ContentAddr, DataGraph, GraphAddr, Head,
+    Key, Liveness, MergePolicy, Name, NodeData, Section, SectionDecl, SectionId, Timestamp, Value,
+    commit_addr, datum::DatumError, graph_addr,
 };
-use petgraph::visit::{Data, GraphBase, IntoEdgeReferences, IntoNodeReferences, NodeIndexable};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    hash::Hash,
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// A registry of content-addressed graphs, commits of those graphs, blob
 /// stores, and metadata sections. See the module docs.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(bound(serialize = "G: Serialize", deserialize = "G: Deserialize<'de>"))]
-pub struct Registry<G> {
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Registry {
     /// A mapping from graph addresses to graphs.
     #[serde(serialize_with = "crate::serde_sorted::serialize_map")]
-    graphs: HashMap<GraphAddr, G>,
+    graphs: HashMap<GraphAddr, DataGraph>,
     /// A mapping from commit addresses to commits.
     #[serde(serialize_with = "crate::serde_sorted::serialize_map")]
     commits: HashMap<CommitAddr, Commit>,
@@ -67,7 +63,7 @@ pub struct Registry<G> {
 /// the roots of reachability.
 pub struct Heads;
 
-pub type Graphs<G> = HashMap<GraphAddr, G>;
+pub type Graphs = HashMap<GraphAddr, DataGraph>;
 pub type Commits = HashMap<CommitAddr, Commit>;
 
 /// The id of the core [`Heads`] section.
@@ -105,10 +101,10 @@ impl SectionDecl for Heads {
     }
 }
 
-impl<G> Registry<G> {
+impl Registry {
     /// Construct a registry from content columns and head mappings.
     pub fn from_parts(
-        graphs: HashMap<GraphAddr, G>,
+        graphs: HashMap<GraphAddr, DataGraph>,
         commits: HashMap<CommitAddr, Commit>,
         heads: BTreeMap<Name, CommitAddr>,
     ) -> Self {
@@ -125,7 +121,7 @@ impl<G> Registry<G> {
     }
 
     /// A mapping from graph addresses to graphs.
-    pub fn graphs(&self) -> &Graphs<G> {
+    pub fn graphs(&self) -> &Graphs {
         &self.graphs
     }
 
@@ -145,7 +141,7 @@ impl<G> Registry<G> {
     }
 
     /// The graph stored at the given address.
-    pub fn graph(&self, ga: &GraphAddr) -> Option<&G> {
+    pub fn graph(&self, ga: &GraphAddr) -> Option<&DataGraph> {
         self.graphs.get(ga)
     }
 
@@ -168,7 +164,7 @@ impl<G> Registry<G> {
 
     /// The commit at the tip of the named line of history.
     pub fn head(&self, name: &Name) -> Option<CommitAddr> {
-        section_get::<Heads, G>(self, name)
+        section_get::<Heads>(self, name)
     }
 
     /// All heads, ordered by name.
@@ -187,8 +183,7 @@ impl<G> Registry<G> {
     ///
     /// Returns the previous commit if the head existed.
     pub fn set_head(&mut self, name: Name, ca: CommitAddr) -> Option<CommitAddr> {
-        let prev = section_insert_value::<G>(
-            self,
+        let prev = self.set_section_value(
             Heads::ID,
             Heads::POLICY,
             Heads::LIVENESS,
@@ -231,7 +226,7 @@ impl<G> Registry<G> {
     }
 
     /// Look-up the graph pointed to by the head.
-    pub fn head_graph(&self, head: &Head) -> Option<&G> {
+    pub fn head_graph(&self, head: &Head) -> Option<&DataGraph> {
         self.head_commit(head)
             .and_then(|commit| self.graphs.get(&commit.graph))
     }
@@ -242,7 +237,7 @@ impl<G> Registry<G> {
     }
 
     /// Look-up the graph pointed to by the given commit address.
-    pub fn commit_graph_ref(&self, ca: &CommitAddr) -> Option<&G> {
+    pub fn commit_graph_ref(&self, ca: &CommitAddr) -> Option<&DataGraph> {
         self.commits
             .get(ca)
             .and_then(|commit| self.graphs.get(&commit.graph))
@@ -259,7 +254,7 @@ impl<G> Registry<G> {
         timestamp: Timestamp,
         parent_ca: Option<CommitAddr>,
         graph_ca: GraphAddr,
-        graph: impl FnOnce() -> G,
+        graph: impl FnOnce() -> DataGraph,
     ) -> CommitAddr {
         crate::ops::commit_graph(self, timestamp, parent_ca, graph_ca, graph)
     }
@@ -272,7 +267,7 @@ impl<G> Registry<G> {
         &mut self,
         timestamp: Timestamp,
         graph_ca: GraphAddr,
-        graph: impl FnOnce() -> G,
+        graph: impl FnOnce() -> DataGraph,
         name: &Name,
     ) -> CommitAddr {
         crate::ops::commit_graph_to_name(self, timestamp, graph_ca, graph, name)
@@ -290,7 +285,7 @@ impl<G> Registry<G> {
         &mut self,
         timestamp: Timestamp,
         graph_ca: GraphAddr,
-        graph: impl FnOnce() -> G,
+        graph: impl FnOnce() -> DataGraph,
         head: &mut Head,
     ) -> CommitAddr {
         crate::ops::commit_graph_to_head(self, timestamp, graph_ca, graph, head)
@@ -311,7 +306,7 @@ impl<G> Registry<G> {
         &mut self,
         timestamp: Timestamp,
         graph_ca: GraphAddr,
-        graph: impl FnOnce() -> G,
+        graph: impl FnOnce() -> DataGraph,
         theirs: CommitAddr,
         head: &mut Head,
     ) -> CommitAddr {
@@ -343,7 +338,7 @@ impl<G> Registry<G> {
         a: CommitAddr,
         b: CommitAddr,
         graph_ca: GraphAddr,
-        graph: impl FnOnce() -> G,
+        graph: impl FnOnce() -> DataGraph,
         head: &mut Head,
     ) -> CommitAddr {
         crate::ops::commit_merge_canonical(self, a, b, graph_ca, graph, head)
@@ -383,7 +378,7 @@ impl<G> Registry<G> {
 
     /// Insert a graph under a claimed (already validated) address, used only
     /// by [`sync::Staged::apply`](crate::sync::Staged).
-    pub(crate) fn insert_graph_at(&mut self, ca: GraphAddr, graph: G) {
+    pub(crate) fn insert_graph_at(&mut self, ca: GraphAddr, graph: DataGraph) {
         self.graphs.entry(ca).or_insert(graph);
     }
 
@@ -406,20 +401,14 @@ impl<G> Registry<G> {
 
     /// Insert a graph, computing its address from the graph's contents.
     ///
+    /// Every node is [canonicalized](NodeData::canonicalize) before hashing,
+    /// so one logical graph always lands under exactly one address.
+    ///
     /// Returns the computed [`GraphAddr`], which always matches the graph.
     /// Content-addressing makes this idempotent: an existing entry for the
     /// computed address is identical and is left in place.
-    pub fn add_graph(&mut self, graph: G) -> GraphAddr
-    where
-        G: Data + NodeIndexable,
-        G::EdgeWeight: CaHash + Ord,
-        G::NodeWeight: CaHash,
-        G::NodeId: Eq + Hash + Ord,
-        for<'a> &'a G: Data<EdgeWeight = G::EdgeWeight, NodeWeight = G::NodeWeight>
-            + GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
-            + IntoNodeReferences
-            + IntoEdgeReferences,
-    {
+    pub fn add_graph(&mut self, mut graph: DataGraph) -> GraphAddr {
+        graph.node_weights_mut().for_each(NodeData::canonicalize);
         let ca = graph_addr(&graph);
         self.graphs.entry(ca).or_insert(graph);
         ca
@@ -439,6 +428,14 @@ impl<G> Registry<G> {
             .entry(section.into())
             .or_insert_with(|| BlobStore::new(liveness))
             .insert(bytes)
+    }
+
+    /// Initialise head to a new initial commit pointing to an empty graph.
+    pub fn init_head(&mut self, timestamp: Timestamp) -> Head {
+        let graph = DataGraph::default();
+        let graph_ca = graph_addr(&graph);
+        let commit_ca = self.commit_graph(timestamp, None, graph_ca, || graph);
+        Head::Commit(commit_ca)
     }
 
     /// Insert a raw value into the section with the given id, creating the
@@ -524,7 +521,7 @@ impl<G> Registry<G> {
     /// differing incoming entries (and reported), `KeepExisting` entries
     /// keep the local value. An incoming section unknown locally is adopted
     /// wholesale, semantics and all.
-    pub fn merge(&mut self, incoming: Registry<G>) -> MergeReport {
+    pub fn merge(&mut self, incoming: Registry) -> MergeReport {
         let mut report = MergeReport::default();
         self.graphs.extend(incoming.graphs);
         self.commits.extend(incoming.commits);
@@ -561,40 +558,6 @@ impl<G> Registry<G> {
     }
 }
 
-impl<G> Registry<G>
-where
-    G: Default,
-{
-    /// Initialise head to a new initial commit pointing to an empty graph.
-    pub fn init_head(&mut self, timestamp: Timestamp) -> Head
-    where
-        G: Data + NodeIndexable,
-        G::EdgeWeight: CaHash + Ord,
-        G::NodeWeight: CaHash,
-        G::NodeId: Eq + Hash + Ord,
-        for<'a> &'a G: Data<EdgeWeight = G::EdgeWeight, NodeWeight = G::NodeWeight>
-            + GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
-            + IntoNodeReferences
-            + IntoEdgeReferences,
-    {
-        let graph = G::default();
-        let graph_ca = graph_addr(&graph);
-        let commit_ca = self.commit_graph(timestamp, None, graph_ca, || graph);
-        Head::Commit(commit_ca)
-    }
-}
-
-impl<G> Default for Registry<G> {
-    fn default() -> Self {
-        Self {
-            graphs: HashMap::new(),
-            commits: HashMap::new(),
-            blobs: BTreeMap::new(),
-            sections: BTreeMap::new(),
-        }
-    }
-}
-
 impl MergeReport {
     fn record_added(&mut self, id: &str, key: &Key) {
         if id == Heads::ID {
@@ -621,7 +584,7 @@ impl MergeReport {
 
 /// The typed value stored under `key` in `S`'s section, if present and of
 /// the declared shape.
-pub fn section_get<S: SectionDecl, G>(reg: &Registry<G>, key: &S::Key) -> Option<S::Value>
+pub fn section_get<S: SectionDecl>(reg: &Registry, key: &S::Key) -> Option<S::Value>
 where
     S::Key: Clone,
 {
@@ -631,18 +594,18 @@ where
 
 /// Insert a typed value under `key` in `S`'s section, creating the section
 /// (stamped with `S`'s declared semantics) on first write.
-pub fn section_insert<S: SectionDecl, G>(
-    reg: &mut Registry<G>,
+pub fn section_insert<S: SectionDecl>(
+    reg: &mut Registry,
     key: S::Key,
     value: &S::Value,
 ) -> Result<(), DatumError> {
     let value = S::encode(value)?;
-    section_insert_value(reg, S::ID, S::POLICY, S::LIVENESS, key.into(), value);
+    reg.set_section_value(S::ID, S::POLICY, S::LIVENESS, key.into(), value);
     Ok(())
 }
 
 /// Remove the entry under `key` from `S`'s section.
-pub fn section_remove<S: SectionDecl, G>(reg: &mut Registry<G>, key: &S::Key) -> Option<S::Value>
+pub fn section_remove<S: SectionDecl>(reg: &mut Registry, key: &S::Key) -> Option<S::Value>
 where
     S::Key: Clone,
 {
@@ -656,8 +619,8 @@ where
 
 /// Iterate `S`'s section entries in key order, decoding keys and values.
 /// Entries of an unexpected shape are skipped.
-pub fn section_iter<'a, S: SectionDecl, G>(
-    reg: &'a Registry<G>,
+pub fn section_iter<'a, S: SectionDecl>(
+    reg: &'a Registry,
 ) -> impl Iterator<Item = (S::Key, S::Value)> + 'a
 where
     S::Key: 'a,
@@ -679,8 +642,8 @@ where
 ///
 /// A convenience for erased writers (e.g. format import). Typed callers use
 /// [`section_insert`].
-pub fn section_insert_datum<G>(
-    reg: &mut Registry<G>,
+pub fn section_insert_datum(
+    reg: &mut Registry,
     id: impl Into<SectionId>,
     policy: MergePolicy,
     liveness: Liveness,
@@ -688,20 +651,8 @@ pub fn section_insert_datum<G>(
     value: &impl Serialize,
 ) -> Result<(), DatumError> {
     let value = value_to_datum(value)?;
-    section_insert_value(reg, &id.into(), policy, liveness, key, value);
+    reg.set_section_value(id, policy, liveness, key, value);
     Ok(())
-}
-
-/// See [`Registry::set_section_value`].
-fn section_insert_value<G>(
-    reg: &mut Registry<G>,
-    id: &str,
-    policy: MergePolicy,
-    liveness: Liveness,
-    key: Key,
-    value: Value,
-) -> Option<Value> {
-    reg.set_section_value(id, policy, liveness, key, value)
 }
 
 /// For all `parent` commits that are invalid (i.e. don't point to an
@@ -723,7 +674,7 @@ pub(crate) fn detach_invalid_parents(commits: &mut Commits) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ContentAddr;
+    use crate::{ContentAddr, Datum};
     use std::time::Duration;
 
     fn graph_addr(n: u8) -> GraphAddr {
@@ -738,16 +689,23 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// A one-node graph whose node is tagged `tag`.
+    fn data_graph(tag: &str) -> DataGraph {
+        let mut g = DataGraph::default();
+        g.add_node(NodeData::new(tag, Datum::Map(vec![])));
+        g
+    }
+
     /// Build a simple registry with two independent commits (each with its
     /// own graph) and a head pointing to one of them.
-    fn test_registry() -> (Registry<String>, CommitAddr, CommitAddr) {
+    fn test_registry() -> (Registry, CommitAddr, CommitAddr) {
         let ga = graph_addr(1);
         let gb = graph_addr(2);
         let ca = commit_addr_raw(10);
         let cb = commit_addr_raw(20);
         let commit_a = Commit::new(Duration::from_secs(1), None, ga);
         let commit_b = Commit::new(Duration::from_secs(2), None, gb);
-        let graphs = HashMap::from([(ga, "graph_a".to_string()), (gb, "graph_b".to_string())]);
+        let graphs = HashMap::from([(ga, data_graph("graph_a")), (gb, data_graph("graph_b"))]);
         let commits = HashMap::from([(ca, commit_a), (cb, commit_b)]);
         let heads = BTreeMap::from([(name("alpha"), ca)]);
         (Registry::from_parts(graphs, commits, heads), ca, cb)
@@ -794,7 +752,7 @@ mod tests {
         let cc = commit_addr_raw(30);
         let commit_c = Commit::new(Duration::from_secs(3), None, gc);
         let incoming = Registry::from_parts(
-            HashMap::from([(gc, "graph_c".to_string())]),
+            HashMap::from([(gc, data_graph("graph_c"))]),
             HashMap::from([(cc, commit_c)]),
             BTreeMap::from([(name("beta"), cc)]),
         );
@@ -812,7 +770,7 @@ mod tests {
         let ga = base.commits()[&ca].graph;
         let commit_a = base.commits()[&ca].clone();
         let incoming = Registry::from_parts(
-            HashMap::from([(ga, "graph_a".to_string())]),
+            HashMap::from([(ga, data_graph("graph_a"))]),
             HashMap::from([(ca, commit_a)]),
             BTreeMap::from([(name("alpha"), ca)]),
         );
@@ -827,7 +785,7 @@ mod tests {
         let gb = base.commits()[&cb].graph;
         let commit_b = base.commits()[&cb].clone();
         let incoming = Registry::from_parts(
-            HashMap::from([(gb, "graph_b".to_string())]),
+            HashMap::from([(gb, data_graph("graph_b"))]),
             HashMap::from([(cb, commit_b)]),
             BTreeMap::from([(name("alpha"), cb)]),
         );
@@ -849,7 +807,7 @@ mod tests {
             &"local".to_string(),
         )
         .unwrap();
-        let mut incoming: Registry<String> = Registry::default();
+        let mut incoming = Registry::default();
         section_insert_datum(
             &mut incoming,
             "test.description",
@@ -890,7 +848,7 @@ mod tests {
     #[test]
     fn merge_adopts_unknown_sections_wholesale() {
         let (mut base, _ca, _cb) = test_registry();
-        let mut incoming: Registry<String> = Registry::default();
+        let mut incoming = Registry::default();
         // A section from a domain this "app" knows nothing about.
         section_insert_datum(
             &mut incoming,
@@ -911,7 +869,7 @@ mod tests {
     #[test]
     fn merge_extends_blob_stores() {
         let (mut base, _ca, _cb) = test_registry();
-        let mut incoming: Registry<String> = Registry::default();
+        let mut incoming = Registry::default();
         let addr = incoming.add_blob("dsp.buffer", BlobLiveness::ContentReferenced, &b"pcm"[..]);
         base.merge(incoming);
         assert_eq!(
@@ -931,23 +889,54 @@ mod tests {
             type Value = String;
         }
         let (mut reg, _ca, _cb) = test_registry();
-        section_insert::<Doc, _>(&mut reg, name("alpha"), &"hello".to_string()).unwrap();
+        section_insert::<Doc>(&mut reg, name("alpha"), &"hello".to_string()).unwrap();
         assert_eq!(
-            section_get::<Doc, _>(&reg, &name("alpha")),
+            section_get::<Doc>(&reg, &name("alpha")),
             Some("hello".to_string())
         );
-        let all: Vec<_> = section_iter::<Doc, _>(&reg).collect();
+        let all: Vec<_> = section_iter::<Doc>(&reg).collect();
         assert_eq!(all, vec![(name("alpha"), "hello".to_string())]);
         assert_eq!(
-            section_remove::<Doc, _>(&mut reg, &name("alpha")),
+            section_remove::<Doc>(&mut reg, &name("alpha")),
             Some("hello".to_string())
         );
-        assert_eq!(section_get::<Doc, _>(&reg, &name("alpha")), None);
+        assert_eq!(section_get::<Doc>(&reg, &name("alpha")), None);
+    }
+
+    #[test]
+    fn add_graph_canonicalizes_before_hashing() {
+        // The same logical node in canonical and non-canonical form must land
+        // under one address.
+        let node = |entries: Vec<(&str, Datum)>| {
+            NodeData::new(
+                "test",
+                Datum::Map(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect(),
+                ),
+            )
+        };
+        let mut messy = DataGraph::default();
+        messy.add_node(node(vec![("b", Datum::Null), ("a", Datum::Bool(true))]));
+        let mut clean = DataGraph::default();
+        clean.add_node(node(vec![("a", Datum::Bool(true)), ("b", Datum::Null)]));
+        let mut reg = Registry::default();
+        let messy_ca = reg.add_graph(messy);
+        let clean_ca = reg.add_graph(clean);
+        assert_eq!(messy_ca, clean_ca);
+        assert!(
+            reg.graph(&clean_ca)
+                .unwrap()
+                .node_weights()
+                .all(NodeData::is_canonical)
+        );
     }
 
     #[test]
     fn add_commit_clears_absent_parent() {
-        let mut reg: Registry<String> = Registry::default();
+        let mut reg = Registry::default();
         let ga = graph_addr(1);
         let absent_parent = commit_addr_raw(99);
         let ca = reg.add_commit(Commit::new(Duration::from_secs(1), Some(absent_parent), ga));
@@ -958,7 +947,7 @@ mod tests {
 
     #[test]
     fn add_commit_keeps_present_parent() {
-        let mut reg: Registry<String> = Registry::default();
+        let mut reg = Registry::default();
         let root = reg.add_commit(Commit::new(Duration::from_secs(1), None, graph_addr(1)));
         let child = reg.add_commit(Commit::new(
             Duration::from_secs(2),
@@ -970,7 +959,7 @@ mod tests {
 
     #[test]
     fn add_commit_drops_absent_merge_parents() {
-        let mut reg: Registry<String> = Registry::default();
+        let mut reg = Registry::default();
         let root = reg.add_commit(Commit::new(Duration::from_secs(1), None, graph_addr(1)));
         let absent = commit_addr_raw(99);
         let merge = reg.add_commit(Commit::new_merge(
@@ -986,21 +975,21 @@ mod tests {
 
     #[test]
     fn commit_merge_to_head_mints_two_parent_commit_and_advances_head() {
-        let mut reg: Registry<String> = Registry::default();
+        let mut reg = Registry::default();
         let ours = reg.commit_graph_to_name(
             Duration::from_secs(1),
             graph_addr(1),
-            || "ours".to_string(),
+            || data_graph("ours"),
             &name("alpha"),
         );
         let theirs = reg.commit_graph(Duration::from_secs(2), None, graph_addr(2), || {
-            "theirs".to_string()
+            data_graph("theirs")
         });
         let mut head = Head::Branch(name("alpha"));
         let merge = reg.commit_merge_to_head(
             Duration::from_secs(3),
             graph_addr(3),
-            || "merged".to_string(),
+            || data_graph("merged"),
             theirs,
             &mut head,
         );
@@ -1016,7 +1005,7 @@ mod tests {
         let (reg, _ca, _cb) = test_registry();
         // `heads` is non-empty here, so `sections` serializes. A registry
         // with no sections at all must omit both fields.
-        let bare: Registry<String> = Registry::default();
+        let bare = Registry::default();
         let s = ron::to_string(&bare).unwrap();
         assert!(!s.contains("sections"));
         assert!(!s.contains("blobs"));
@@ -1039,10 +1028,22 @@ mod tests {
         )
         .unwrap();
         let s = ron::to_string(&reg).unwrap();
-        let back: Registry<String> = ron::de::from_str(&s).unwrap();
+        let back: Registry = ron::de::from_str(&s).unwrap();
         assert_eq!(back.commits(), reg.commits());
-        assert_eq!(back.graphs(), reg.graphs());
         assert_eq!(back.sections(), reg.sections());
         assert_eq!(back.blobs(), reg.blobs());
+        // `DataGraph` lacks `PartialEq`: compare the graph column by address
+        // set and node content.
+        assert_eq!(
+            back.graphs().keys().collect::<HashSet<_>>(),
+            reg.graphs().keys().collect::<HashSet<_>>()
+        );
+        for (ga, g) in reg.graphs() {
+            let b = &back.graphs()[ga];
+            assert_eq!(
+                b.node_weights().collect::<Vec<_>>(),
+                g.node_weights().collect::<Vec<_>>()
+            );
+        }
     }
 }

@@ -17,10 +17,10 @@
 //!   [`Registry::commit_merge_canonical`].
 //! - [`Staged`] validates fetched commits and graphs against their claimed
 //!   addresses before they may touch a registry. Graph content is recomputed
-//!   and rejected on mismatch - the security-critical check, as graphs
-//!   compile to executed code. Commit chains apply oldest-first under their
-//!   claimed keys, preserving addresses that [`Registry::add_commit`]'s
-//!   parent-clearing would rewrite.
+//!   and rejected on mismatch (see [`verify_graph`]) - the security-critical
+//!   check, as graphs compile to executed code. Commit chains apply
+//!   oldest-first under their claimed keys, preserving addresses that
+//!   [`Registry::add_commit`]'s parent-clearing would rewrite.
 //! - [`monotonic_timestamp`] guards locally *minted* commit timestamps so an
 //!   edit made after observing another commit always outranks it under
 //!   [`BothModified::KeepNewest`], without ever rewriting received content
@@ -30,16 +30,14 @@
 //! [`BothModified::KeepNewest`]: crate::merge::BothModified::KeepNewest
 
 use crate::{
-    BlobLiveness, Bytes, CaHash, Commit, CommitAddr, ContentAddr, GraphAddr, RawGraph, SectionId,
+    BlobLiveness, Bytes, Commit, CommitAddr, ContentAddr, DataGraph, GraphAddr, SectionId,
     Timestamp, blob_addr, commit_addr, graph_addr,
     history::{self, MergeAnalysis},
     registry::{Commits, Registry},
 };
-use petgraph::visit::{Data, GraphBase, IntoEdgeReferences, IntoNodeReferences, NodeIndexable};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     fmt,
-    hash::Hash,
     time::Duration,
 };
 
@@ -73,7 +71,7 @@ pub enum SyncStep {
 }
 
 /// A fetched object whose recomputed content address does not match the
-/// address it was claimed under.
+/// address it was claimed under, or whose content is not in canonical form.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VerifyError {
     /// The commit's recomputed address differs from the claimed one.
@@ -91,6 +89,9 @@ pub enum VerifyError {
         claimed: ContentAddr,
         actual: ContentAddr,
     },
+    /// A data graph carries a non-canonical node, which would alias the same
+    /// logical node under a second address.
+    NonCanonicalNode { graph: GraphAddr, node_ix: usize },
 }
 
 /// An error preventing a [`Staged`] set from being applied to a registry.
@@ -146,10 +147,10 @@ pub struct Applied {
 /// [`missing`](Self::missing) drives a fetch loop until
 /// [`is_complete`](Self::is_complete), after which
 /// [`apply`](Self::apply) inserts everything oldest-first under claimed keys.
-#[derive(Clone, Debug)]
-pub struct Staged<G> {
+#[derive(Clone, Debug, Default)]
+pub struct Staged {
     commits: BTreeMap<CommitAddr, StagedCommit>,
-    graphs: BTreeMap<GraphAddr, G>,
+    graphs: BTreeMap<GraphAddr, DataGraph>,
     blobs: BTreeMap<(SectionId, ContentAddr), (BlobLiveness, Bytes)>,
     grandfathered: Vec<CommitAddr>,
 }
@@ -173,7 +174,7 @@ impl Missing {
     }
 }
 
-impl<G> Staged<G> {
+impl Staged {
     /// An empty staging area.
     pub fn new() -> Self {
         Self::default()
@@ -224,26 +225,19 @@ impl<G> Staged<G> {
         &self.grandfathered
     }
 
-    /// Stage a graph, verifying that its content hashes to the claimed
-    /// address.
+    /// Stage a graph, verifying it against the claimed address (see
+    /// [`verify_graph`]).
     ///
     /// Always strict: graph content is compiled to executed code, so a graph
-    /// that does not hash to the address it was requested under is rejected.
-    pub fn insert_graph(&mut self, claimed: GraphAddr, graph: G) -> Result<(), VerifyError>
-    where
-        G: Data + NodeIndexable,
-        G::EdgeWeight: CaHash + Ord,
-        G::NodeWeight: CaHash,
-        G::NodeId: Eq + Hash + Ord,
-        for<'a> &'a G: Data<EdgeWeight = G::EdgeWeight, NodeWeight = G::NodeWeight>
-            + GraphBase<NodeId = G::NodeId, EdgeId = G::EdgeId>
-            + IntoNodeReferences
-            + IntoEdgeReferences,
-    {
-        let actual = graph_addr(&graph);
-        if actual != claimed {
-            return Err(VerifyError::Graph { claimed, actual });
-        }
+    /// that does not hash to the address it was requested under - or that
+    /// carries a non-canonical node, aliasing a logical node under a second
+    /// address - is rejected.
+    pub fn insert_graph(
+        &mut self,
+        claimed: GraphAddr,
+        graph: DataGraph,
+    ) -> Result<(), VerifyError> {
+        verify_graph(claimed, &graph)?;
         self.graphs.insert(claimed, graph);
         Ok(())
     }
@@ -276,7 +270,7 @@ impl<G> Staged<G> {
     /// The walk stops at commits already in the registry, relying on the
     /// registry invariant that its commits are parent-closed (absent parents
     /// are detached on insert and prune) and graph-complete.
-    pub fn missing(&self, reg: &Registry<G>, tip: CommitAddr) -> Missing {
+    pub fn missing(&self, reg: &Registry, tip: CommitAddr) -> Missing {
         let mut missing = Missing::default();
         let mut missing_graphs: HashSet<GraphAddr> = HashSet::new();
         let mut queue: VecDeque<CommitAddr> = VecDeque::from([tip]);
@@ -306,7 +300,7 @@ impl<G> Staged<G> {
 
     /// `true` when `tip`'s closure is complete and the staged set is ready to
     /// [`apply`](Self::apply).
-    pub fn is_complete(&self, reg: &Registry<G>, tip: CommitAddr) -> bool {
+    pub fn is_complete(&self, reg: &Registry, tip: CommitAddr) -> bool {
         self.missing(reg, tip).is_empty()
     }
 
@@ -318,7 +312,7 @@ impl<G> Staged<G> {
     /// (registry or staged); snapshot commits with absent parents are
     /// detached on insert and counted in [`Applied::truncated`], mirroring
     /// the local post-prune semantic.
-    pub fn apply(self, reg: &mut Registry<G>) -> Result<Applied, ApplyError> {
+    pub fn apply(self, reg: &mut Registry) -> Result<Applied, ApplyError> {
         for (&ca, staged) in &self.commits {
             let graph = staged.commit.graph;
             if !reg.graphs().contains_key(&graph) && !self.graphs.contains_key(&graph) {
@@ -375,33 +369,6 @@ impl<G> Staged<G> {
     }
 }
 
-impl Staged<RawGraph> {
-    /// Stage a raw (undecodable) graph under a claimed address, TRUSTING an
-    /// upstream validator.
-    ///
-    /// A raw graph's address cannot be recomputed from its bytes (the
-    /// structural graph hash needs the decoded graph), so local verification
-    /// is impossible here: this path exists for serve-side relay stores that
-    /// hold what decoding peers verified. A receiving application peer must
-    /// always decode and re-verify through the typed
-    /// [`insert_graph`](Self::insert_graph) path, which is where the
-    /// security boundary lives.
-    pub fn insert_graph_claimed(&mut self, claimed: GraphAddr, bytes: impl Into<Bytes>) {
-        self.graphs.insert(claimed, RawGraph::new(claimed, bytes));
-    }
-}
-
-impl<G> Default for Staged<G> {
-    fn default() -> Self {
-        Self {
-            commits: BTreeMap::new(),
-            graphs: BTreeMap::new(),
-            blobs: BTreeMap::new(),
-            grandfathered: Vec::new(),
-        }
-    }
-}
-
 impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -413,6 +380,12 @@ impl fmt::Display for VerifyError {
             }
             Self::Blob { claimed, actual } => {
                 write!(f, "blob claimed as {claimed} hashes to {actual}")
+            }
+            Self::NonCanonicalNode { graph, node_ix } => {
+                write!(
+                    f,
+                    "graph claimed as {graph} has non-canonical node {node_ix}"
+                )
             }
         }
     }
@@ -434,6 +407,27 @@ impl fmt::Display for ApplyError {
 }
 
 impl std::error::Error for ApplyError {}
+
+/// Verify a fetched graph against the address it was claimed under: canonical
+/// form of every node plus a strict content re-hash.
+///
+/// A non-canonical node hashes consistently with its own (non-canonical)
+/// form, so the address check alone would admit it - as an alias of the same
+/// logical node under a second network-wide address. Rejecting it keeps one
+/// logical node to exactly one address.
+pub fn verify_graph(claimed: GraphAddr, graph: &DataGraph) -> Result<(), VerifyError> {
+    if let Some(node_ix) = graph.node_weights().position(|n| !n.is_canonical()) {
+        return Err(VerifyError::NonCanonicalNode {
+            graph: claimed,
+            node_ix,
+        });
+    }
+    let actual = graph_addr(graph);
+    if actual != claimed {
+        return Err(VerifyError::Graph { claimed, actual });
+    }
+    Ok(())
+}
 
 /// Order two diverged tips canonically: ascending by `(timestamp, addr)`.
 ///
@@ -554,16 +548,12 @@ fn topo_order(staged: &BTreeMap<CommitAddr, StagedCommit>) -> Vec<CommitAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ContentAddr, Head};
-    use petgraph::Directed;
+    use crate::{ContentAddr, Datum, Head, NodeData};
 
-    type Graph = petgraph::graph::Graph<String, u32, Directed, usize>;
-    type Reg = Registry<Graph>;
-
-    fn graph(nodes: &[&str]) -> Graph {
-        let mut g = Graph::default();
+    fn graph(nodes: &[&str]) -> DataGraph {
+        let mut g = DataGraph::default();
         for n in nodes {
-            g.add_node(n.to_string());
+            g.add_node(NodeData::new(*n, Datum::Map(vec![])));
         }
         g
     }
@@ -677,7 +667,7 @@ mod tests {
         // Two registries with identical content merge the same diverged pair
         // from opposite orientations.
         let build = || {
-            let mut reg = Reg::default();
+            let mut reg = Registry::default();
             let base = graph(&["base"]);
             let base_ca = crate::graph_addr(&base);
             let root = reg.commit_graph(Duration::from_secs(1), None, base_ca, || base);
@@ -711,7 +701,7 @@ mod tests {
 
     #[test]
     fn staged_rejects_forged_commit_addr() {
-        let mut staged = Staged::<Graph>::new();
+        let mut staged = Staged::new();
         let commit = Commit::new(Duration::from_secs(1), None, graph_addr_raw(1));
         let forged = CommitAddr::from(ContentAddr::from([9; 32]));
         let err = staged.insert_commit(forged, commit.clone()).unwrap_err();
@@ -728,7 +718,7 @@ mod tests {
 
     #[test]
     fn staged_rejects_forged_graph_addr() {
-        let mut staged = Staged::<Graph>::new();
+        let mut staged = Staged::new();
         let g = graph(&["a"]);
         let forged = graph_addr_raw(9);
         let err = staged.insert_graph(forged, g.clone()).unwrap_err();
@@ -742,9 +732,48 @@ mod tests {
         staged.insert_graph(crate::graph_addr(&g), g).unwrap();
     }
 
+    /// A non-canonical node hashes consistently with its own form, so an
+    /// address check alone would admit it as an alias of the same logical
+    /// node under a second address. The graph check must reject it.
+    #[test]
+    fn staged_rejects_non_canonical_node() {
+        let node = |entries: Vec<(&str, Datum)>| {
+            NodeData::new(
+                "test",
+                Datum::Map(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k.to_string(), v))
+                        .collect(),
+                ),
+            )
+        };
+        // Map keys deliberately out of order.
+        let bad = node(vec![("b", Datum::Null), ("a", Datum::Bool(true))]);
+        assert!(!bad.is_canonical());
+        let mut g = DataGraph::default();
+        g.add_node(bad);
+        // The graph hashes consistently with its non-canonical form: the
+        // claimed address matches, yet the graph must still be rejected.
+        let claimed = crate::graph_addr(&g);
+
+        let mut staged = Staged::new();
+        let err = staged.insert_graph(claimed, g.clone()).unwrap_err();
+        assert_eq!(
+            err,
+            VerifyError::NonCanonicalNode {
+                graph: claimed,
+                node_ix: 0,
+            }
+        );
+
+        g.node_weights_mut().for_each(NodeData::canonicalize);
+        staged.insert_graph(crate::graph_addr(&g), g).unwrap();
+    }
+
     #[test]
     fn staged_grandfathered_accepts_and_records_mismatch() {
-        let mut staged = Staged::<Graph>::new();
+        let mut staged = Staged::new();
         // A post-prune commit: parent detached in place under its original
         // key, so the content no longer hashes to the key.
         let parent = CommitAddr::from(ContentAddr::from([7; 32]));
@@ -760,29 +789,9 @@ mod tests {
     }
 
     #[test]
-    fn staged_raw_graph_applies_under_claimed_addr() {
-        use crate::graph::GraphHash;
-        // A relay store holds graphs the process cannot decode: bytes apply
-        // under the claimed (upstream-validated) address as-is.
-        let mut reg = Registry::<RawGraph>::default();
-        let mut staged = Staged::<RawGraph>::new();
-        let ga = graph_addr_raw(1);
-        let commit = Commit::new(Duration::from_secs(1), None, ga);
-        let ca = commit_addr(&commit);
-        staged.insert_commit(ca, commit).unwrap();
-        staged.insert_graph_claimed(ga, &b"(app-serialized graph)"[..]);
-        assert!(staged.is_complete(&reg, ca));
-        let applied = staged.apply(&mut reg).unwrap();
-        assert_eq!(applied.graphs, vec![ga]);
-        let raw = reg.graph(&ga).unwrap();
-        assert_eq!(raw.graph_addr(), ga);
-        assert_eq!(&raw.bytes[..], b"(app-serialized graph)");
-    }
-
-    #[test]
     fn missing_reports_unfetched_parents_and_graphs() {
-        let reg = Reg::default();
-        let mut staged = Staged::<Graph>::new();
+        let reg = Registry::default();
+        let mut staged = Staged::new();
         let g = graph(&["a"]);
         let g_ca = crate::graph_addr(&g);
         let root = Commit::new(Duration::from_secs(1), None, g_ca);
@@ -803,11 +812,11 @@ mod tests {
 
     #[test]
     fn missing_stops_at_registry_commits() {
-        let mut reg = Reg::default();
+        let mut reg = Registry::default();
         let base = graph(&["base"]);
         let base_ca = crate::graph_addr(&base);
         let root = reg.commit_graph(Duration::from_secs(1), None, base_ca, || base);
-        let mut staged = Staged::<Graph>::new();
+        let mut staged = Staged::new();
         let g = graph(&["base", "a"]);
         let g_ca = crate::graph_addr(&g);
         let tip = Commit::new(Duration::from_secs(2), Some(root), g_ca);
@@ -822,8 +831,8 @@ mod tests {
     fn apply_preserves_addresses_add_commit_would_rewrite() {
         // A chain staged out of order applies parents-first under claimed
         // keys, unlike `Registry::add_commit` which re-parents-then-hashes.
-        let mut reg = Reg::default();
-        let mut staged = Staged::<Graph>::new();
+        let mut reg = Registry::default();
+        let mut staged = Staged::new();
         let g = graph(&["a"]);
         let g_ca = crate::graph_addr(&g);
         let root = Commit::new(Duration::from_secs(1), None, g_ca);
@@ -853,8 +862,8 @@ mod tests {
 
     #[test]
     fn apply_errors_on_strict_missing_parent() {
-        let mut reg = Reg::default();
-        let mut staged = Staged::<Graph>::new();
+        let mut reg = Registry::default();
+        let mut staged = Staged::new();
         let g = graph(&["a"]);
         let g_ca = crate::graph_addr(&g);
         let absent = CommitAddr::from(ContentAddr::from([7; 32]));
@@ -877,8 +886,8 @@ mod tests {
 
     #[test]
     fn apply_errors_on_missing_graph() {
-        let mut reg = Reg::default();
-        let mut staged = Staged::<Graph>::new();
+        let mut reg = Registry::default();
+        let mut staged = Staged::new();
         let tip = Commit::new(Duration::from_secs(1), None, graph_addr_raw(1));
         let tip_ca = commit_addr(&tip);
         staged.insert_commit(tip_ca, tip).unwrap();
@@ -897,8 +906,8 @@ mod tests {
     fn apply_detaches_truncated_snapshot_parents() {
         // The oldest snapshot commit references a parent below the history
         // depth cutoff: it applies detached, mirroring post-prune semantics.
-        let mut reg = Reg::default();
-        let mut staged = Staged::<Graph>::new();
+        let mut reg = Registry::default();
+        let mut staged = Staged::new();
         let g = graph(&["a"]);
         let g_ca = crate::graph_addr(&g);
         let below_cutoff = CommitAddr::from(ContentAddr::from([7; 32]));

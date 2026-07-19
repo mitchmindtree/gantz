@@ -28,6 +28,17 @@ pub mod ui_tree;
 pub mod view;
 pub mod widget;
 
+// Re-exported for `ui_node_codec!` expansions (`$crate::...` paths); depend
+// on the crates directly to use them.
+#[doc(hidden)]
+pub use gantz_ca;
+#[doc(hidden)]
+pub use gantz_core;
+#[doc(hidden)]
+pub use gantz_format;
+#[doc(hidden)]
+pub use gantz_nodetag;
+
 pub use egui_graph::SocketKind;
 pub use keybind::{Action, Keymap};
 pub use node::builtins;
@@ -306,6 +317,10 @@ pub struct HeadDataMut<'a, N> {
 
 /// A trait providing an egui `Ui` implementation for gantz nodes.
 ///
+/// [`gantz_core::Node`] is a supertrait: a UI node *is* a node, so a
+/// [`Box<dyn NodeUi>`](crate::node::DynNode) serves compilation and
+/// evaluation directly (no parallel node-set trait required).
+///
 /// # Reporting changes
 ///
 /// The graph the node lives in is content-addressed: its identity (and thus
@@ -328,7 +343,7 @@ pub struct HeadDataMut<'a, N> {
 /// queued via [`push_eval`](NodeUiResponse::push_eval). A missed `changed`
 /// leaves the committed graph stale (a correctness bug); a spurious `changed`
 /// only costs a redundant hash, so when in doubt, mark it.
-pub trait NodeUi {
+pub trait NodeUi: gantz_core::Node {
     /// The name used to present the node within the inspector.
     fn name(&self, _registry: &dyn Registry) -> Cow<'_, str>;
 
@@ -667,72 +682,6 @@ pub struct Redo;
 /// Undo the last graph edit (move head to parent commit).
 #[derive(Clone, Copy, Debug)]
 pub struct Undo;
-
-impl<'a, N> NodeUi for &'a mut N
-where
-    N: ?Sized + NodeUi,
-{
-    fn name(&self, registry: &dyn Registry) -> Cow<'_, str> {
-        (**self).name(registry)
-    }
-
-    fn description(&self) -> Option<&'static str> {
-        (**self).description()
-    }
-
-    fn ui(&mut self, ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
-        (**self).ui(ctx, uictx)
-    }
-
-    fn inspector_rows(
-        &mut self,
-        ctx: &mut NodeCtx,
-        body: &mut egui_extras::TableBody,
-    ) -> InspectorRowsResponse {
-        (**self).inspector_rows(ctx, body)
-    }
-
-    fn inspector_ui(&mut self, ctx: NodeCtx, ui: &mut egui::Ui) -> InspectorUiResponse {
-        (**self).inspector_ui(ctx, ui)
-    }
-
-    fn view_ui(&mut self, ctx: NodeCtx, ui: &mut egui::Ui) -> NodeViewResponse {
-        (**self).view_ui(ctx, ui)
-    }
-
-    fn view_no_margin(&self) -> bool {
-        (**self).view_no_margin()
-    }
-
-    fn flow(&self, registry: &dyn Registry) -> egui::Direction {
-        (**self).flow(registry)
-    }
-
-    fn demo_graph(&self, registry: &dyn Registry) -> Option<String> {
-        (**self).demo_graph(registry)
-    }
-
-    fn nav_head(&self, registry: &dyn Registry) -> Option<gantz_ca::Head> {
-        (**self).nav_head(registry)
-    }
-
-    fn socket_doc(
-        &self,
-        registry: &dyn Registry,
-        kind: SocketKind,
-        ix: usize,
-    ) -> Option<SocketDoc> {
-        (**self).socket_doc(registry, kind, ix)
-    }
-
-    fn context_menu(&mut self, ctx: &mut NodeCtx, ui: &mut egui::Ui) -> ContextMenuResponse {
-        (**self).context_menu(ctx, ui)
-    }
-
-    fn show_state(&self) -> bool {
-        (**self).show_state()
-    }
-}
 
 macro_rules! impl_node_ui_for_ptr {
     ($($Ty:ident)::*) => {

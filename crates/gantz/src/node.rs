@@ -133,6 +133,46 @@ impl gantz_format::NodeSugar for Box<dyn Node> {
     }
 }
 
+/// The value-level codec for the app's node set: typed nodes to/from the
+/// registry's erased `NodeData` form, plus the set's `.gantz` sugar.
+///
+/// Lists the SAME types as the `impl_node_set_serde!` manifest above, so the
+/// typed path and the box serde produce byte-identical `NodeData` (the same
+/// content addresses) - the `codec_matches_node_set_serde` gate test enforces
+/// it.
+pub fn codec() -> gantz_egui::node::NodeCodec {
+    gantz_egui::ui_node_codec! {
+        Box<dyn Node> {
+            gantz_core::node::Apply,
+            gantz_core::node::Branch,
+            gantz_core::node::Delay,
+            gantz_core::node::Expr,
+            gantz_core::node::Identity,
+            gantz_core::node::graph::Inlet,
+            gantz_core::node::graph::Outlet,
+            gantz_std::Bang,
+            gantz_std::Log,
+            gantz_std::Number,
+            gantz_egui::node::FnNamedRef,
+            gantz_egui::node::NamedRef,
+            gantz_egui::node::Comment,
+            bevy_gantz_egui::node::UpdateBang,
+            bevy_gantz_egui::node::TickBang,
+            gantz_egui::node::Inspect,
+            gantz_egui::node::Plot,
+            gantz_plyphon::SinOsc,
+            gantz_plyphon::Out,
+            gantz_plyphon::Lag,
+            gantz_plyphon::ScopeOut,
+            gantz_plyphon::Pack,
+            gantz_plyphon::Sum,
+            gantz_plyphon::Unpack,
+            gantz_plyphon::Bus,
+            gantz_plyphon::PlayBuf,
+        }
+    }
+}
+
 /// The app's full builtin node set: every domain's builtin specs composed.
 pub fn builtins() -> gantz_core::BuiltinSet<Box<dyn Node>> {
     gantz_core::BuiltinSet::from_specs(
@@ -589,6 +629,46 @@ mod tests {
             actual, expected,
             "node content addresses changed - if deliberate, repin",
         );
+    }
+
+    /// Gate test for the value-level codec: for every node in the set, the
+    /// codec's typed round-trip (`reify_ui` + `erase`) of the box-serde
+    /// erasure reproduces it byte-identically - the typed path and the box
+    /// path agree on canonical form, refs columns and content addresses.
+    #[test]
+    fn codec_matches_node_set_serde() {
+        use gantz_core::data::erase_node;
+
+        let codec = super::codec();
+        for (i, node) in node_set_instances().into_iter().enumerate() {
+            let nd = erase_node(&node).unwrap_or_else(|e| panic!("case {i}: erase failed: {e}"));
+            let normalized = codec
+                .normalize(&nd)
+                .unwrap_or_else(|e| panic!("case {i} (`{}`): normalize failed: {e}", nd.tag));
+            assert_eq!(
+                nd, normalized,
+                "case {i} (`{}`): typed codec diverges from the box serde",
+                nd.tag,
+            );
+            assert_eq!(nd.content_addr(), normalized.content_addr());
+        }
+    }
+
+    /// Every manifest tag reifies through the codec: a type listed in
+    /// `impl_node_set_serde!` but missing from `ui_node_codec!` fails here.
+    #[test]
+    fn codec_covers_every_manifest_tag() {
+        use gantz_core::data::erase_node;
+
+        let codec = super::codec();
+        for value in node_set_cases() {
+            let node: Box<dyn Node> = gantz_format::from_datum(value.clone())
+                .unwrap_or_else(|e| panic!("from_datum failed for {value:?}: {e}"));
+            let nd = erase_node(&node).expect("erase");
+            codec
+                .reify_ui(&nd)
+                .unwrap_or_else(|e| panic!("tag `{}` missing from the codec: {e}", nd.tag));
+        }
     }
 
     /// Pins the exact node serde wire format in both the `Datum` codec (the

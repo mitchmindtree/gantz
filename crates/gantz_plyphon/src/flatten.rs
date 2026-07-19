@@ -243,7 +243,7 @@ where
 /// and must dissolve.
 pub fn flatten_from_registry<'g, N>(
     graph: &'g Graph<N>,
-    registry: &'g gantz_ca::Registry<Graph<N>>,
+    reified: &'g gantz_core::data::ReifiedGraphs<N>,
 ) -> Result<Graph<Flat<N>>, FlattenError>
 where
     N: gantz_core::Node + AsRefNode + ToNodeDsp + Clone,
@@ -257,18 +257,18 @@ where
                 .unwrap_or_default()
                 .inline;
             let kind = if !inline
-                && crate::ref_ext::is_dsp_graph(registry, ca.into(), &mut dsp_memo.borrow_mut())
+                && crate::ref_ext::is_dsp_graph(reified, ca.into(), &mut dsp_memo.borrow_mut())
             {
                 RefKind::Instance
             } else {
                 RefKind::Inline
             };
-            (ca, kind, registry.graph(&ca.into()))
+            (ca, kind, reified.get(&ca.into()))
         })
     };
     let get_node = |ca: &ContentAddr| {
-        registry
-            .graph(&(*ca).into())
+        reified
+            .get(&(*ca).into())
             .map(|g| g as &dyn gantz_core::Node)
     };
     flatten(&get_node, graph, &resolve)
@@ -280,7 +280,7 @@ where
 /// instanced ref actually reaches are flattened.
 pub fn flatten_instance_children<N>(
     flat: &Graph<Flat<N>>,
-    registry: &gantz_ca::Registry<Graph<N>>,
+    reified: &gantz_core::data::ReifiedGraphs<N>,
 ) -> Result<HashMap<ContentAddr, Graph<Flat<N>>>, FlattenError>
 where
     N: gantz_core::Node + AsRefNode + ToNodeDsp + Clone,
@@ -299,10 +299,10 @@ where
         if out.contains_key(&ca) {
             continue;
         }
-        let graph = registry
-            .graph(&ca.into())
+        let graph = reified
+            .get(&ca.into())
             .ok_or(FlattenError::Unresolved(ca))?;
-        let child = flatten_from_registry(graph, registry)?;
+        let child = flatten_from_registry(graph, reified)?;
         queue.extend(marker_cas(&child));
         out.insert(ca, child);
     }

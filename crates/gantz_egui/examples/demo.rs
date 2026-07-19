@@ -34,8 +34,13 @@ fn main() -> Result<(), eframe::Error> {
 struct Environment {
     /// Constructors for all primitive nodes.
     primitives: Primitives,
-    /// The registry of all nodes composed from other nodes.
+    /// The registry of all nodes composed from other nodes, stored as data.
     registry: Registry,
+    /// The registry's graphs reified through the demo's node set, for typed
+    /// node lookups. Kept in step with the registry via [`ensure_reified`].
+    ///
+    /// [`ensure_reified`]: Environment::ensure_reified
+    reified: gantz_core::data::ReifiedGraphs<Box<dyn Node>>,
 }
 
 impl Environment {
@@ -43,8 +48,8 @@ impl Environment {
     fn node(&self, ca: &gantz_ca::ContentAddr) -> Option<&dyn gantz_core::Node> {
         // Graph refs pin graph addresses: a graph in the registry IS a node.
         let graph_ca = gantz_ca::GraphAddr::from(*ca);
-        self.registry
-            .graph(&graph_ca)
+        self.reified
+            .get(&graph_ca)
             .map(|g| g as &dyn gantz_core::Node)
     }
 
@@ -54,10 +59,24 @@ impl Environment {
         let head_ca = self.registry.head(name)?;
         self.registry.commits().get(&head_ca).map(|c| c.graph)
     }
+
+    /// The typed graph at the given head's tip, if reified.
+    fn head_graph(&self, head: &gantz_ca::Head) -> Option<&Graph> {
+        let commit = self.registry.head_commit(head)?;
+        self.reified.get(&commit.graph)
+    }
+
+    /// Bring the reified cache up to date with the registry, logging graphs
+    /// that fail to decode (they degrade like any missing node).
+    fn ensure_reified(&mut self) {
+        for e in self.reified.ensure_all(&self.registry) {
+            log::error!("failed to reify registry graph: {e}");
+        }
+    }
 }
 
-/// Registry of graphs, commits and branch names.
-type Registry = gantz_ca::Registry<Graph>;
+/// Registry of graphs (in erased data form), commits and branch names.
+type Registry = gantz_ca::Registry<gantz_ca::DataGraph>;
 
 /// Constructors for all primitive nodes.
 type Primitives = BTreeMap<String, Box<dyn Fn() -> Box<dyn Node>>>;
@@ -139,7 +158,7 @@ impl gantz_egui::node::FnNodeNames for Environment {
                 let Some(graph_ca) = self.head_graph_addr(name) else {
                     return false;
                 };
-                let Some(graph) = self.registry.graph(&graph_ca) else {
+                let Some(graph) = self.reified.get(&graph_ca) else {
                     return false;
                 };
                 let stateful = graph.stateful(meta_ctx);
@@ -161,7 +180,7 @@ impl gantz_egui::Registry for Environment {
     fn would_ref_cycle(&self, target: &str, editing: &str) -> bool {
         let target: gantz_ca::Name = target.parse().expect("infallible");
         let editing: gantz_ca::Name = editing.parse().expect("infallible");
-        gantz_egui::cycle::would_cycle(&self.registry, &target, &editing)
+        gantz_egui::cycle::would_cycle(&self.registry, &self.reified, &target, &editing)
     }
 
     fn socket_doc(
@@ -175,7 +194,7 @@ impl gantz_egui::Registry for Environment {
         // Resolve the referenced graph and read the ix-th inlet/outlet marker's
         // own doc.
         let graph_ca = gantz_ca::GraphAddr::from(*ca);
-        let graph = self.registry.graph(&graph_ca)?;
+        let graph = self.reified.get(&graph_ca)?;
         let get_node = |c: &gantz_ca::ContentAddr| self.node(c);
         let meta_ctx = gantz_core::node::MetaCtx::new(&get_node);
         let node_ref = graph
@@ -217,7 +236,7 @@ impl gantz_egui::Registry for Environment {
 
         let parsed: gantz_ca::Name = name.parse().expect("infallible");
         if let Some(graph_ca) = self.head_graph_addr(&parsed) {
-            if let Some(graph) = self.registry.graph(&graph_ca) {
+            if let Some(graph) = self.reified.get(&graph_ca) {
                 let ca: gantz_ca::ContentAddr = graph_ca.into();
                 let socket = |kind: SocketKind, ix: usize| {
                     gantz_egui::Registry::socket_doc(self, &ca, kind, ix)
@@ -266,7 +285,7 @@ impl gantz_egui::Registry for Environment {
         source: &str,
         resolutions: gantz_ca::Resolutions,
     ) -> Option<gantz_egui::merge::MergePreview> {
-        gantz_egui::merge::merge_preview(&self.registry, ours, source, resolutions)
+        gantz_egui::merge::merge_preview(&self.registry, &self.reified, ours, source, resolutions)
     }
 }
 
@@ -549,7 +568,7 @@ impl App {
         log::set_max_level(log::LevelFilter::Info);
 
         // Load the graphs and mappings from storage.
-        let (mut registry, open_heads, gantz) = cc
+        let (registry, open_heads, gantz) = cc
             .storage
             .as_ref()
             .map(|&storage| {
@@ -578,11 +597,21 @@ impl App {
                 (Default::default(), vec![], Default::default())
             });
 
+        // Setup the environment that will be provided to all nodes, reifying
+        // the stored graphs through the demo's node set.
+        let primitives = primitives();
+        let mut env = Environment {
+            registry,
+            primitives,
+            reified: Default::default(),
+        };
+        env.ensure_reified();
+
         // Load all open heads, filtering out invalid ones.
         let heads: Vec<_> = open_heads
             .into_iter()
             .filter_map(|head| {
-                let graph = clone_graph(registry.head_graph(&head)?);
+                let graph = clone_graph(env.head_graph(&head)?);
                 let view = gantz_egui::SceneView::default();
                 Some((head, graph, view))
             })
@@ -590,28 +619,25 @@ impl App {
 
         // If no valid heads remain, create a default one.
         let heads = if heads.is_empty() {
-            let head = registry.init_head(timestamp());
-            let graph = clone_graph(registry.head_graph(&head).unwrap());
+            let head = env.registry.init_head(timestamp());
+            env.ensure_reified();
+            let graph = clone_graph(env.head_graph(&head).unwrap());
             let view = gantz_egui::SceneView::default();
             vec![(head, graph, view)]
         } else {
             heads
         };
 
-        // Setup the environment that will be provided to all nodes.
-        let primitives = primitives();
-        let mut env = Environment {
-            registry,
-            primitives,
-        };
-
-        // Prune unused content now that we have the environment for node lookups.
+        // Prune unused content: reachability is a pure data walk over the
+        // stored graphs' refs columns.
         let live = {
-            let get_node = |ca: &gantz_ca::ContentAddr| env.node(ca);
-            let heads_for_prune = heads.iter().map(|(h, _, _)| h);
-            gantz_core::reg::live(&get_node, &env.registry, heads_for_prune)
+            let seeds = heads
+                .iter()
+                .filter_map(|(h, _, _)| env.registry.head_commit_ca(h));
+            gantz_ca::closure(&env.registry, seeds, gantz_ca::data_graph_out)
         };
         gantz_ca::prune(&mut env.registry, &live);
+        env.reified.retain_live(&live);
 
         // VM setup - initialize a VM for each open head.
         let compile_config = gantz_core::compile::Config::default();
@@ -665,7 +691,14 @@ impl eframe::App for App {
         // `Gantz` widget can tell us this in a custom response.
         let mut committed = false;
         for (ix, (head, graph, _)) in self.state.heads.iter_mut().enumerate() {
-            let new_graph_ca = gantz_ca::graph_addr(&*graph);
+            // Registry graph addresses are always computed on the erased form.
+            let (data_graph, new_graph_ca) = match gantz_core::data::erase_with_addr(&*graph) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    log::error!("Failed to erase working graph: {e}");
+                    continue;
+                }
+            };
             let head_commit = self.state.env.registry.head_commit(head).unwrap();
             if head_commit.graph != new_graph_ca {
                 committed = true;
@@ -674,7 +707,7 @@ impl eframe::App for App {
                 let new_commit_ca = self.state.env.registry.commit_graph_to_head(
                     timestamp(),
                     new_graph_ca,
-                    || graph.clone(),
+                    || data_graph,
                     head,
                 );
                 log::debug!(
@@ -701,6 +734,7 @@ impl eframe::App for App {
 
         // Propagate committed edits to referrers (e.g. nested graph -> parent).
         if committed {
+            self.state.env.ensure_reified();
             resync_and_refresh(&mut self.state);
         }
 
@@ -773,7 +807,10 @@ fn save_commit_addrs(storage: &mut dyn eframe::Storage, addrs: &[gantz_ca::Commi
 }
 
 /// Save all graphs to storage, keyed via their content address.
-fn save_graphs(storage: &mut dyn eframe::Storage, graphs: &HashMap<gantz_ca::GraphAddr, Graph>) {
+fn save_graphs(
+    storage: &mut dyn eframe::Storage,
+    graphs: &HashMap<gantz_ca::GraphAddr, gantz_ca::DataGraph>,
+) {
     for (&ca, graph) in graphs {
         save_graph(storage, ca, graph);
     }
@@ -790,7 +827,11 @@ fn save_commits(
 }
 
 /// Save the given graph to storage.
-fn save_graph(storage: &mut dyn eframe::Storage, ca: gantz_ca::GraphAddr, graph: &Graph) {
+fn save_graph(
+    storage: &mut dyn eframe::Storage,
+    ca: gantz_ca::GraphAddr,
+    graph: &gantz_ca::DataGraph,
+) {
     let key = graph_key(ca);
     let graph_str = match ron::to_string(graph) {
         Err(e) => {
@@ -904,7 +945,7 @@ fn load_commit_addrs(storage: &dyn eframe::Storage) -> Vec<gantz_ca::CommitAddr>
 fn load_graphs(
     storage: &dyn eframe::Storage,
     addrs: impl IntoIterator<Item = gantz_ca::GraphAddr>,
-) -> HashMap<gantz_ca::GraphAddr, Graph> {
+) -> HashMap<gantz_ca::GraphAddr, gantz_ca::DataGraph> {
     addrs
         .into_iter()
         .filter_map(|ca| Some((ca, load_graph(storage, ca)?)))
@@ -924,7 +965,10 @@ fn load_commits(
 }
 
 /// Load the graph with the given address from storage.
-fn load_graph(storage: &dyn eframe::Storage, ca: gantz_ca::GraphAddr) -> Option<Graph> {
+fn load_graph(
+    storage: &dyn eframe::Storage,
+    ca: gantz_ca::GraphAddr,
+) -> Option<gantz_ca::DataGraph> {
     let key = graph_key(ca);
     let Some(graph_str) = storage.get_string(&key) else {
         log::debug!("No graph found for content address {key}");
@@ -1118,6 +1162,7 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
         let (_, graph, view) = &mut state.heads[ix];
         gantz_egui::ops::create_node(
             &state.env.registry,
+            &state.env.reified,
             editing.as_deref(),
             &get_node,
             |node_type| env.new_node(node_type),
@@ -1152,6 +1197,8 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
             create.pos,
             &parent,
         );
+        // The fresh nested graph must be reified before its NamedRef resolves.
+        state.env.ensure_reified();
     }
 
     for (head, gantz_egui::CopyNodes(nodes)) in responses.take() {
@@ -1179,6 +1226,7 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
         let (_, graph, gv) = &mut state.heads[ix];
         let pasted = gantz_egui::ops::paste(
             &mut state.env.registry,
+            &state.env.reified,
             editing.as_deref(),
             graph,
             gv,
@@ -1227,6 +1275,7 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
         let (_, graph, gv) = &mut state.heads[ix];
         let duplicated = gantz_egui::ops::duplicate_nodes(
             &mut state.env.registry,
+            &state.env.reified,
             editing.as_deref(),
             graph,
             gv,
@@ -1259,6 +1308,7 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
             let (h, graph, view) = &mut state.heads[ix];
             gantz_egui::ops::merge_head(
                 &mut state.env.registry,
+                &state.env.reified,
                 timestamp(),
                 h,
                 graph,
@@ -1280,6 +1330,7 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
                 // redo stack, recompile (this also re-registers, initializing
                 // merged-in nodes' state), and bring referrers up to date.
                 state.gantz.migrate_head(&head, &head, true);
+                state.env.ensure_reified();
                 recompile_heads(state);
                 resync_and_refresh(state);
             }
@@ -1317,15 +1368,16 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
 
     for (head, gantz_egui::ExportHead) in responses.take() {
         let Some(head) = head else { continue };
-        let get_node = |ca: &gantz_ca::ContentAddr| state.env.node(ca);
-        let text =
-            match gantz_egui::export::export_heads_sexpr(&get_node, &state.env.registry, [&head]) {
-                Ok(s) => s,
-                Err(e) => {
-                    log::error!("ExportHead: failed to serialize: {e}");
-                    continue;
-                }
-            };
+        let text = match gantz_egui::export::export_heads_sexpr::<Box<dyn Node>>(
+            &state.env.registry,
+            [&head],
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!("ExportHead: failed to serialize: {e}");
+                continue;
+            }
+        };
         let default_name = gantz_egui::export::default_filename(&head);
         let ext = gantz_egui::export::FILE_EXTENSION;
         let dialog = rfd::AsyncFileDialog::new()
@@ -1342,7 +1394,6 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
     }
 
     for (_, gantz_egui::ExportAllNamed) in responses.take() {
-        let get_node = |ca: &gantz_ca::ContentAddr| state.env.node(ca);
         let named_heads: Vec<gantz_ca::Head> = state
             .env
             .registry
@@ -1353,8 +1404,7 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
             log::info!("ExportAllNamed: no named graphs to export");
             continue;
         }
-        let text = match gantz_egui::export::export_heads_sexpr(
-            &get_node,
+        let text = match gantz_egui::export::export_heads_sexpr::<Box<dyn Node>>(
             &state.env.registry,
             named_heads.iter(),
         ) {
@@ -1505,13 +1555,13 @@ fn import_bytes(state: &mut State, bytes: Vec<u8>, open_head: bool) {
     };
 
     let root_name = if open_head {
-        let get_node = |ca: &gantz_ca::ContentAddr| state.env.node(ca);
-        gantz_egui::export::unique_root_name(&get_node, &imported)
+        gantz_egui::export::unique_root_name(&imported)
     } else {
         None
     };
 
     let report = state.env.registry.merge(imported);
+    state.env.ensure_reified();
     log::info!(
         "Imported: {} names added, {} replaced",
         report.heads_added.len(),
@@ -1535,7 +1585,7 @@ fn open_head(state: &mut State, new_head: gantz_ca::Head) {
     }
 
     // Head is not open - add it as a new tab.
-    let graph = state.env.registry.head_graph(&new_head).unwrap();
+    let graph = state.env.head_graph(&new_head).unwrap();
     let new_graph = clone_graph(graph);
     let view = gantz_egui::SceneView::default();
 
@@ -1577,7 +1627,7 @@ fn replace_head(ctx: &egui::Context, state: &mut State, new_head: gantz_ca::Head
     let old_head = state.heads[ix].0.clone();
 
     // Load the new graph.
-    let graph = state.env.registry.head_graph(&new_head).unwrap();
+    let graph = state.env.head_graph(&new_head).unwrap();
     let new_graph = clone_graph(graph);
     let view = gantz_egui::SceneView::default();
 
@@ -1633,7 +1683,7 @@ fn navigate_head(
 fn refresh_branch_head(state: &mut State) {
     let ix = state.focused_head;
     let (ref head, ref mut graph, ref mut view) = state.heads[ix];
-    let new_graph = state.env.registry.head_graph(head).unwrap();
+    let new_graph = state.env.head_graph(head).unwrap();
     *graph = clone_graph(new_graph);
     *view = gantz_egui::SceneView::default();
     let get_node = |ca: &gantz_ca::ContentAddr| state.env.node(ca);
@@ -1657,8 +1707,17 @@ fn apply_moves(state: &mut State, moves: &[gantz_egui::sync::Moved]) {
     if moves.is_empty() {
         return;
     }
+    // The moves committed fresh graphs: reify them before lookups.
+    state.env.ensure_reified();
     for m in moves {
-        let Some(new_graph) = state.env.registry.commit_graph_ref(&m.new_commit).cloned() else {
+        let Some(new_graph) = state
+            .env
+            .registry
+            .commits()
+            .get(&m.new_commit)
+            .and_then(|c| state.env.reified.get(&c.graph))
+            .cloned()
+        else {
             continue;
         };
         for (head, graph, _) in state.heads.iter_mut() {
@@ -1675,7 +1734,7 @@ fn apply_moves(state: &mut State, moves: &[gantz_egui::sync::Moved]) {
 /// sync-enabled `NamedRef`s, reload any open head whose commit moved, and
 /// recompile. This is how editing a nested graph propagates to its parents.
 fn resync_and_refresh(state: &mut State) {
-    let moves = gantz_egui::sync::resync(&mut state.env.registry, timestamp());
+    let moves = gantz_egui::sync::resync::<Box<dyn Node>>(&mut state.env.registry, timestamp());
     apply_moves(state, &moves);
 }
 
@@ -1772,8 +1831,9 @@ fn create_branch_from_head(
     // renamed to a root name) repoint its parent's references to it.
     if let (gantz_ca::Head::Branch(old), gantz_ca::Head::Branch(new)) = (original_head, &new_head) {
         let ts = timestamp();
-        let mut moves = gantz_egui::sync::fork_nested(&mut state.env.registry, ts, old, new);
-        moves.extend(gantz_egui::sync::promote_nested(
+        let mut moves =
+            gantz_egui::sync::fork_nested::<Box<dyn Node>>(&mut state.env.registry, ts, old, new);
+        moves.extend(gantz_egui::sync::promote_nested::<Box<dyn Node>>(
             &mut state.env.registry,
             ts,
             old,

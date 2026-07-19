@@ -96,7 +96,7 @@ impl BatchWriter {
 
 impl PersistedRegistry {
     /// Snapshot a registry whose contents are all known to be on disk.
-    pub fn from_registry<N>(registry: &Registry<N>) -> Self {
+    pub fn from_registry(registry: &Registry) -> Self {
         Self {
             graphs: registry.graphs().keys().copied().collect(),
             commits: registry.commits().keys().copied().collect(),
@@ -223,9 +223,9 @@ mod key {
 /// writes nothing.
 ///
 /// A fresh [`PersistedRegistry::default`] makes this a full save.
-pub fn save_registry_incremental<N: Serialize>(
+pub fn save_registry_incremental(
     storage: &mut impl Save,
-    registry: &Registry<N>,
+    registry: &Registry,
     persisted: &mut PersistedRegistry,
 ) {
     // Graph blobs: write only newly-seen content addresses.
@@ -324,7 +324,7 @@ pub fn save_registry_incremental<N: Serialize>(
 }
 
 /// Load the registry from storage.
-pub fn load_registry<N: DeserializeOwned>(storage: &impl Load) -> Registry<N> {
+pub fn load_registry(storage: &impl Load) -> Registry {
     let graph_addrs: Vec<ca::GraphAddr> = load(storage, key::GRAPH_ADDRS).unwrap_or_default();
     let graphs = graph_addrs
         .into_iter()
@@ -435,7 +435,6 @@ mod tests {
         BlobLiveness, Commit, CommitAddr, ContentAddr, GraphAddr, Key, Liveness, MergePolicy, Name,
         Value,
     };
-    use gantz_core::node::graph::Graph;
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
 
@@ -492,10 +491,10 @@ mod tests {
     /// Build a registry from `(graph, commit)` synthetic-addr pairs (one commit
     /// per graph) plus `(name, commit)` head pairs. Graph blob values are empty -
     /// the dedup is keyed on the map keys, not the values.
-    fn registry(graphs: &[(u8, u8)], heads: &[(&str, u8)]) -> Registry<()> {
+    fn registry(graphs: &[(u8, u8)], heads: &[(&str, u8)]) -> Registry {
         let g = graphs
             .iter()
-            .map(|&(ga, _)| (graph_addr(ga), Graph::<()>::default()))
+            .map(|&(ga, _)| (graph_addr(ga), ca::DataGraph::default()))
             .collect();
         let c = graphs
             .iter()
@@ -513,7 +512,7 @@ mod tests {
 
     /// Store a synthetic per-commit "view" entry in a KeepExisting/WithCommit
     /// section, mirroring how the GUI persists scene views.
-    fn set_view(reg: &mut Registry<()>, commit: u8, value: u8) {
+    fn set_view(reg: &mut Registry, commit: u8, value: u8) {
         ca::section_insert_datum(
             &mut reg.0,
             "egui.view",
@@ -661,7 +660,7 @@ mod tests {
         let mut persisted = PersistedRegistry::default();
         let mut store = MockStore::default();
         save_registry_incremental(&mut store, &reg, &mut persisted);
-        let loaded: Registry<()> = load_registry(&store);
+        let loaded = load_registry(&store);
         assert_eq!(loaded.graphs().len(), reg.graphs().len());
         assert_eq!(loaded.commits(), reg.commits());
         assert_eq!(loaded.sections(), reg.sections());
@@ -722,7 +721,7 @@ mod tests {
         let mut persisted = PersistedRegistry::default();
         let mut store = MockStore::default();
         save_registry_incremental(&mut store, &reg, &mut persisted);
-        let loaded: Registry<()> = load_registry(&store);
+        let loaded = load_registry(&store);
         assert_eq!(loaded.sections(), reg.sections());
         assert_eq!(
             loaded.blob("dsp.buffer", &blob_addr).map(|b| &b[..]),

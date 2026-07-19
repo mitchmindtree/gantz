@@ -2,14 +2,18 @@
 //! ref-extension UI - and for the `DspRefExt`-driven lowering decision in
 //! `flatten_from_registry`.
 
-use gantz_ca::{CaHash, ContentAddr};
+use gantz_ca::{ContentAddr, DataGraph};
+use gantz_core::data::ReifiedGraphs;
 use gantz_core::node::graph::Graph;
 use gantz_core::node::{AsRefNode, ExprCtx, ExprResult, MetaCtx, Ref, parse_expr};
 use gantz_plyphon::{NodeDsp, SinOsc, ToNodeDsp, dsp_graphs};
 
 /// A minimal node standing in for the app's node set: one DSP node, the
-/// reference node, boundary nodes and a non-DSP stand-in.
-#[derive(Clone)]
+/// reference node, boundary nodes and a non-DSP stand-in. Adjacent tagging
+/// keeps the serde a `type`-tagged map (what the erase codec requires) while
+/// admitting any variant payload shape.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "c")]
 enum N {
     SinOsc(SinOsc),
     Ref(Ref),
@@ -54,32 +58,26 @@ impl gantz_core::Node for N {
     }
 }
 
-impl CaHash for N {
-    fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-        match self {
-            N::SinOsc(s) => CaHash::hash(s, hasher),
-            N::Ref(r) => CaHash::hash(r, hasher),
-            N::Inlet => {
-                hasher.update(b"test.inlet");
-            }
-            N::Outlet => {
-                hasher.update(b"test.outlet");
-            }
-            N::Other => {
-                hasher.update(b"test.other");
-            }
-        }
-    }
-}
-
-/// Commit `graph` under `name`, returning its graph address as a
+/// Commit `graph` (erased) under `name`, returning its graph address as a
 /// `ContentAddr` (the form `Ref::content_addr` reports).
-fn commit(registry: &mut gantz_ca::Registry<Graph<N>>, name: &str, graph: Graph<N>) -> ContentAddr {
+fn commit(
+    registry: &mut gantz_ca::Registry<DataGraph>,
+    name: &str,
+    graph: Graph<N>,
+) -> ContentAddr {
     let now = std::time::Duration::from_secs(1);
-    let addr = gantz_ca::graph_addr(&graph);
-    let ca = registry.commit_graph(now, None, addr, || graph);
+    let (dg, addr) = gantz_core::data::erase_with_addr(&graph).expect("erase");
+    let ca = registry.commit_graph(now, None, addr, || dg);
     registry.set_head(name.parse().expect("infallible"), ca);
     addr.into()
+}
+
+/// Reify the whole registry column into a typed cache.
+fn reify_all(registry: &gantz_ca::Registry<DataGraph>) -> ReifiedGraphs<N> {
+    let mut reified = ReifiedGraphs::new();
+    let errs = reified.ensure_all(registry);
+    assert!(errs.is_empty(), "{errs:?}");
+    reified
 }
 
 fn ref_node(ca: ContentAddr) -> N {
@@ -91,7 +89,7 @@ fn ref_node(ca: ContentAddr) -> N {
 /// references to missing addresses.
 #[test]
 fn dsp_graphs_discovers_direct_and_transitive() {
-    let mut registry = gantz_ca::Registry::<Graph<N>>::default();
+    let mut registry = gantz_ca::Registry::<DataGraph>::default();
 
     // A graph containing a DSP node directly.
     let mut dsp: Graph<N> = Graph::default();
@@ -118,7 +116,7 @@ fn dsp_graphs_discovers_direct_and_transitive() {
     dangling.add_node(ref_node(ContentAddr::from([9u8; 32])));
     let dangling_ca = commit(&mut registry, "dangling", dangling);
 
-    let set = dsp_graphs(&registry);
+    let set = dsp_graphs(&registry, &reify_all(&registry));
     assert!(set.contains(&dsp_ca));
     assert!(set.contains(&wrapper_ca), "one hop through a ref");
     assert!(set.contains(&wrapper2_ca), "two hops through refs");
@@ -134,7 +132,7 @@ fn dsp_graphs_discovers_direct_and_transitive() {
 fn default_lowering_instances_dsp_refs_and_splices_the_rest() {
     use gantz_plyphon::{DSP_REF_EXT_KEY, DspRefExt, Flat};
 
-    let mut registry = gantz_ca::Registry::<Graph<N>>::default();
+    let mut registry = gantz_ca::Registry::<DataGraph>::default();
 
     // A DSP-bearing child.
     let mut dsp: Graph<N> = Graph::default();
@@ -158,7 +156,7 @@ fn default_lowering_instances_dsp_refs_and_splices_the_rest() {
     head.add_node(N::Ref(inline_ref));
     head.add_node(ref_node(wire_ca));
 
-    let flat = gantz_plyphon::flatten_from_registry(&head, &registry).expect("flatten");
+    let flat = gantz_plyphon::flatten_from_registry(&head, &reify_all(&registry)).expect("flatten");
     let markers: Vec<_> = flat
         .node_indices()
         .filter(|&n| matches!(flat[n], Flat::Instance { .. }))

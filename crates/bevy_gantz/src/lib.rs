@@ -36,7 +36,7 @@ pub use head::{
     FocusedHead, HeadRef, HeadTabOrder, HeadVms, OpenHead, OpenHeadData, OpenHeadDataReadOnly,
     WorkingGraph,
 };
-pub use reg::{Registry, lookup_node, timestamp};
+pub use reg::{GraphCache, Registry, lookup_node, refresh_cache, timestamp};
 pub use vm::{
     CompileConfig, CompiledInputs, EntrypointFns, EvalEntryComplete, EvalEntryEvent,
     ValidateCommitted, commit_working_graph,
@@ -108,7 +108,7 @@ impl<N> Default for GantzPlugin<N> {
 
 impl<N> Plugin for GantzPlugin<N>
 where
-    N: 'static + Node + Clone + gantz_ca::CaHash + Send + Sync,
+    N: 'static + Node + Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync,
 {
     fn build(&self, app: &mut App) {
         // Contributed via `get_resource_or_init` + push (never
@@ -122,7 +122,8 @@ where
             }));
         app.init_resource::<FocusedHead>()
             .init_resource::<HeadTabOrder>()
-            .init_resource::<Registry<N>>()
+            .init_resource::<Registry>()
+            .init_resource::<GraphCache<N>>()
             .init_resource::<vm::CompileConfig>()
             .init_resource::<vm::ValidateCommitted>()
             .insert_resource(EvalEpoch(web_time::Instant::now()))
@@ -130,8 +131,8 @@ where
             // Register head event handlers.
             .add_observer(head::on_open::<N>)
             .add_observer(head::on_replace::<N>)
-            .add_observer(head::on_close::<N>)
-            .add_observer(head::on_branch_head::<N>)
+            .add_observer(head::on_close)
+            .add_observer(head::on_branch_head)
             .add_observer(head::on_move_branch::<N>)
             // Register eval entry event handler.
             .add_observer(vm::on_eval_entry)
@@ -155,18 +156,12 @@ pub fn clone_graph<N: Clone>(
 mod tests {
     use super::*;
 
-    #[derive(Clone)]
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
     struct TestNode;
 
     impl gantz_core::Node for TestNode {
         fn expr(&self, _ctx: gantz_core::node::ExprCtx<'_, '_>) -> gantz_core::node::ExprResult {
             gantz_core::node::parse_expr("'()")
-        }
-    }
-
-    impl gantz_ca::CaHash for TestNode {
-        fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-            hasher.update(b"test.node");
         }
     }
 

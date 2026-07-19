@@ -149,8 +149,43 @@ pub fn builtins() -> gantz_core::BuiltinSet<Box<dyn Node>> {
 mod tests {
     use super::Node;
 
+    /// The data registry: graphs stored erased.
+    type DataReg = gantz_ca::Registry<gantz_ca::DataGraph>;
+    /// The typed cache serving the registry's graphs as the app's node set.
+    type Reified = gantz_core::data::ReifiedGraphs<Box<dyn Node>>;
+
     fn name(s: &str) -> gantz_ca::Name {
         s.parse().expect("infallible")
+    }
+
+    /// Reify the whole registry column into a typed cache.
+    fn reify_all(reg: &DataReg) -> Reified {
+        let mut reified = Reified::new();
+        let errs = reified.ensure_all(reg);
+        assert!(errs.is_empty(), "{errs:?}");
+        reified
+    }
+
+    /// The typed graph at the given head's tip, if reified.
+    fn head_graph<'a>(
+        reified: &'a Reified,
+        reg: &DataReg,
+        head: &gantz_ca::Head,
+    ) -> Option<&'a gantz_core::node::graph::Graph<Box<dyn Node>>> {
+        reified.get(&reg.head_commit(head)?.graph)
+    }
+
+    /// Erase `graph` and commit it under `name`, returning the new commit and
+    /// the erased graph's address (the registry's identity for the graph).
+    fn commit_to_name(
+        reg: &mut DataReg,
+        ts: std::time::Duration,
+        graph: &gantz_core::node::graph::Graph<Box<dyn Node>>,
+        name: &gantz_ca::Name,
+    ) -> (gantz_ca::CommitAddr, gantz_ca::GraphAddr) {
+        let (dg, ga) = gantz_core::data::erase_with_addr(graph).expect("erase");
+        let ca = reg.commit_graph_to_name(ts, ga, || dg, name);
+        (ca, ga)
     }
 
     /// Fire the push entrypoint of the node at `node_ix` (a flat-graph index).
@@ -719,18 +754,19 @@ mod tests {
     #[test]
     fn head_graph_with_unconnected_inlets_derives_sound() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let text = "\
 (graph head
   (s ~sinosc) (out ~out) (i inlet) (o outlet)
   (-> s (out 0)))";
-        let registry: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("from_str");
+        let registry: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+                .expect("from_str");
+        let reified = reify_all(&registry);
         let head = gantz_ca::Head::Branch(name("head"));
-        let graph = registry.head_graph(&head).expect("head graph");
+        let graph = head_graph(&reified, &registry, &head).expect("head graph");
 
-        let flat = gantz_plyphon::flatten_from_registry(graph, &registry).expect("flatten");
+        let flat = gantz_plyphon::flatten_from_registry(graph, &reified).expect("flatten");
         // Root inlet/outlet survive as markers (the head graph's interface);
         // they are non-DSP, so derivation ignores them.
         assert_eq!(
@@ -780,7 +816,6 @@ mod tests {
         use gantz_egui::sync::AsNamedRef;
         use gantz_plyphon::ToNodeDsp;
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         // child `env:1`: inlet -> ~lag -> outlet, nested into
         // parent `env`: ~sinosc -> ref -> ~out.
@@ -792,12 +827,14 @@ mod tests {
 (graph env
   (s ~sinosc) (sub (ref env:1)) (out ~out)
   (-> s (sub 0)) (-> sub (out 0)))";
-        let registry: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("from_str");
+        let registry: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+                .expect("from_str");
+        let reified = reify_all(&registry);
         let parent_head = gantz_ca::Head::Branch(name("env"));
         let child_head = gantz_ca::Head::Branch(name("env:1"));
-        let parent = registry.head_graph(&parent_head).expect("env graph");
-        let child = registry.head_graph(&child_head).expect("env:1 graph");
+        let parent = head_graph(&reified, &registry, &parent_head).expect("env graph");
+        let child = head_graph(&reified, &registry, &child_head).expect("env:1 graph");
 
         // The indices the flattened path must carry: the ref within the parent,
         // the lag within the child (its only dsp node).
@@ -812,15 +849,14 @@ mod tests {
             .expect("lag node")
             .index();
 
-        let flat = gantz_plyphon::flatten_from_registry(parent, &registry).expect("flatten");
+        let flat = gantz_plyphon::flatten_from_registry(parent, &reified).expect("flatten");
         // The DSP-bearing child lowers as an instance marker by default.
         let markers = flat
             .node_indices()
             .filter(|&n| matches!(flat[n], gantz_plyphon::Flat::Instance { .. }))
             .count();
         assert_eq!(markers, 1, "the ref stays an instance marker");
-        let children =
-            gantz_plyphon::flatten_instance_children(&flat, &registry).expect("children");
+        let children = gantz_plyphon::flatten_instance_children(&flat, &reified).expect("children");
         let resolve = |ca: &gantz_ca::ContentAddr| children.get(ca);
         let mut cache = gantz_plyphon::DefCache::new();
         let template =
@@ -835,7 +871,7 @@ mod tests {
         // The binding's path reaches the nested lag's live param state in a VM
         // compiled from the same (un-flattened) graph.
         let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&registry, &builtins);
+        let reg_ref = gantz_egui::RegistryRef::new(&registry, &reified, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let config = gantz_core::compile::Config::default();
         let (mut vm, _compiled) =
@@ -853,7 +889,6 @@ mod tests {
     #[test]
     fn instanced_refs_share_one_variant() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let text = "\
 (graph voice
@@ -862,14 +897,15 @@ mod tests {
 
 (graph env
   (a (ref voice)) (b (ref voice)))";
-        let registry: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("from_str");
+        let registry: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+                .expect("from_str");
+        let reified = reify_all(&registry);
         let head = gantz_ca::Head::Branch(name("env"));
-        let parent = registry.head_graph(&head).expect("env graph");
+        let parent = head_graph(&reified, &registry, &head).expect("env graph");
 
-        let flat = gantz_plyphon::flatten_from_registry(parent, &registry).expect("flatten");
-        let children =
-            gantz_plyphon::flatten_instance_children(&flat, &registry).expect("children");
+        let flat = gantz_plyphon::flatten_from_registry(parent, &reified).expect("flatten");
+        let children = gantz_plyphon::flatten_instance_children(&flat, &reified).expect("children");
         let resolve = |ca: &gantz_ca::ContentAddr| children.get(ca);
         let mut cache = gantz_plyphon::DefCache::new();
         let template =
@@ -1151,10 +1187,9 @@ mod tests {
     #[test]
     fn lower_mul_matches_base_graph_addr() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
-        let base: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export(gantz_base::BYTES).expect("parse base");
+        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+            .expect("parse base");
         let base_head = gantz_ca::Head::Branch(name("mul"));
         let base_graph = base.head_graph(&base_head).expect("base mul graph");
         let base_addr = gantz_ca::ContentAddr::from(gantz_ca::graph_addr(base_graph)).to_string();
@@ -1164,8 +1199,9 @@ mod tests {
   (m (expr (* $l $r)))
   (l (inlet \"number\" \"left operand\")) (r (inlet \"number\" \"right operand\")) (out (outlet \"number\" \"product\"))
   (-> l (m 0)) (-> r (m 1)) (-> m out))";
-        let mine: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("lower");
+        let mine: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+                .expect("lower");
         let head = gantz_ca::Head::Branch(name("mul"));
         let graph = mine.head_graph(&head).expect("mul graph");
         let my_addr = gantz_ca::ContentAddr::from(gantz_ca::graph_addr(graph)).to_string();
@@ -1180,7 +1216,6 @@ mod tests {
     fn text_roundtrip_preserves_addrs() {
         use std::collections::BTreeSet;
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let now = Duration::from_secs(1_000_000);
         let text1 = "\
@@ -1194,11 +1229,12 @@ mod tests {
   (mref (ref mul))
   (-> a (mref 0)) (-> b (mref 1)) (-> mref out))";
 
-        let export1: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text1, now).expect("from_str 1");
-        let text2 = gantz_egui::format::to_string(&export1).expect("to_string");
-        let export2: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(&text2, Duration::from_secs(7)).expect("from_str 2");
+        let export1: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text1, now).expect("from_str 1");
+        let text2 = gantz_egui::format::to_string::<Box<dyn Node>>(&export1).expect("to_string");
+        let export2: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(&text2, Duration::from_secs(7))
+                .expect("from_str 2");
 
         let names1: BTreeSet<_> = export1.heads().map(|(n, _)| n.clone()).collect();
         let names2: BTreeSet<_> = export2.heads().map(|(n, _)| n.clone()).collect();
@@ -1227,13 +1263,13 @@ mod tests {
     fn base_gantz_loads_and_reserializes() {
         use std::collections::BTreeSet;
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
-        let base: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export(gantz_base::BYTES).expect("parse base");
-        let text = gantz_egui::format::to_string(&base).expect("to_string");
-        let back: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(&text, Duration::from_secs(0)).expect("from_str");
+        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+            .expect("parse base");
+        let text = gantz_egui::format::to_string::<Box<dyn Node>>(&base).expect("to_string");
+        let back: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(&text, Duration::from_secs(0))
+                .expect("from_str");
 
         let base_names: BTreeSet<_> = base.heads().map(|(n, _)| n.clone()).collect();
         let back_names: BTreeSet<_> = back.heads().map(|(n, _)| n.clone()).collect();
@@ -1258,7 +1294,6 @@ mod tests {
     #[test]
     fn nested_graph_roundtrips() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let now = Duration::from_secs(42);
         let text1 = "\
@@ -1271,11 +1306,11 @@ mod tests {
   (in inlet) (out outlet)
   (sub (ref env:1))
   (-> in (sub 0)) (-> sub out))";
-        let e1: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text1, now).expect("from_str 1");
-        let text2 = gantz_egui::format::to_string(&e1).expect("to_string");
-        let e2: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(&text2, now).expect("from_str 2");
+        let e1: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text1, now).expect("from_str 1");
+        let text2 = gantz_egui::format::to_string::<Box<dyn Node>>(&e1).expect("to_string");
+        let e2: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(&text2, now).expect("from_str 2");
 
         for n in ["env", "env:1"] {
             let head = gantz_ca::Head::Branch(name(n));
@@ -1294,7 +1329,6 @@ mod tests {
     #[test]
     fn output_is_valid_steel() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let text1 = "\
 (graph g
@@ -1304,9 +1338,10 @@ mod tests {
   (c (comment \"hello world\" 16 2))
   (l (log warn))
   (-> n (s 0)) (-> (s 1) (b 0)))";
-        let registry: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text1, Duration::from_secs(0)).expect("from_str");
-        let out = gantz_egui::format::to_string(&registry).expect("to_string");
+        let registry: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text1, Duration::from_secs(0))
+                .expect("from_str");
+        let out = gantz_egui::format::to_string::<Box<dyn Node>>(&registry).expect("to_string");
         steel::parser::parser::Parser::parse(&out)
             .unwrap_or_else(|e| panic!("output is not valid Steel: {e}\n--- output ---\n{out}"));
     }
@@ -1319,20 +1354,21 @@ mod tests {
     #[test]
     fn tick_node_compiles() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let text = "\
 (graph g
   (t (tick-bang #:rate 2))
   (l (log warn))
   (-> t (l 0)))";
-        let registry: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("from_str");
+        let registry: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+                .expect("from_str");
+        let reified = reify_all(&registry);
         let head = gantz_ca::Head::Branch(name("g"));
-        let graph = registry.head_graph(&head).expect("g graph");
+        let graph = head_graph(&reified, &registry, &head).expect("g graph");
 
         let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&registry, &builtins);
+        let reg_ref = gantz_egui::RegistryRef::new(&registry, &reified, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
 
         let entrypoints = bevy_gantz_egui::node::tick_bang::entrypoints(&get_node, graph);
@@ -1363,14 +1399,14 @@ mod tests {
     #[test]
     fn import_clears_absent_parent() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let text = "\
 (graph g (e (expr 1)))
 (commits (\"abcd1234\" (time 5 0) (parent \"deadbeef\") (graph g)))
 (names (gname \"abcd1234\"))";
-        let registry: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text, Duration::from_secs(0)).expect("import");
+        let registry: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+                .expect("import");
         let commit = registry.named_commit(&name("gname")).expect("commit");
         assert_eq!(commit.parent, None, "absent parent must be cleared to None");
     }
@@ -1381,7 +1417,6 @@ mod tests {
     #[test]
     fn layout_roundtrips() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let now = Duration::from_secs(5);
         let text1 = "\
@@ -1394,8 +1429,8 @@ mod tests {
   (m -10 20) (l 3.5 -4.5)
   (camera 25 -15 1.5))";
 
-        let e1: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text1, now).expect("from_str 1");
+        let e1: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text1, now).expect("from_str 1");
         let head = e1.head(&name("mul")).expect("mul name");
         let view = gantz_egui::section::view(&e1, &head).expect("view");
         // `m` is node index 0, `l` is 1.
@@ -1410,9 +1445,9 @@ mod tests {
         assert_eq!((view.camera.center.x, view.camera.center.y), (25.0, -15.0));
         assert_eq!(view.camera.zoom, 1.5);
 
-        let text2 = gantz_egui::format::to_string(&e1).expect("to_string");
-        let e2: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(&text2, now).expect("from_str 2");
+        let text2 = gantz_egui::format::to_string::<Box<dyn Node>>(&e1).expect("to_string");
+        let e2: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(&text2, now).expect("from_str 2");
         let head2 = e2.head(&name("mul")).expect("mul name 2");
         let view2 = gantz_egui::section::view(&e2, &head2).expect("view 2");
         assert_eq!(view.layout.len(), view2.layout.len());
@@ -1428,7 +1463,6 @@ mod tests {
     #[test]
     fn legacy_scene_form_parses_to_camera() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let now = Duration::from_secs(5);
         let text = "\
@@ -1441,7 +1475,8 @@ mod tests {
   (m -10 20)
   (scene -50 -50 100 100))";
 
-        let e: gantz_ca::Registry<G> = gantz_egui::format::from_str(text, now).expect("from_str");
+        let e: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text, now).expect("from_str");
         let head = e.head(&name("mul")).expect("mul name");
         let view = gantz_egui::section::view(&e, &head).expect("view");
         // Centre of (-50,-50)..(100,100), default zoom.
@@ -1472,7 +1507,7 @@ mod tests {
         let b = graph.add_node(node("Identity"));
         graph.add_edge(a, b, gantz_core::Edge::new(0.into(), 0.into()));
 
-        let registry = gantz_ca::Registry::<G>::default();
+        let registry = DataReg::default();
         let mut layout = egui_graph::Layout::default();
         layout.insert(egui_graph::NodeId(0), egui::pos2(1.0, 2.0));
         layout.insert(egui_graph::NodeId(1), egui::pos2(3.0, 4.0));
@@ -1514,13 +1549,12 @@ mod tests {
         type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let ts = Duration::from_secs(0);
-        let mut registry = gantz_ca::Registry::<G>::default();
+        let mut registry = DataReg::default();
 
         // Child "p:1": a single node.
         let mut child = G::default();
         child.add_node(Box::new(Identity) as Box<dyn Node>);
-        let child_addr = gantz_ca::graph_addr(&child);
-        let child_old = registry.commit_graph_to_name(ts, child_addr, || child, &name("p:1"));
+        let (child_old, child_addr) = commit_to_name(&mut registry, ts, &child, &name("p:1"));
 
         // Parent "p": a sync-enabled NamedRef to "p:1"'s head graph.
         let mut parent = G::default();
@@ -1528,19 +1562,17 @@ mod tests {
             name("p:1"),
             Ref::new(child_addr.into()),
         )) as Box<dyn Node>);
-        let parent_old =
-            registry.commit_graph_to_name(ts, gantz_ca::graph_addr(&parent), || parent, &name("p"));
+        let (parent_old, _) = commit_to_name(&mut registry, ts, &parent, &name("p"));
 
         // Edit the child: commit a different graph under "p:1".
         let mut child2 = G::default();
         child2.add_node(Box::new(Identity) as Box<dyn Node>);
         child2.add_node(Box::new(Identity) as Box<dyn Node>);
-        let child2_addr = gantz_ca::graph_addr(&child2);
-        let child_new = registry.commit_graph_to_name(ts, child2_addr, || child2, &name("p:1"));
+        let (child_new, child2_addr) = commit_to_name(&mut registry, ts, &child2, &name("p:1"));
         assert_ne!(child_old, child_new);
 
         // Resync: the parent must follow the child's new head graph.
-        let moves = gantz_egui::sync::resync(&mut registry, ts);
+        let moves = gantz_egui::sync::resync::<Box<dyn Node>>(&mut registry, ts);
         assert!(
             moves.iter().any(|m| m.name == name("p")),
             "parent should have recommitted: {moves:?}"
@@ -1548,7 +1580,8 @@ mod tests {
 
         let parent_new = registry.head(&name("p")).unwrap();
         assert_ne!(parent_old, parent_new, "parent commit must change");
-        let p_graph = registry.commit_graph_ref(&parent_new).unwrap();
+        let reified = reify_all(&registry);
+        let p_graph = reified.get(&registry.commits()[&parent_new].graph).unwrap();
         let points_at_new_child = p_graph.node_weights().any(|n| {
             ((&**n) as &dyn Any)
                 .downcast_ref::<NamedRef>()
@@ -1573,19 +1606,18 @@ mod tests {
         type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let ts = Duration::from_secs(0);
-        let mut registry = gantz_ca::Registry::<G>::default();
+        let mut registry = DataReg::default();
 
         // Child "A:1" and parent "A" referencing it.
         let mut child = G::default();
         child.add_node(Box::new(Identity) as Box<dyn Node>);
-        let child_addr = gantz_ca::graph_addr(&child);
-        registry.commit_graph_to_name(ts, child_addr, || child, &name("A:1"));
+        let (_, child_addr) = commit_to_name(&mut registry, ts, &child, &name("A:1"));
         let mut parent = G::default();
         parent.add_node(Box::new(NamedRef::with_sync(
             name("A:1"),
             Ref::new(child_addr.into()),
         )) as Box<dyn Node>);
-        registry.commit_graph_to_name(ts, gantz_ca::graph_addr(&parent), || parent, &name("A"));
+        commit_to_name(&mut registry, ts, &parent, &name("A"));
 
         // Fork "A" -> "B": a fresh commit over A's graph (as `on_branch_head` does),
         // so "B" initially references A's child "A:1".
@@ -1595,7 +1627,12 @@ mod tests {
         registry.set_head(name("B"), b_commit);
 
         // Cascade: give "B" its own nested child "B:1".
-        let moves = gantz_egui::sync::fork_nested(&mut registry, ts, &name("A"), &name("B"));
+        let moves = gantz_egui::sync::fork_nested::<Box<dyn Node>>(
+            &mut registry,
+            ts,
+            &name("A"),
+            &name("B"),
+        );
         assert!(
             moves.iter().any(|m| m.name == name("B:1")),
             "B:1 should be created: {moves:?}"
@@ -1608,7 +1645,8 @@ mod tests {
         // B references its own child B:1's graph; A:1 is untouched.
         let b1: gantz_ca::ContentAddr = registry.named_commit(&name("B:1")).unwrap().graph.into();
         let b_new = registry.head(&name("B")).unwrap();
-        let b_graph = registry.commit_graph_ref(&b_new).unwrap();
+        let reified = reify_all(&registry);
+        let b_graph = reified.get(&registry.commits()[&b_new].graph).unwrap();
         let refs_b1 = b_graph.node_weights().any(|n| {
             ((&**n) as &dyn Any)
                 .downcast_ref::<NamedRef>()
@@ -1636,23 +1674,17 @@ mod tests {
         use std::time::Duration;
         type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
-        let mut registry = gantz_ca::Registry::<G>::default();
+        let mut registry = DataReg::default();
 
         // Nested graph "A:1", committed twice so its head commit has a parent
         // (the format does not preserve the parent chain).
         let mut v1 = G::default();
         v1.add_node(Box::new(Identity) as Box<dyn Node>);
-        registry.commit_graph_to_name(
-            Duration::from_secs(1),
-            gantz_ca::graph_addr(&v1),
-            || v1,
-            &name("A:1"),
-        );
+        commit_to_name(&mut registry, Duration::from_secs(1), &v1, &name("A:1"));
         let mut v2 = G::default();
         v2.add_node(Box::new(Identity) as Box<dyn Node>);
         v2.add_node(Box::new(Identity) as Box<dyn Node>);
-        let v2_addr = gantz_ca::graph_addr(&v2);
-        registry.commit_graph_to_name(Duration::from_secs(2), v2_addr, || v2, &name("A:1"));
+        let (_, v2_addr) = commit_to_name(&mut registry, Duration::from_secs(2), &v2, &name("A:1"));
 
         // A graph holding a synced NamedRef to "A:1"'s head graph.
         let mut graph: G = G::default();
@@ -1690,13 +1722,12 @@ mod tests {
         type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let ts = Duration::from_secs(0);
-        let mut registry = gantz_ca::Registry::<G>::default();
+        let mut registry = DataReg::default();
 
         // Nested child "A:1".
         let mut child = G::default();
         child.add_node(Box::new(Identity) as Box<dyn Node>);
-        let child_addr = gantz_ca::graph_addr(&child);
-        let a1 = registry.commit_graph_to_name(ts, child_addr, || child, &name("A:1"));
+        let (a1, child_addr) = commit_to_name(&mut registry, ts, &child, &name("A:1"));
 
         // Parent "A" with THREE instances of the nested graph.
         let mut parent = G::default();
@@ -1706,14 +1737,19 @@ mod tests {
                 Ref::new(child_addr.into()),
             )) as Box<dyn Node>);
         }
-        registry.commit_graph_to_name(ts, gantz_ca::graph_addr(&parent), || parent, &name("A"));
+        commit_to_name(&mut registry, ts, &parent, &name("A"));
 
         // Simulate "rename A:1 -> B": a root "B" copy of A:1's graph (as the
         // fork does), then promote.
         let a1_graph = registry.commits()[&a1].graph;
         let b = registry.commit_graph(ts, Some(a1), a1_graph, || unreachable!());
         registry.set_head(name("B"), b);
-        let moves = gantz_egui::sync::promote_nested(&mut registry, ts, &name("A:1"), &name("B"));
+        let moves = gantz_egui::sync::promote_nested::<Box<dyn Node>>(
+            &mut registry,
+            ts,
+            &name("A:1"),
+            &name("B"),
+        );
 
         assert!(
             moves.iter().any(|m| m.name == name("A")),
@@ -1726,7 +1762,8 @@ mod tests {
 
         // All three parent references now point at "B".
         let a_commit = registry.head(&name("A")).unwrap();
-        let a_graph = registry.commit_graph_ref(&a_commit).unwrap();
+        let reified = reify_all(&registry);
+        let a_graph = reified.get(&registry.commits()[&a_commit].graph).unwrap();
         let to_b = a_graph
             .node_weights()
             .filter(|n| {
@@ -1753,12 +1790,11 @@ mod tests {
     /// `demo-all` catalog's otherwise-unconnected `ref` nodes).
     #[test]
     fn base_graphs_all_compile() {
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
-
-        let base: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export(gantz_base::BYTES).expect("parse base");
+        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+            .expect("parse base");
+        let reified = reify_all(&base);
         let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&base, &builtins);
+        let reg_ref = gantz_egui::RegistryRef::new(&base, &reified, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let configs = [
             gantz_core::compile::Config::default(),
@@ -1774,8 +1810,7 @@ mod tests {
         );
         for (name, _) in base.heads() {
             let head = gantz_ca::Head::Branch(name.clone());
-            let graph = base
-                .head_graph(&head)
+            let graph = head_graph(&reified, &base, &head)
                 .unwrap_or_else(|| panic!("`{name}` has no head graph"));
             let entrypoints = gantz_core::compile::push_pull_entrypoints(&get_node, graph);
             for config in &configs {
@@ -1797,10 +1832,9 @@ mod tests {
     /// `#:sync` per `ref`.
     #[test]
     fn base_refs_are_synced() {
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
-        let base: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export(gantz_base::BYTES).expect("parse base");
-        let text = gantz_egui::format::to_string(&base).expect("to_string");
+        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+            .expect("parse base");
+        let text = gantz_egui::format::to_string::<Box<dyn Node>>(&base).expect("to_string");
         let refs = text.matches("(ref ").count() + text.matches("(fn-ref ").count();
         let synced = text.matches("#:sync").count();
         assert!(refs > 0, "expected base to contain refs");
@@ -1884,11 +1918,10 @@ mod tests {
         );
 
         // Forking via branch_node replaces the node but carries ext over.
-        let mut registry = gantz_ca::Registry::<G>::default();
+        let mut registry = DataReg::default();
         let now = std::time::Duration::from_secs(1);
         let child: G = G::default();
-        let child_addr = gantz_ca::graph_addr(&child);
-        registry.commit_graph_to_name(now, child_addr, || child, &name("child"));
+        let (_, child_addr) = commit_to_name(&mut registry, now, &child, &name("child"));
 
         let mut graph: G = G::default();
         let mut named =
@@ -1930,7 +1963,6 @@ mod tests {
     #[test]
     fn ext_text_roundtrip_preserves_addr_and_ext() {
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let now = Duration::from_secs(1_000_000);
         let text1 = "\
@@ -1944,12 +1976,13 @@ mod tests {
   (mref (ref mul #:ext ((\"test.ext\" ((inline #t))))))
   (-> a (mref 0)) (-> b (mref 1)) (-> mref out))";
 
-        let export1: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(text1, now).expect("from_str 1");
-        let text2 = gantz_egui::format::to_string(&export1).expect("to_string");
+        let export1: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(text1, now).expect("from_str 1");
+        let text2 = gantz_egui::format::to_string::<Box<dyn Node>>(&export1).expect("to_string");
         assert!(text2.contains("#:ext"), "ext tail must survive\n{text2}");
-        let export2: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(&text2, Duration::from_secs(7)).expect("from_str 2");
+        let export2: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(&text2, Duration::from_secs(7))
+                .expect("from_str 2");
 
         for (name, head1) in export1.heads() {
             let head2 = export2.head(name).expect("name present");
@@ -1965,7 +1998,8 @@ mod tests {
             inline: bool,
         }
         let head = export2.head(&name("use-mul")).expect("use-mul");
-        let g = export2.commit_graph_ref(&head).expect("graph");
+        let reified = reify_all(&export2);
+        let g = reified.get(&export2.commits()[&head].graph).expect("graph");
         let named = g
             .node_indices()
             .find_map(|ix| gantz_egui::sync::AsNamedRef::as_named_ref(&g[ix]))
@@ -2015,12 +2049,11 @@ mod tests {
     #[test]
     fn base_socket_docs() {
         use gantz_egui::{Registry as _, SocketKind};
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
-        let base: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export(gantz_base::BYTES).expect("parse base");
+        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+            .expect("parse base");
 
         // Completeness: no primitive socket serializes as a bare `inlet`/`outlet`.
-        let text = gantz_egui::format::to_string(&base).expect("to_string");
+        let text = gantz_egui::format::to_string::<Box<dyn Node>>(&base).expect("to_string");
         let bare = text.matches(" inlet)").count() + text.matches(" outlet)").count();
         assert_eq!(
             bare, 0,
@@ -2029,7 +2062,8 @@ mod tests {
 
         // Resolution: a `ref add` exposes `add`'s socket docs.
         let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&base, &builtins);
+        let reified = reify_all(&base);
+        let reg_ref = gantz_egui::RegistryRef::new(&base, &reified, &builtins);
         let add: gantz_ca::ContentAddr = gantz_egui::reg::head_graph_addr(&base, &name("add"))
             .expect("add")
             .into();
@@ -2059,12 +2093,12 @@ mod tests {
     #[test]
     fn demos_evaluate() {
         use gantz_core::compile::{EvalKind, entry_fn_name, push_pull_entrypoints};
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
-        let base: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export(gantz_base::BYTES).expect("parse base");
+        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+            .expect("parse base");
+        let reified = reify_all(&base);
         let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&base, &builtins);
+        let reg_ref = gantz_egui::RegistryRef::new(&base, &reified, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let config = gantz_core::compile::Config::default();
 
@@ -2077,9 +2111,8 @@ mod tests {
         ];
         for demo in demos {
             let head = gantz_ca::Head::Branch(name(demo));
-            let graph = base
-                .head_graph(&head)
-                .unwrap_or_else(|| panic!("{demo} graph"));
+            let graph =
+                head_graph(&reified, &base, &head).unwrap_or_else(|| panic!("{demo} graph"));
 
             // The single `bang` node drives every pipeline in the demo.
             let go = graph
@@ -2119,14 +2152,13 @@ mod tests {
     fn reset_then_reopen_demo_recompiles() {
         use gantz_core::compile::{Config, push_pull_entrypoints};
         use std::collections::BTreeMap;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
         let ts = bevy_gantz_egui::base::BASE_TIMESTAMP;
-        let parse = || -> gantz_ca::Registry<G> {
+        let parse = || -> DataReg {
             gantz_egui::export::parse_export_at::<Box<dyn Node>>(gantz_base::BYTES, ts)
                 .expect("parse base")
         };
-        let heads = |reg: &gantz_ca::Registry<G>| -> BTreeMap<_, _> {
+        let heads = |reg: &DataReg| -> BTreeMap<_, _> {
             reg.heads().map(|(n, ca)| (n.clone(), ca)).collect()
         };
 
@@ -2146,26 +2178,18 @@ mod tests {
         let mut registry = startup;
         let demo = name("demo-arithmetic");
         let demo_commit = reparse.head(&demo).expect("demo name");
-        let get_node = |ca: &gantz_ca::ContentAddr| {
-            reparse
-                .graph(&gantz_ca::GraphAddr::from(*ca))
-                .map(|g| g as &dyn gantz_core::Node)
-        };
-        let live = gantz_core::reg::live_for_heads(
-            &get_node,
-            &reparse,
-            [gantz_ca::Head::Commit(demo_commit)],
-        );
+        let live = gantz_ca::closure_from(&reparse, [demo_commit], gantz_ca::data_graph_out);
         let mut subset = gantz_ca::export(&reparse, &live);
         subset.set_head(demo.clone(), demo_commit);
         registry.merge(subset);
 
         // Reopen: the reset demo must still compile, i.e. every `ref` resolves.
         let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&registry, &builtins);
+        let reified = reify_all(&registry);
+        let reg_ref = gantz_egui::RegistryRef::new(&registry, &reified, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let head = gantz_ca::Head::Branch(demo);
-        let graph = registry.head_graph(&head).expect("demo graph");
+        let graph = head_graph(&reified, &registry, &head).expect("demo graph");
         let eps = push_pull_entrypoints(&get_node, graph);
         gantz_core::vm::init(&get_node, graph, &eps, &Config::default()).unwrap_or_else(|e| {
             panic!(
@@ -2183,7 +2207,7 @@ mod tests {
         use std::time::Duration;
         type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
-        let mut registry: gantz_ca::Registry<G> = gantz_ca::Registry::default();
+        let mut registry = DataReg::default();
         let used = gantz_plyphon::AudioAsset::from_interleaved(vec![0.5; 8], 1, 48_000.0);
         let unused = gantz_plyphon::AudioAsset::from_interleaved(vec![-0.5; 8], 1, 48_000.0);
         let used_addr = gantz_plyphon::add_audio_asset(&mut registry, &used);
@@ -2191,16 +2215,19 @@ mod tests {
 
         let mut g = G::default();
         g.add_node(Box::new(gantz_plyphon::PlayBuf::new(used_addr, 1, 48_000.0)) as Box<dyn Node>);
-        let g_addr = registry.add_graph(g);
+        let (dg, g_addr) = gantz_core::data::erase_with_addr(&g).expect("erase");
+        registry.add_graph(dg);
         let commit = registry.commit_graph(Duration::from_secs(1), None, g_addr, || {
             unreachable!("graph already added")
         });
         registry.set_head(name("sampler"), commit);
 
-        let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&registry, &builtins);
-        let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
-        let live = gantz_core::reg::live(&get_node, &registry, [] as [gantz_ca::Head; 0]);
+        // Heads are a Root-liveness section, so the closure seeds from them.
+        let live = gantz_ca::closure(
+            &registry,
+            [] as [gantz_ca::CommitAddr; 0],
+            gantz_ca::data_graph_out,
+        );
         assert!(live.blob_live(gantz_plyphon::BUFFER_SECTION, &used_addr));
         assert!(!live.blob_live(gantz_plyphon::BUFFER_SECTION, &unused_addr));
 
@@ -2227,11 +2254,11 @@ mod tests {
     fn base_named_export_is_stable() {
         use std::collections::BTreeSet;
         use std::time::Duration;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
 
-        let base: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export(gantz_base::BYTES).expect("parse base");
-        let text = gantz_egui::format::to_string_named(&base).expect("to_string_named");
+        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+            .expect("parse base");
+        let text =
+            gantz_egui::format::to_string_named::<Box<dyn Node>>(&base).expect("to_string_named");
 
         // Inline names, no tables, references by name.
         assert!(!text.contains("(commits"), "no commits table:\n{text}");
@@ -2246,9 +2273,11 @@ mod tests {
         );
 
         // Stable: reload the simplified text and re-serialize - byte-identical.
-        let back: gantz_ca::Registry<G> =
-            gantz_egui::format::from_str(&text, Duration::from_secs(0)).expect("from_str");
-        let text2 = gantz_egui::format::to_string_named(&back).expect("to_string_named 2");
+        let back: DataReg =
+            gantz_egui::format::from_str::<Box<dyn Node>>(&text, Duration::from_secs(0))
+                .expect("from_str");
+        let text2 =
+            gantz_egui::format::to_string_named::<Box<dyn Node>>(&back).expect("to_string_named 2");
         assert_eq!(text, text2, "inline-name export must be idempotent");
 
         // Names survive the round-trip.
@@ -2262,12 +2291,12 @@ mod tests {
     /// churn it.
     #[test]
     fn plyphon_base_export_is_stable() {
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
-
         let text1 = std::str::from_utf8(gantz_plyphon::BASE_BYTES).expect("utf8");
-        let base: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export(gantz_plyphon::BASE_BYTES).expect("parse base");
-        let text2 = gantz_egui::format::to_string_named(&base).expect("to_string_named");
+        let base: DataReg =
+            gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_plyphon::BASE_BYTES)
+                .expect("parse base");
+        let text2 =
+            gantz_egui::format::to_string_named::<Box<dyn Node>>(&base).expect("to_string_named");
         assert_eq!(
             text1, text2,
             "the plyphon base file must match the writer's canonical form",
@@ -2279,24 +2308,24 @@ mod tests {
     /// Steel-inert, so they compile like any other graph.
     #[test]
     fn merged_base_sources_all_compile() {
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
-
-        let mut merged: gantz_ca::Registry<G> = gantz_ca::Registry::default();
+        let mut merged = DataReg::default();
         for bytes in [gantz_base::BYTES, gantz_plyphon::BASE_BYTES] {
-            let export: gantz_ca::Registry<G> =
-                gantz_egui::export::parse_export_at(bytes, bevy_gantz_egui::base::BASE_TIMESTAMP)
-                    .expect("parse source");
+            let export: DataReg = gantz_egui::export::parse_export_at::<Box<dyn Node>>(
+                bytes,
+                bevy_gantz_egui::base::BASE_TIMESTAMP,
+            )
+            .expect("parse source");
             merged.merge(export);
         }
         let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&merged, &builtins);
+        let reified = reify_all(&merged);
+        let reg_ref = gantz_egui::RegistryRef::new(&merged, &reified, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let names: Vec<gantz_ca::Name> = merged.heads().map(|(n, _)| n.clone()).collect();
         assert!(names.contains(&name("demo-sine")), "plyphon demo loaded");
         for n in names {
             let head = gantz_ca::Head::Branch(n.clone());
-            let graph = merged
-                .head_graph(&head)
+            let graph = head_graph(&reified, &merged, &head)
                 .unwrap_or_else(|| panic!("`{n}` has no head graph"));
             let entrypoints = gantz_core::compile::push_pull_entrypoints(&get_node, graph);
             let config = gantz_core::compile::Config::default();
@@ -2314,9 +2343,8 @@ mod tests {
     /// reset relies on, per source).
     #[test]
     fn plyphon_base_parses_reproducibly() {
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
-        let parse = || -> gantz_ca::Registry<G> {
-            gantz_egui::export::parse_export_at(
+        let parse = || -> DataReg {
+            gantz_egui::export::parse_export_at::<Box<dyn Node>>(
                 gantz_plyphon::BASE_BYTES,
                 bevy_gantz_egui::base::BASE_TIMESTAMP,
             )
@@ -2336,11 +2364,11 @@ mod tests {
     #[test]
     fn cross_source_base_refs_resolve_via_seed() {
         use std::collections::BTreeMap;
-        type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
         let ts = bevy_gantz_egui::base::BASE_TIMESTAMP;
 
-        let core: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export_at(gantz_base::BYTES, ts).expect("parse core");
+        let core: DataReg =
+            gantz_egui::export::parse_export_at::<Box<dyn Node>>(gantz_base::BYTES, ts)
+                .expect("parse core");
         // Externally-known name -> head graph associations, the form the
         // seeded parse resolves foreign refs through.
         let seed: BTreeMap<String, gantz_ca::GraphAddr> = core
@@ -2366,18 +2394,19 @@ mod tests {
         }
 
         // Seeded with the core source's names: resolves to the core content.
-        let domain: gantz_ca::Registry<G> =
-            gantz_egui::export::parse_export_seeded_at(text.as_bytes(), ts, &seed)
+        let domain: DataReg =
+            gantz_egui::export::parse_export_seeded_at::<Box<dyn Node>>(text.as_bytes(), ts, &seed)
                 .expect("seeded parse");
         let mut merged = core;
         merged.merge(domain);
 
         // The merged registry compiles the wrapper.
         let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&merged, &builtins);
+        let reified = reify_all(&merged);
+        let reg_ref = gantz_egui::RegistryRef::new(&merged, &reified, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let head = gantz_ca::Head::Branch(name("wrap-add"));
-        let graph = merged.head_graph(&head).expect("wrap-add graph");
+        let graph = head_graph(&reified, &merged, &head).expect("wrap-add graph");
         let entrypoints = gantz_core::compile::push_pull_entrypoints(&get_node, graph);
         let config = gantz_core::compile::Config::default();
         gantz_core::vm::init(&get_node, graph, &entrypoints, &config).unwrap_or_else(|e| {
@@ -2388,8 +2417,9 @@ mod tests {
         });
 
         // The domain source's own export keeps `add` by name only.
-        let out = gantz_egui::export::export_names_sexpr_named(&merged, ["wrap-add"])
-            .expect("per-source export");
+        let out =
+            gantz_egui::export::export_names_sexpr_named::<Box<dyn Node>>(&merged, ["wrap-add"])
+                .expect("per-source export");
         assert!(out.contains("(graph wrap-add"), "own graph present:\n{out}");
         assert!(out.contains("(ref add"), "foreign ref by name:\n{out}");
         assert!(

@@ -163,7 +163,8 @@ where
 /// a single push evaluation for all of them.
 pub fn drive_update_bangs<N>(
     time: Res<Time>,
-    registry: Res<crate::Registry<N>>,
+    registry: Res<crate::Registry>,
+    cache: Res<bevy_gantz::GraphCache<N>>,
     builtins: Res<bevy_gantz::BuiltinNodes<N>>,
     mut vms: NonSendMut<bevy_gantz::head::HeadVms>,
     heads: Query<(Entity, &bevy_gantz::head::WorkingGraph<N>), With<bevy_gantz::head::OpenHead>>,
@@ -174,7 +175,7 @@ pub fn drive_update_bangs<N>(
     let dt = time.delta_secs_f64();
 
     for (entity, wg) in heads.iter() {
-        let node_reg = crate::registry_ref(&registry, &builtins);
+        let node_reg = crate::registry_ref(&registry, &cache, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| node_reg.node(ca);
 
         // Collect all UpdateBang paths.

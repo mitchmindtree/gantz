@@ -15,10 +15,11 @@ use crate::model::{
     RefSpec, SectionForm, SectionKey,
 };
 use crate::sugar::Sugar;
-use gantz_ca::{ContentAddr, GraphAddr, Key, Registry, Value};
+use gantz_ca::{ContentAddr, DataGraph, GraphAddr, Key, Registry, Value};
 use gantz_core::node::graph::Graph;
 use petgraph::visit::EdgeRef;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
 /// The result of serializing a registry: the text plus the per-graph label
@@ -46,13 +47,15 @@ pub struct GraphLabels {
 /// `(section ...)` form so unknown-domain data round-trips through text.
 /// The `heads` section is always covered by the `(names ...)` table.
 pub fn raise<N>(
-    registry: &Registry<Graph<N>>,
+    registry: &Registry<DataGraph>,
     sugar: &dyn Sugar,
     claimed: &[&str],
 ) -> Result<Dumped, FormatError>
 where
-    // Raising only ever *serializes* nodes, hence no `DeserializeOwned` bound.
-    N: Serialize,
+    // The stored data graphs are reified through the node set `N`
+    // (`DeserializeOwned`) and the typed nodes serialized back to datums
+    // (`Serialize`), so `N` is the codec for the text forms.
+    N: Serialize + DeserializeOwned,
 {
     let mut doc = Document::default();
     let mut graphs = HashMap::new();
@@ -73,8 +76,9 @@ where
     let mut graph_entries: Vec<_> = registry.graphs().iter().collect();
     graph_entries.sort_by_key(|&(ga, _)| (newest.get(ga).copied(), *ga));
 
-    for (g_addr, graph) in graph_entries {
-        let (body, labels) = graph_to_body::<N>(graph, sugar, true)?;
+    for (g_addr, data_graph) in graph_entries {
+        let graph = reify_graph::<N>(data_graph)?;
+        let (body, labels) = graph_to_body::<N>(&graph, sugar, true)?;
         let id = short_hex(*g_addr);
         doc.graphs.push(GraphDef {
             id: Addr::Concrete(id.clone()),
@@ -115,7 +119,7 @@ where
 /// `(section ...)` forms, skipping `heads` (covered by the names table),
 /// the caller's `claimed` ids, and non-datum values (blob indirections do
 /// not travel through text yet).
-fn push_sections<N>(doc: &mut Document, registry: &Registry<Graph<N>>, claimed: &[&str]) {
+fn push_sections(doc: &mut Document, registry: &Registry<DataGraph>, claimed: &[&str]) {
     for (id, section) in registry.sections() {
         if id == gantz_ca::registry::HEADS_ID || claimed.contains(&id.as_str()) {
             continue;
@@ -158,12 +162,12 @@ fn push_sections<N>(doc: &mut Document, registry: &Registry<Graph<N>>, claimed: 
 /// Graphs with no name are skipped: a name-resolved `ref` can only target a
 /// named graph, so an unnamed graph is unreachable in this format.
 pub fn raise_named<N>(
-    registry: &Registry<Graph<N>>,
+    registry: &Registry<DataGraph>,
     sugar: &dyn Sugar,
     claimed: &[&str],
 ) -> Result<Dumped, FormatError>
 where
-    N: Serialize,
+    N: Serialize + DeserializeOwned,
 {
     let mut doc = Document::default();
     let mut graphs = HashMap::new();
@@ -172,10 +176,11 @@ where
         let Some(commit) = registry.commits().get(&c_addr) else {
             continue;
         };
-        let Some(graph) = registry.graphs().get(&commit.graph) else {
+        let Some(data_graph) = registry.graphs().get(&commit.graph) else {
             continue;
         };
-        let (body, labels) = graph_to_body::<N>(graph, sugar, false)?;
+        let graph = reify_graph::<N>(data_graph)?;
+        let (body, labels) = graph_to_body::<N>(&graph, sugar, false)?;
         doc.graphs.push(GraphDef {
             id: Addr::Label(name.to_string()),
             body,
@@ -196,6 +201,16 @@ where
 }
 
 // -- graph -> body -----------------------------------------------------------
+
+/// Reify a stored data graph through the node set `N`, mapping decode
+/// failures to a [`FormatError`].
+fn reify_graph<N>(data_graph: &DataGraph) -> Result<Graph<N>, FormatError>
+where
+    N: DeserializeOwned,
+{
+    gantz_core::data::reify(data_graph)
+        .map_err(|e| FormatError::node_deserialize(e.source.tag.clone(), e.to_string()))
+}
 
 /// Convert a graph into a [`GraphBody`], returning the index -> label map used
 /// to resolve connections and (by extenders) layout positions.

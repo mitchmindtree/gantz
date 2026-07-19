@@ -1,15 +1,19 @@
 //! Tests for `root_port_info` - the root-level DSP port classification
 //! behind DSP edge styling (#300).
 
-use gantz_ca::{CaHash, ContentAddr};
+use gantz_ca::{ContentAddr, DataGraph};
 use gantz_core::Edge;
+use gantz_core::data::ReifiedGraphs;
 use gantz_core::node::graph::Graph;
 use gantz_core::node::{AsRefNode, ExprCtx, ExprResult, MetaCtx, Ref, parse_expr};
 use gantz_plyphon::{Lag, NodeDsp, Out, PortShape, PortShapes, SinOsc, ToNodeDsp, root_port_info};
 use plyphon::Rate;
 
-/// A minimal node standing in for the app's node set.
-#[derive(Clone)]
+/// A minimal node standing in for the app's node set. Adjacent tagging keeps
+/// the serde a `type`-tagged map (what the erase codec requires) while
+/// admitting any variant payload shape.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "c")]
 enum N {
     SinOsc(SinOsc),
     Lag(Lag),
@@ -70,33 +74,21 @@ impl gantz_core::Node for N {
     }
 }
 
-impl CaHash for N {
-    fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-        match self {
-            N::SinOsc(s) => CaHash::hash(s, hasher),
-            N::Lag(l) => CaHash::hash(l, hasher),
-            N::Out(o) => CaHash::hash(o, hasher),
-            N::Ref(r) => CaHash::hash(r, hasher),
-            N::Inlet => {
-                hasher.update(b"test.inlet");
-            }
-            N::Outlet => {
-                hasher.update(b"test.outlet");
-            }
-            N::Other => {
-                hasher.update(b"test.other");
-            }
-        }
-    }
+/// Commit `graph` (erased), returning its graph address as a `ContentAddr`
+/// (the form `Ref::content_addr` reports).
+fn commit(registry: &mut gantz_ca::Registry<DataGraph>, graph: Graph<N>) -> ContentAddr {
+    let now = std::time::Duration::from_secs(1);
+    let (dg, addr) = gantz_core::data::erase_with_addr(&graph).expect("erase");
+    registry.commit_graph(now, None, addr, || dg);
+    addr.into()
 }
 
-/// Commit `graph`, returning its graph address as a `ContentAddr` (the form
-/// `Ref::content_addr` reports).
-fn commit(registry: &mut gantz_ca::Registry<Graph<N>>, graph: Graph<N>) -> ContentAddr {
-    let now = std::time::Duration::from_secs(1);
-    let addr = gantz_ca::graph_addr(&graph);
-    registry.commit_graph(now, None, addr, || graph);
-    addr.into()
+/// Reify the whole registry column into a typed cache.
+fn reify_all(registry: &gantz_ca::Registry<DataGraph>) -> ReifiedGraphs<N> {
+    let mut reified = ReifiedGraphs::new();
+    let errs = reified.ensure_all(registry);
+    assert!(errs.is_empty(), "{errs:?}");
+    reified
 }
 
 fn shape(width: usize, rate: Rate) -> PortShape {
@@ -114,7 +106,7 @@ fn shapes<const M: usize>(entries: [(&[usize], usize, PortShape); M]) -> PortSha
 /// beyond `n_dsp_inputs` and non-DSP nodes stay unclassified.
 #[test]
 fn flat_graph_classifies_dsp_ports() {
-    let registry = gantz_ca::Registry::<Graph<N>>::default();
+    let registry = gantz_ca::Registry::<DataGraph>::default();
     let mut g: Graph<N> = Graph::default();
     let sin = g.add_node(N::SinOsc(SinOsc::default()));
     let out = g.add_node(N::Out(Out::default()));
@@ -126,7 +118,7 @@ fn flat_graph_classifies_dsp_ports() {
     g.add_edge(slider2, sin, Edge::new(0.into(), 0.into()));
 
     let shapes = shapes([(&[0], 0, shape(1, Rate::Audio))]);
-    let info = root_port_info(&g, &registry, &shapes);
+    let info = root_port_info(&g, &reify_all(&registry), &shapes);
 
     // `~sinosc`'s hybrid input and `~out`'s signal input are signal inputs.
     let sins: Vec<_> = info.signal_inputs.iter().copied().collect();
@@ -144,7 +136,7 @@ fn flat_graph_classifies_dsp_ports() {
 /// and its output shapes resolve through absolutized `PortShapes` keys.
 #[test]
 fn ref_ports_classify_through_child() {
-    let mut registry = gantz_ca::Registry::<Graph<N>>::default();
+    let mut registry = gantz_ca::Registry::<DataGraph>::default();
 
     // Child: inlet -> ~lag -> outlet.
     let mut child: Graph<N> = Graph::default();
@@ -168,7 +160,7 @@ fn ref_ports_classify_through_child() {
         (&[0], 0, shape(1, Rate::Audio)),
         (&[1, 1], 0, shape(2, Rate::Audio)),
     ]);
-    let info = root_port_info(&g, &registry, &shapes);
+    let info = root_port_info(&g, &reify_all(&registry), &shapes);
 
     assert!(info.signal_inputs.contains(&(r.index(), 0)));
     assert!(info.signal_inputs.contains(&(out.index(), 0)));
@@ -182,7 +174,7 @@ fn ref_ports_classify_through_child() {
 /// head derived silent) still classifies, with an unknown shape.
 #[test]
 fn ref_output_without_recorded_shape_is_signal_with_none() {
-    let mut registry = gantz_ca::Registry::<Graph<N>>::default();
+    let mut registry = gantz_ca::Registry::<DataGraph>::default();
     let mut child: Graph<N> = Graph::default();
     let s = child.add_node(N::SinOsc(SinOsc::default()));
     let o = child.add_node(N::Outlet);
@@ -192,7 +184,7 @@ fn ref_output_without_recorded_shape_is_signal_with_none() {
     let mut g: Graph<N> = Graph::default();
     let r = g.add_node(N::Ref(Ref::new(ca)));
 
-    let info = root_port_info(&g, &registry, &PortShapes::default());
+    let info = root_port_info(&g, &reify_all(&registry), &PortShapes::default());
     assert_eq!(info.signal_outputs.get(&(r.index(), 0)), Some(&None));
 }
 
@@ -200,7 +192,7 @@ fn ref_output_without_recorded_shape_is_signal_with_none() {
 /// relative paths into the absolutized key.
 #[test]
 fn nested_ref_paths_compose() {
-    let mut registry = gantz_ca::Registry::<Graph<N>>::default();
+    let mut registry = gantz_ca::Registry::<DataGraph>::default();
 
     // Inner: ~sinosc -> outlet.
     let mut inner: Graph<N> = Graph::default();
@@ -221,7 +213,7 @@ fn nested_ref_paths_compose() {
     let r = g.add_node(N::Ref(Ref::new(outer_ca)));
 
     let shapes = shapes([(&[0, 0, 0], 0, shape(2, Rate::Audio))]);
-    let info = root_port_info(&g, &registry, &shapes);
+    let info = root_port_info(&g, &reify_all(&registry), &shapes);
     assert_eq!(
         info.signal_outputs.get(&(r.index(), 0)),
         Some(&Some(shape(2, Rate::Audio))),
@@ -234,7 +226,7 @@ fn nested_ref_paths_compose() {
 /// interface edges).
 #[test]
 fn root_boundaries_forward_classification() {
-    let registry = gantz_ca::Registry::<Graph<N>>::default();
+    let registry = gantz_ca::Registry::<DataGraph>::default();
     let mut g: Graph<N> = Graph::default();
     let i = g.add_node(N::Inlet);
     let l = g.add_node(N::Lag(Lag::default()));
@@ -242,7 +234,7 @@ fn root_boundaries_forward_classification() {
     g.add_edge(i, l, Edge::new(0.into(), 0.into()));
     g.add_edge(l, o, Edge::new(0.into(), 0.into()));
 
-    let info = root_port_info(&g, &registry, &PortShapes::default());
+    let info = root_port_info(&g, &reify_all(&registry), &PortShapes::default());
     assert_eq!(info.signal_outputs.get(&(i.index(), 0)), Some(&None));
     assert!(info.signal_inputs.contains(&(l.index(), 0)));
     assert!(info.signal_inputs.contains(&(o.index(), 0)));
@@ -252,7 +244,7 @@ fn root_boundaries_forward_classification() {
     let wi = wire.add_node(N::Inlet);
     let wo = wire.add_node(N::Outlet);
     wire.add_edge(wi, wo, Edge::new(0.into(), 0.into()));
-    let info = root_port_info(&wire, &registry, &PortShapes::default());
+    let info = root_port_info(&wire, &reify_all(&registry), &PortShapes::default());
     assert!(info.signal_inputs.is_empty());
     assert!(info.signal_outputs.is_empty());
 }
@@ -260,13 +252,13 @@ fn root_boundaries_forward_classification() {
 /// A reference to a missing commit classifies as control without panicking.
 #[test]
 fn dangling_ref_is_control() {
-    let registry = gantz_ca::Registry::<Graph<N>>::default();
+    let registry = gantz_ca::Registry::<DataGraph>::default();
     let mut g: Graph<N> = Graph::default();
     let r = g.add_node(N::Ref(Ref::new(ContentAddr::from([9u8; 32]))));
     let sin = g.add_node(N::SinOsc(SinOsc::default()));
     g.add_edge(sin, r, Edge::new(0.into(), 0.into()));
 
-    let info = root_port_info(&g, &registry, &PortShapes::default());
+    let info = root_port_info(&g, &reify_all(&registry), &PortShapes::default());
     assert!(!info.signal_inputs.contains(&(r.index(), 0)));
     assert!(!info.signal_outputs.contains_key(&(r.index(), 0)));
 }
@@ -275,7 +267,7 @@ fn dangling_ref_is_control() {
 /// widest summand and audio rate dominates (mirroring derivation).
 #[test]
 fn multi_fed_ref_outlet_sums_shapes() {
-    let mut registry = gantz_ca::Registry::<Graph<N>>::default();
+    let mut registry = gantz_ca::Registry::<DataGraph>::default();
 
     // Child: two sources feeding the one outlet.
     let mut child: Graph<N> = Graph::default();
@@ -293,7 +285,7 @@ fn multi_fed_ref_outlet_sums_shapes() {
         (&[0, 0], 0, shape(2, Rate::Control)),
         (&[0, 1], 0, shape(1, Rate::Audio)),
     ]);
-    let info = root_port_info(&g, &registry, &shapes);
+    let info = root_port_info(&g, &reify_all(&registry), &shapes);
     assert_eq!(
         info.signal_outputs.get(&(r.index(), 0)),
         Some(&Some(shape(2, Rate::Audio))),

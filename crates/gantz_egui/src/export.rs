@@ -5,8 +5,8 @@
 //! type is needed. Serialization uses the `.gantz` S-expression text format
 //! (see [`crate::format`]) under the `.gantz` file extension.
 
-use gantz_ca::{CaHash, GraphAddr, Name};
-use gantz_core::node::{self, GetNode, graph::Graph};
+use gantz_ca::{DataGraph, GraphAddr, Name};
+use gantz_core::node::{self, graph::Graph};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashSet;
 
@@ -45,11 +45,11 @@ impl std::error::Error for ParseExportError {
 /// Graphs the document does not commit explicitly (hand-authored graphs with no
 /// `(commits ...)` entry) are stamped with the current time. Use
 /// [`parse_export_at`] to stamp them with a fixed timestamp instead.
-pub fn parse_export<N>(bytes: &[u8]) -> Result<gantz_ca::Registry<Graph<N>>, ParseExportError>
+pub fn parse_export<N>(bytes: &[u8]) -> Result<gantz_ca::Registry<DataGraph>, ParseExportError>
 where
-    N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
+    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
 {
-    parse_export_at(bytes, now())
+    parse_export_at::<N>(bytes, now())
 }
 
 /// Like [`parse_export`], but stamps uncommitted (hand-authored) graphs with the
@@ -62,12 +62,12 @@ where
 pub fn parse_export_at<N>(
     bytes: &[u8],
     now: gantz_ca::Timestamp,
-) -> Result<gantz_ca::Registry<Graph<N>>, ParseExportError>
+) -> Result<gantz_ca::Registry<DataGraph>, ParseExportError>
 where
-    N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
+    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
 {
     let text = std::str::from_utf8(bytes).map_err(ParseExportError::Utf8)?;
-    crate::format::from_str(text, now).map_err(ParseExportError::Format)
+    crate::format::from_str::<N>(text, now).map_err(ParseExportError::Format)
 }
 
 /// Like [`parse_export_at`], resolving names the document does not define
@@ -78,12 +78,12 @@ pub fn parse_export_seeded_at<N>(
     bytes: &[u8],
     now: gantz_ca::Timestamp,
     seed: &std::collections::BTreeMap<String, GraphAddr>,
-) -> Result<gantz_ca::Registry<Graph<N>>, ParseExportError>
+) -> Result<gantz_ca::Registry<DataGraph>, ParseExportError>
 where
-    N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
+    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
 {
     let text = std::str::from_utf8(bytes).map_err(ParseExportError::Utf8)?;
-    crate::format::from_str_seeded(text, now, seed).map_err(ParseExportError::Format)
+    crate::format::from_str_seeded::<N>(text, now, seed).map_err(ParseExportError::Format)
 }
 
 /// The current time as a [`gantz_ca::Timestamp`] (duration since the Unix epoch).
@@ -95,16 +95,38 @@ fn now() -> gantz_ca::Timestamp {
 
 /// The unique root name of an exported registry, if it has exactly one.
 ///
-/// `get_node` resolves node lookups outside the export (e.g. builtins).
-pub fn unique_root_name<N>(
-    get_node: GetNode,
-    registry: &gantz_ca::Registry<Graph<N>>,
-) -> Option<Name>
-where
-    N: gantz_core::Node,
-{
-    let mut roots = gantz_core::reg::root_names(get_node, registry);
-    (roots.len() == 1).then(|| roots.pop().unwrap())
+/// A name is "root" when no stored graph's [`gantz_ca::NodeData::refs`]
+/// column points at the name's head graph: a pure data walk, so no node
+/// lookups are needed.
+pub fn unique_root_name(registry: &gantz_ca::Registry<DataGraph>) -> Option<Name> {
+    let referenced: HashSet<GraphAddr> = registry
+        .graphs()
+        .values()
+        .flat_map(|g| g.node_weights())
+        .flat_map(|n| n.refs.iter().copied().map(GraphAddr::from))
+        .collect();
+    let mut roots = registry.heads().filter(|(_, ca)| {
+        registry
+            .commits()
+            .get(ca)
+            .is_none_or(|commit| !referenced.contains(&commit.graph))
+    });
+    let root = roots.next()?;
+    roots.next().is_none().then(|| root.0.clone())
+}
+
+/// The registry subset transitively reachable from ONLY the given heads,
+/// walked over the stored graphs' structural refs/blobs columns (a pure data
+/// walk, no node lookups).
+fn export_heads_registry(
+    registry: &gantz_ca::Registry<DataGraph>,
+    heads: impl IntoIterator<Item = impl std::borrow::Borrow<gantz_ca::Head>>,
+) -> gantz_ca::Registry<DataGraph> {
+    let seeds = heads
+        .into_iter()
+        .filter_map(|head| registry.head_commit_ca(head.borrow()));
+    let live = gantz_ca::closure_from(registry, seeds, gantz_ca::data_graph_out);
+    gantz_ca::export(registry, &live)
 }
 
 /// Serialize an export for the given heads as `.gantz` text.
@@ -113,15 +135,14 @@ where
 /// transitively required content along with their views, demos and
 /// descriptions. File IO stays with the caller.
 pub fn export_heads_sexpr<N>(
-    get_node: GetNode,
-    registry: &gantz_ca::Registry<Graph<N>>,
+    registry: &gantz_ca::Registry<DataGraph>,
     heads: impl IntoIterator<Item = impl std::borrow::Borrow<gantz_ca::Head>>,
 ) -> Result<String, crate::format::FormatError>
 where
-    N: Serialize + DeserializeOwned + gantz_core::Node + Clone + gantz_format::NodeSugar,
+    N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
 {
-    let export_registry = gantz_core::reg::export_heads(get_node, registry, heads);
-    crate::format::to_string(&export_registry)
+    let export_registry = export_heads_registry(registry, heads);
+    crate::format::to_string::<N>(&export_registry)
 }
 
 /// As [`export_heads_sexpr`], but serializes in the inline-name format (see
@@ -129,15 +150,14 @@ where
 /// tables, references by name. Used for the baked-in base so its file stays
 /// hand-editable and free of churning addresses.
 pub fn export_heads_sexpr_named<N>(
-    get_node: GetNode,
-    registry: &gantz_ca::Registry<Graph<N>>,
+    registry: &gantz_ca::Registry<DataGraph>,
     heads: impl IntoIterator<Item = impl std::borrow::Borrow<gantz_ca::Head>>,
 ) -> Result<String, crate::format::FormatError>
 where
-    N: Serialize + DeserializeOwned + gantz_core::Node + Clone + gantz_format::NodeSugar,
+    N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
 {
-    let export_registry = gantz_core::reg::export_heads(get_node, registry, heads);
-    crate::format::to_string_named(&export_registry)
+    let export_registry = export_heads_registry(registry, heads);
+    crate::format::to_string_named::<N>(&export_registry)
 }
 
 /// As [`export_heads_sexpr_named`], but exports EXACTLY the given names with
@@ -148,11 +168,11 @@ where
 /// only its own graphs - refs into other sources stay by name, and loading
 /// resolves them through the seeded parse (see [`parse_export_seeded_at`]).
 pub fn export_names_sexpr_named<N>(
-    registry: &gantz_ca::Registry<Graph<N>>,
+    registry: &gantz_ca::Registry<DataGraph>,
     names: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<String, crate::format::FormatError>
 where
-    N: Serialize + DeserializeOwned + gantz_core::Node + Clone + gantz_format::NodeSugar,
+    N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
 {
     let requested: HashSet<Name> = names
         .into_iter()
@@ -182,7 +202,7 @@ where
     for name in extra {
         export_registry.remove_head(&name);
     }
-    crate::format::to_string_named(&export_registry)
+    crate::format::to_string_named::<N>(&export_registry)
 }
 
 /// Derive a default export filename from a [`gantz_ca::Head`].
@@ -233,6 +253,8 @@ pub enum ParseCopiedError {
     Format(crate::format::FormatError),
     /// The document parsed but carried no clipboard graph.
     NotClipboard,
+    /// The clipboard graph failed to reify through the node set.
+    Reify(gantz_core::data::ReifyError),
 }
 
 impl std::fmt::Display for ParseCopiedError {
@@ -240,6 +262,7 @@ impl std::fmt::Display for ParseCopiedError {
         match self {
             Self::Format(e) => write!(f, "failed to parse .gantz text: {e}"),
             Self::NotClipboard => write!(f, "document carries no `{CLIPBOARD_NAME}` graph"),
+            Self::Reify(e) => write!(f, "failed to decode the clipboard graph: {e}"),
         }
     }
 }
@@ -249,6 +272,7 @@ impl std::error::Error for ParseCopiedError {
         match self {
             Self::Format(e) => Some(e),
             Self::NotClipboard => None,
+            Self::Reify(e) => Some(e),
         }
     }
 }
@@ -258,7 +282,7 @@ impl std::error::Error for ParseCopiedError {
 pub struct Copied<N> {
     /// Registry dependencies referenced by copied nodes (e.g. Ref nodes),
     /// along with the heads (and their metadata) naming them.
-    pub registry: gantz_ca::Registry<Graph<N>>,
+    pub registry: gantz_ca::Registry<DataGraph>,
     /// The subgraph of selected nodes and their internal edges.
     pub graph: Graph<N>,
     /// Positions of nodes in the subgraph.
@@ -272,7 +296,7 @@ pub struct Copied<N> {
 /// metadata) whose tips point at those graphs, so pasting into another
 /// registry restores names and views.
 pub fn copy<N>(
-    registry: &gantz_ca::Registry<Graph<N>>,
+    registry: &gantz_ca::Registry<DataGraph>,
     graph: &Graph<N>,
     selected: &HashSet<node::graph::NodeIx>,
     layout: &egui_graph::Layout,
@@ -297,7 +321,9 @@ where
     // Collect registry deps transitively: the graphs the selected nodes
     // reference, and the graphs *those* graphs reference in turn (a nested
     // graph that itself contains nested graphs), so the whole subtree travels
-    // with the clipboard. Blob references ride along likewise.
+    // with the clipboard. Blob references ride along likewise. The selected
+    // nodes report their own references (they are typed); the stored graphs'
+    // structural refs/blobs columns cover the rest (a pure data walk).
     let mut live = gantz_ca::LiveSet::default();
     let mut stack: Vec<GraphAddr> = subgraph
         .node_weights()
@@ -315,13 +341,13 @@ where
         let Some(nested) = registry.graph(&graph_ca) else {
             continue;
         };
-        for ca in nested.node_weights().flat_map(|n| n.required_addrs()) {
-            let dep = GraphAddr::from(ca);
-            if registry.graph(&dep).is_some() {
-                stack.push(dep);
-            }
-        }
-        for (section, addr) in nested.node_weights().flat_map(|n| n.required_blobs()) {
+        let out = gantz_ca::data_graph_out(nested);
+        stack.extend(
+            out.graphs
+                .into_iter()
+                .filter(|dep| registry.graph(dep).is_some()),
+        );
+        for (section, addr) in out.blobs {
             live.blobs.entry(section).or_default().insert(addr);
         }
     }
@@ -354,7 +380,7 @@ where
 /// positions with the given offset. Returns the new node indices in the
 /// target graph.
 pub fn paste<N>(
-    registry: &mut gantz_ca::Registry<Graph<N>>,
+    registry: &mut gantz_ca::Registry<DataGraph>,
     target_graph: &mut Graph<N>,
     target_layout: &mut egui_graph::Layout,
     copied: &Copied<N>,
@@ -386,12 +412,15 @@ where
 /// document. [`copied_from_str`] reverses this.
 pub fn copied_to_string<N>(copied: &Copied<N>) -> Result<String, crate::format::FormatError>
 where
-    N: Serialize + DeserializeOwned + CaHash + Clone + gantz_format::NodeSugar + 'static,
+    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
 {
-    // Add the subgraph to the dependency registry as a fresh root commit named
-    // `CLIPBOARD_NAME`. A fixed timestamp keeps the payload deterministic.
+    // Add the subgraph (erased) to the dependency registry as a fresh root
+    // commit named `CLIPBOARD_NAME`. A fixed timestamp keeps the payload
+    // deterministic.
     let mut registry = copied.registry.clone();
-    let g_addr = registry.add_graph(copied.graph.clone());
+    let data_graph = gantz_core::data::erase(&copied.graph)
+        .map_err(|e| crate::format::FormatError::malformed(e.to_string()))?;
+    let g_addr = registry.add_graph(data_graph);
     let commit_ca = registry.add_commit(gantz_ca::Commit::new(
         std::time::Duration::ZERO,
         None,
@@ -407,7 +436,7 @@ where
     };
     crate::section::set_view(&mut registry, commit_ca, &view);
 
-    crate::format::to_string(&registry)
+    crate::format::to_string::<N>(&registry)
 }
 
 /// Parse a clipboard payload produced by [`copied_to_string`].
@@ -416,13 +445,7 @@ where
 /// dependencies.
 pub fn copied_from_str<N>(text: &str) -> Result<Copied<N>, ParseCopiedError>
 where
-    N: Serialize
-        + DeserializeOwned
-        + CaHash
-        + Clone
-        + gantz_core::Node
-        + gantz_format::NodeSugar
-        + 'static,
+    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
 {
     let registry = crate::format::from_str::<N>(text, now()).map_err(ParseCopiedError::Format)?;
 
@@ -430,10 +453,10 @@ where
     let clip_ca = registry
         .head(&clipboard)
         .ok_or(ParseCopiedError::NotClipboard)?;
-    let graph = registry
+    let graph: Graph<N> = registry
         .commit_graph_ref(&clip_ca)
-        .cloned()
-        .ok_or(ParseCopiedError::NotClipboard)?;
+        .ok_or(ParseCopiedError::NotClipboard)
+        .and_then(|dg| gantz_core::data::reify(dg).map_err(ParseCopiedError::Reify))?;
     let positions = crate::section::view(&registry, &clip_ca)
         .map(|view| view.layout)
         .unwrap_or_default();
@@ -447,14 +470,7 @@ where
         .copied()
         .filter(|&ca| ca != clip_ca)
         .collect();
-    let get_node = |ca: &gantz_ca::ContentAddr| {
-        registry
-            .graph(&GraphAddr::from(*ca))
-            .map(|g| g as &dyn gantz_core::Node)
-    };
-    let live = gantz_ca::closure_from(&registry, dep_commits, |g| {
-        gantz_core::graph::out_refs(&get_node, g)
-    });
+    let live = gantz_ca::closure_from(&registry, dep_commits, gantz_ca::data_graph_out);
     let deps = gantz_ca::export(&registry, &live);
 
     Ok(Copied {
@@ -483,12 +499,12 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn test_registry() -> gantz_ca::Registry<String> {
+    fn test_registry() -> gantz_ca::Registry<DataGraph> {
         let ga = graph_addr(1);
         let ca = commit_addr_raw(10);
         let commit = Commit::new(Duration::from_secs(1), None, ga);
         gantz_ca::Registry::from_parts(
-            HashMap::from([(ga, "graph_a".to_string())]),
+            HashMap::from([(ga, DataGraph::default())]),
             HashMap::from([(ca, commit)]),
             std::collections::BTreeMap::from([(name("alpha"), ca)]),
         )
@@ -497,7 +513,7 @@ mod tests {
     #[test]
     fn export_merge_recovers_data() {
         let export = test_registry();
-        let mut target = gantz_ca::Registry::<String>::default();
+        let mut target = gantz_ca::Registry::<DataGraph>::default();
         let report = target.merge(export);
         assert_eq!(report.heads_added, vec![name("alpha")]);
         assert!(report.heads_replaced.is_empty());
@@ -556,13 +572,12 @@ mod tests {
     /// positions riding the clipboard commit's view section entry.
     #[test]
     fn clipboard_round_trip_carries_positions_and_deps() {
-        use crate::test_node::{TestGraph, TestNode, expr, named_ref};
+        use crate::test_node::{TestGraph, TestNode, commit_named, expr, named_ref};
 
-        let mut reg = gantz_ca::Registry::<TestGraph>::default();
+        let mut reg = gantz_ca::Registry::<DataGraph>::default();
         let mut leaf_g = TestGraph::default();
         leaf_g.add_node(expr("(+ 1 1)"));
-        let leaf_ga = gantz_ca::graph_addr(&leaf_g);
-        reg.commit_graph_to_name(Duration::from_secs(1), leaf_ga, || leaf_g, &name("leaf"));
+        let (_, leaf_ga) = commit_named(&mut reg, Duration::from_secs(1), &leaf_g, &name("leaf"));
         crate::section::set_description(&mut reg, name("leaf"), "a leaf".to_string());
 
         // The working graph: a ref to `leaf` plus a plain expr node.
@@ -603,7 +618,7 @@ mod tests {
         );
 
         // Pasting merges the deps so the ref resolves in the target.
-        let mut target_reg = gantz_ca::Registry::<TestGraph>::default();
+        let mut target_reg = gantz_ca::Registry::<DataGraph>::default();
         let mut target_graph = TestGraph::default();
         let mut target_layout = egui_graph::Layout::default();
         let new = paste(
@@ -626,37 +641,31 @@ mod tests {
     /// a parse + merge into a fresh registry.
     #[test]
     fn export_heads_text_round_trip() {
-        use crate::test_node::{TestGraph, TestNode, expr, named_ref};
+        use crate::test_node::{TestGraph, TestNode, commit_named, expr, named_ref};
 
-        let mut reg = gantz_ca::Registry::<TestGraph>::default();
+        let mut reg = gantz_ca::Registry::<DataGraph>::default();
         let mut leaf_g = TestGraph::default();
         leaf_g.add_node(expr("(+ 1 1)"));
-        let leaf_ga = gantz_ca::graph_addr(&leaf_g);
-        reg.commit_graph_to_name(Duration::from_secs(1), leaf_ga, || leaf_g, &name("leaf"));
+        let (_, leaf_ga) = commit_named(&mut reg, Duration::from_secs(1), &leaf_g, &name("leaf"));
         let mut root_g = TestGraph::default();
         root_g.add_node(named_ref("leaf", leaf_ga));
-        let root_ga = gantz_ca::graph_addr(&root_g);
-        let root_ca =
-            reg.commit_graph_to_name(Duration::from_secs(2), root_ga, || root_g, &name("root"));
+        let (root_ca, root_ga) =
+            commit_named(&mut reg, Duration::from_secs(2), &root_g, &name("root"));
         crate::section::set_description(&mut reg, name("root"), "the root".to_string());
         let mut view = crate::SceneView::default();
         view.layout
             .insert(egui_graph::NodeId(0), egui::pos2(5.0, 6.0));
         crate::section::set_view(&mut reg, root_ca, &view);
 
-        let get_node = |ca: &ContentAddr| {
-            reg.graph(&GraphAddr::from(*ca))
-                .map(|g| g as &dyn gantz_core::Node)
-        };
         let heads = [
             gantz_ca::Head::Branch(name("root")),
             gantz_ca::Head::Branch(name("leaf")),
         ];
-        let text = export_heads_sexpr(&get_node, &reg, heads.iter()).unwrap();
+        let text = export_heads_sexpr::<Box<dyn TestNode>>(&reg, heads.iter()).unwrap();
 
         let parsed =
             parse_export_at::<Box<dyn TestNode>>(text.as_bytes(), Duration::from_secs(9)).unwrap();
-        let mut fresh = gantz_ca::Registry::<TestGraph>::default();
+        let mut fresh = gantz_ca::Registry::<DataGraph>::default();
         let report = fresh.merge(parsed);
         assert_eq!(report.heads_added.len(), 2);
         assert!(fresh.graph(&leaf_ga).is_some());

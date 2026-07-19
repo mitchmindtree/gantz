@@ -9,7 +9,7 @@ use bevy_gantz_plyphon::{DspConfig, DspStatus, PlyphonPlugin};
 use gantz_core::node::{AsRefNode, Ref};
 use gantz_plyphon::{NodeDsp, ToNodeDsp};
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct TestNode;
 
 impl gantz_core::Node for TestNode {
@@ -30,6 +30,8 @@ impl AsRefNode for TestNode {
     }
 }
 
+// Builtin content addresses keep the typed-CaHash scheme (see
+// `bevy_gantz::builtin`).
 impl gantz_ca::CaHash for TestNode {
     fn hash(&self, hasher: &mut gantz_ca::Hasher) {
         hasher.update(b"test.node");

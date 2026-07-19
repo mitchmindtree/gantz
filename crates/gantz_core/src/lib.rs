@@ -13,7 +13,6 @@ pub mod diagnostic;
 pub mod edge;
 pub mod graph;
 pub mod node;
-pub mod reg;
 pub mod visit;
 pub mod vm;
 

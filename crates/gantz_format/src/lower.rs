@@ -13,19 +13,24 @@ use crate::model::{
     Addr, CommitDecl, Document, Form, GraphBody, GraphDef, NameDecl, NodeDecl, NodeSpec, RefSpec,
     SectionKey,
 };
-use gantz_ca::{CaHash, Commit, CommitAddr, ContentAddr, GraphAddr, Key, Registry, Timestamp};
+use gantz_ca::{Commit, CommitAddr, ContentAddr, DataGraph, GraphAddr, Key, Registry, Timestamp};
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::{Graph, NodeIx};
 use gantz_core::node::{Input, Output};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 /// The result of lowering a [`Document`]: the registry plus the resolution
 /// context and preserved extra forms an extender needs.
-pub struct Loaded<N> {
+///
+/// The registry stores graphs in their erased data form (see
+/// [`gantz_core::data`]); the node-set type the document was lowered
+/// through is only the codec, not part of the result.
+pub struct Loaded {
     /// The content-addressed registry.
-    pub registry: Registry<Graph<N>>,
+    pub registry: Registry<DataGraph>,
     /// graph id -> head commit.
     pub graph_head: HashMap<Addr, CommitAddr>,
     /// graph id -> node label -> node index.
@@ -58,11 +63,11 @@ struct Resolve<'a> {
 
 /// Lower a parsed [`Document`] into a [`Loaded`] registry, synthesising root
 /// commits at `now` for any graph the `(commits ...)` table does not describe.
-pub fn lower<N>(doc: Document, now: Timestamp) -> Result<Loaded<N>, FormatError>
+pub fn lower<N>(doc: Document, now: Timestamp) -> Result<Loaded, FormatError>
 where
-    N: DeserializeOwned + CaHash + 'static,
+    N: Serialize + DeserializeOwned + gantz_core::Node,
 {
-    lower_seeded(doc, now, &BTreeMap::new())
+    lower_seeded::<N>(doc, now, &BTreeMap::new())
 }
 
 /// [`lower`], resolving names the document does not define through `seed`
@@ -76,12 +81,12 @@ pub fn lower_seeded<N>(
     doc: Document,
     now: Timestamp,
     seed: &BTreeMap<String, GraphAddr>,
-) -> Result<Loaded<N>, FormatError>
+) -> Result<Loaded, FormatError>
 where
-    // `'static` is required by content-addressing (`Registry::add_graph`), whose
-    // `for<'a> &'a Graph<N>` bound only holds for all `'a` when `N: 'static`.
-    // Lowering only ever *deserializes* nodes, hence no `Serialize` bound.
-    N: DeserializeOwned + CaHash + 'static,
+    // Nodes are deserialized through the node set's serde, then erased back
+    // to data for storage (`Serialize` + `Node` are `gantz_core::data::erase`'s
+    // requirements). Registry addresses are always computed on the erased form.
+    N: Serialize + DeserializeOwned + gantz_core::Node,
 {
     let Document {
         graphs,
@@ -115,7 +120,7 @@ where
         compute_name_to_graph_id(&graphs, &name_decls, &commit_for_graph, &graph_of_commit);
     let order = topo_order(&graphs, &graphs_by_id, &name_to_graph_id)?;
 
-    let mut registry: Registry<Graph<N>> = Registry::default();
+    let mut registry: Registry<DataGraph> = Registry::default();
     let mut names: HashMap<String, CommitAddr> = HashMap::new();
     let mut name_graphs: HashMap<String, GraphAddr> = HashMap::new();
     let mut commit_ids: HashMap<Addr, CommitAddr> = HashMap::new();
@@ -134,7 +139,11 @@ where
             seed,
         };
         let (graph, index_map) = build_graph::<N>(&def.body, &resolve)?;
-        let g_addr = registry.add_graph(graph);
+        // Erase the typed graph for storage: registry graph addresses are
+        // always computed on the erased form.
+        let data_graph = gantz_core::data::erase(&graph)
+            .map_err(|e| FormatError::node_deserialize("?", e.to_string()))?;
+        let g_addr = registry.add_graph(data_graph);
         known_graphs.push(g_addr);
         index.insert(id.clone(), index_map);
 
@@ -329,8 +338,8 @@ fn resolve_ref_value(refspec: &RefSpec, resolve: &Resolve) -> Result<Datum, Form
 
 /// Build the head commit described by `decl`, pointing at `g_addr` (the graph
 /// it references, which has just been built).
-fn build_commit<N>(
-    registry: &mut Registry<Graph<N>>,
+fn build_commit(
+    registry: &mut Registry<DataGraph>,
     decl: &CommitDecl,
     g_addr: gantz_ca::GraphAddr,
     commit_ids: &HashMap<Addr, CommitAddr>,

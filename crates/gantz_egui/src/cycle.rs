@@ -8,8 +8,8 @@
 //! load-time `CycleInRefs` check.
 
 use crate::sync::AsNamedRef;
-use gantz_ca::{Name, Registry};
-use gantz_core::node::graph::Graph;
+use gantz_ca::{DataGraph, Name, Registry};
+use gantz_core::data::ReifiedGraphs;
 use std::collections::HashSet;
 
 /// Whether inserting a reference to the graph named `target` into the graph
@@ -17,8 +17,15 @@ use std::collections::HashSet;
 ///
 /// A cycle exists when `editing` is reachable from `target` through named
 /// references at any depth - including the trivial `target == editing`. Names
-/// that resolve to no graph (e.g. builtins) simply contribute no edges.
-pub fn would_cycle<N>(registry: &Registry<Graph<N>>, target: &Name, editing: &Name) -> bool
+/// that resolve to no graph (e.g. builtins) simply contribute no edges. The
+/// walk reads `NamedRef` names, so it goes through the reified cache: a graph
+/// missing from the cache likewise contributes no edges.
+pub fn would_cycle<N>(
+    registry: &Registry<DataGraph>,
+    reified: &ReifiedGraphs<N>,
+    target: &Name,
+    editing: &Name,
+) -> bool
 where
     N: AsNamedRef,
 {
@@ -31,10 +38,10 @@ where
         if !visited.insert(name) {
             continue;
         }
-        let Some(graph) = registry.named_commit(name).map(|c| c.graph) else {
+        let Some(graph_addr) = registry.named_commit(name).map(|c| c.graph) else {
             continue;
         };
-        let Some(graph) = registry.graph(&graph) else {
+        let Some(graph) = reified.get(&graph_addr) else {
             continue;
         };
         for weight in graph.node_weights() {
@@ -49,41 +56,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::NamedRef;
+    use crate::test_node::{TestGraph, TestNode, named_ref};
 
     fn name(s: &str) -> Name {
         s.parse().unwrap()
     }
 
     /// Commit a graph of `NamedRef`s (one per referenced name) under `name`.
-    fn commit_named_refs(
-        registry: &mut Registry<Graph<NamedRef>>,
-        graph_name: &str,
-        refs: &[&str],
-    ) {
-        let mut graph = Graph::<NamedRef>::default();
+    fn commit_named_refs(registry: &mut Registry<DataGraph>, graph_name: &str, refs: &[&str]) {
+        let mut graph = TestGraph::default();
         for &r in refs {
             // The referenced content address is irrelevant to the name-based
             // walk; point each ref at the target name's head graph if known,
             // else a placeholder derived from an empty graph.
-            let ca: gantz_ca::ContentAddr = registry
+            let ga: gantz_ca::GraphAddr = registry
                 .named_commit(&name(r))
-                .map(|c| c.graph.into())
-                .unwrap_or_else(|| gantz_ca::graph_addr(&Graph::<NamedRef>::default()).into());
-            graph.add_node(NamedRef::new(name(r), gantz_core::node::Ref::new(ca)));
+                .map(|c| c.graph)
+                .unwrap_or_else(|| {
+                    gantz_core::data::erase_with_addr(&TestGraph::default())
+                        .unwrap()
+                        .1
+                });
+            graph.add_node(named_ref(r, ga));
         }
-        let graph_ca = gantz_ca::graph_addr(&graph);
+        let (data_graph, graph_ca) = gantz_core::data::erase_with_addr(&graph).unwrap();
         registry.commit_graph_to_name(
             std::time::Duration::ZERO,
             graph_ca,
-            || graph,
+            || data_graph,
             &name(graph_name),
         );
     }
 
     #[test]
     fn detects_cycles_by_name() {
-        let mut registry = Registry::<Graph<NamedRef>>::default();
+        let mut registry = Registry::<DataGraph>::default();
         // `a` references `b`; `b` references `a`.
         commit_named_refs(&mut registry, "b", &[]);
         commit_named_refs(&mut registry, "a", &["b"]);
@@ -91,13 +98,21 @@ mod tests {
         // An unrelated standalone graph.
         commit_named_refs(&mut registry, "c", &[]);
 
+        let mut reified = ReifiedGraphs::<Box<dyn TestNode>>::new();
+        assert!(reified.ensure_all(&registry).is_empty());
+
         // Self-reference.
-        assert!(would_cycle(&registry, &name("a"), &name("a")));
+        assert!(would_cycle(&registry, &reified, &name("a"), &name("a")));
         // `b` reaches `a`, so referencing `b` from `a` closes the loop.
-        assert!(would_cycle(&registry, &name("b"), &name("a")));
+        assert!(would_cycle(&registry, &reified, &name("b"), &name("a")));
         // `c` references nothing - safe.
-        assert!(!would_cycle(&registry, &name("c"), &name("a")));
+        assert!(!would_cycle(&registry, &reified, &name("c"), &name("a")));
         // An unknown / builtin name resolves to no graph - safe.
-        assert!(!would_cycle(&registry, &name("not-a-name"), &name("a")));
+        assert!(!would_cycle(
+            &registry,
+            &reified,
+            &name("not-a-name"),
+            &name("a")
+        ));
     }
 }

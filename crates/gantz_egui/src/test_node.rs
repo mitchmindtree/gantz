@@ -43,3 +43,16 @@ pub fn named_ref(name: &str, graph_ca: gantz_ca::GraphAddr) -> Box<dyn TestNode>
     let ref_ = gantz_core::node::Ref::new(graph_ca.into());
     Box::new(NamedRef::new(name.parse().unwrap(), ref_))
 }
+
+/// Erase `graph` and commit it under `name`, returning the new commit and the
+/// erased graph's address (the registry's identity for the graph).
+pub fn commit_named(
+    reg: &mut gantz_ca::Registry<gantz_ca::DataGraph>,
+    timestamp: std::time::Duration,
+    graph: &TestGraph,
+    name: &gantz_ca::Name,
+) -> (gantz_ca::CommitAddr, gantz_ca::GraphAddr) {
+    let (dg, ga) = gantz_core::data::erase_with_addr(graph).unwrap();
+    let ca = reg.commit_graph_to_name(timestamp, ga, || dg, name);
+    (ca, ga)
+}

@@ -9,7 +9,9 @@ use crate::node::{FnNodeNames, NameRegistry};
 use crate::widget::gantz::NodeTypeRegistry;
 use crate::widget::graph_select::GraphRegistry;
 use gantz_ca as ca;
-use gantz_core::node::{self, graph::Graph};
+use gantz_ca::DataGraph;
+use gantz_core::data::ReifiedGraphs;
+use gantz_core::node;
 use gantz_core::{Builtins, Node};
 use petgraph::visit::{IntoNodeReferences, NodeRef};
 use std::borrow::Cow;
@@ -17,11 +19,13 @@ use std::collections::BTreeMap;
 
 /// Registry reference providing unified node access.
 ///
-/// Combines access to a content-addressed registry (for user-defined graphs)
-/// with builtin nodes, implementing all the registry traits required by
+/// Combines access to a content-addressed registry (for user-defined graphs,
+/// stored as data), the reified-graph cache serving those graphs as typed
+/// nodes, and builtin nodes, implementing all the registry traits required by
 /// gantz_egui widgets.
 pub struct RegistryRef<'a, N: 'static + Send + Sync> {
-    ca_registry: &'a ca::Registry<Graph<N>>,
+    ca_registry: &'a ca::Registry<DataGraph>,
+    reified: &'a ReifiedGraphs<N>,
     builtins: &'a dyn Builtins<Node = N>,
 }
 
@@ -29,20 +33,28 @@ pub struct RegistryRef<'a, N: 'static + Send + Sync> {
 pub type Names = BTreeMap<ca::Name, ca::CommitAddr>;
 
 impl<'a, N: 'static + Send + Sync> RegistryRef<'a, N> {
-    /// Construct from a CA registry and builtins provider.
+    /// Construct from a CA registry, its reified-graph cache and a builtins
+    /// provider.
     pub fn new(
-        ca_registry: &'a ca::Registry<Graph<N>>,
+        ca_registry: &'a ca::Registry<DataGraph>,
+        reified: &'a ReifiedGraphs<N>,
         builtins: &'a dyn Builtins<Node = N>,
     ) -> Self {
         Self {
             ca_registry,
+            reified,
             builtins,
         }
     }
 
     /// Access the underlying CA registry.
-    pub fn ca_registry(&self) -> &ca::Registry<Graph<N>> {
+    pub fn ca_registry(&self) -> &ca::Registry<DataGraph> {
         self.ca_registry
+    }
+
+    /// Access the reified-graph cache.
+    pub fn reified(&self) -> &ReifiedGraphs<N> {
+        self.reified
     }
 
     /// Access the builtins provider.
@@ -54,11 +66,11 @@ impl<'a, N: 'static + Send + Sync> RegistryRef<'a, N> {
 impl<N: 'static + Node + Send + Sync> RegistryRef<'_, N> {
     /// Look up a node by content address.
     ///
-    /// Checks graphs in the registry first (a graph in the registry IS a
+    /// Checks reified registry graphs first (a graph in the registry IS a
     /// node), then falls back to builtins.
     pub fn node(&self, ca: &ca::ContentAddr) -> Option<&dyn Node> {
         let graph_ca = ca::GraphAddr::from(*ca);
-        if let Some(graph) = self.ca_registry.graph(&graph_ca) {
+        if let Some(graph) = self.reified.get(&graph_ca) {
             return Some(graph as &dyn Node);
         }
         self.builtins.instance(ca).map(|n| n as &dyn Node)
@@ -167,7 +179,13 @@ impl<N: 'static + Node + Send + Sync> FnNodeNames for RegistryRef<'_, N> {
 
 impl<N> Registry for RegistryRef<'_, N>
 where
-    N: 'static + Node + crate::NodeUi + crate::sync::AsNamedRef + Clone + ca::CaHash + Send + Sync,
+    N: 'static
+        + Node
+        + crate::NodeUi
+        + crate::sync::AsNamedRef
+        + serde::de::DeserializeOwned
+        + Send
+        + Sync,
 {
     fn node(&self, ca: &ca::ContentAddr) -> Option<&dyn Node> {
         RegistryRef::node(self, ca)
@@ -176,7 +194,7 @@ where
     fn would_ref_cycle(&self, target: &str, editing: &str) -> bool {
         let target: ca::Name = target.parse().expect("infallible");
         let editing: ca::Name = editing.parse().expect("infallible");
-        crate::cycle::would_cycle(self.ca_registry, &target, &editing)
+        crate::cycle::would_cycle(self.ca_registry, self.reified, &target, &editing)
     }
 
     fn demo_graph(&self, name: &str) -> Option<String> {
@@ -196,7 +214,7 @@ where
         // Resolve the referenced graph and read the ix-th inlet/outlet marker's
         // own doc (docs live on the `Inlet`/`Outlet` nodes).
         let graph_ca = ca::GraphAddr::from(*ca);
-        let graph = self.ca_registry.graph(&graph_ca)?;
+        let graph = self.reified.get(&graph_ca)?;
         let get_node = |c: &ca::ContentAddr| self.node(c);
         let meta_ctx = node::MetaCtx::new(&get_node);
         let node_ref = graph
@@ -244,7 +262,7 @@ where
         if let Some(graph_addr) = head_graph_addr(self.ca_registry, &parsed) {
             // A named graph: socket docs resolved from the referenced graph's
             // inlet/outlet markers.
-            if let Some(graph) = self.ca_registry.graph(&graph_addr) {
+            if let Some(graph) = self.reified.get(&graph_addr) {
                 let ca: ca::ContentAddr = graph_addr.into();
                 let socket =
                     |kind: SocketKind, ix: usize| Registry::socket_doc(self, &ca, kind, ix);
@@ -276,7 +294,7 @@ where
         source: &str,
         resolutions: ca::Resolutions,
     ) -> Option<crate::merge::MergePreview> {
-        crate::merge::merge_preview(self.ca_registry, ours, source, resolutions)
+        crate::merge::merge_preview(self.ca_registry, self.reified, ours, source, resolutions)
     }
 
     fn node_description(&self, name: &str) -> Option<Cow<'static, str>> {
@@ -298,7 +316,7 @@ where
 
 /// The graph address at the tip of the named line of history: the address a
 /// [`Ref`](gantz_core::node::Ref) to the name should pin.
-pub fn head_graph_addr<G>(reg: &ca::Registry<G>, name: &ca::Name) -> Option<ca::GraphAddr> {
+pub fn head_graph_addr(reg: &ca::Registry<DataGraph>, name: &ca::Name) -> Option<ca::GraphAddr> {
     let head_ca = reg.head(name)?;
     reg.commits().get(&head_ca).map(|commit| commit.graph)
 }

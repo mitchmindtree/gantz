@@ -18,7 +18,9 @@
 //! covers `gantz_core`'s). The `_with` variants accept any `&dyn Sugar`
 //! explicitly (compose with [`Sugars`]), still falling back to the generic
 //! `(node ...)` form. Any node type that is `Serialize + DeserializeOwned +
-//! CaHash` works.
+//! gantz_core::Node` works: the registry stores graphs in their erased data
+//! form ([`gantz_ca::DataGraph`]), and the node-set type is the codec the
+//! text forms travel through (see [`gantz_core::data`]).
 
 mod datum;
 mod error;
@@ -48,8 +50,8 @@ pub use sugar::{CoreSugar, NodeSugar, Sugar, SugarArgs, Sugars};
 #[doc(hidden)]
 pub use gantz_nodetag::NodeTag;
 
-use gantz_ca::{CaHash, Registry, Timestamp};
-use gantz_core::node::graph::Graph;
+use gantz_ca::{DataGraph, Registry, Timestamp};
+use gantz_core::Node;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -58,11 +60,11 @@ use serde::de::DeserializeOwned;
 ///
 /// `now` provides the timestamp for any graph the `(commits ...)` table does not
 /// describe (hand-authored graphs with no commit entry).
-pub fn from_str<N>(text: &str, now: Timestamp) -> Result<Loaded<N>, FormatError>
+pub fn from_str<N>(text: &str, now: Timestamp) -> Result<Loaded, FormatError>
 where
-    N: Serialize + DeserializeOwned + CaHash + NodeSugar + 'static,
+    N: Serialize + DeserializeOwned + Node + NodeSugar,
 {
-    from_str_with(text, now, &N::sugar())
+    from_str_with::<N>(text, now, &N::sugar())
 }
 
 /// Parse a `.gantz` document using a custom keyword [`Sugar`] (compose with
@@ -71,12 +73,12 @@ pub fn from_str_with<N>(
     text: &str,
     now: Timestamp,
     sugar: &dyn Sugar,
-) -> Result<Loaded<N>, FormatError>
+) -> Result<Loaded, FormatError>
 where
-    N: Serialize + DeserializeOwned + CaHash + 'static,
+    N: Serialize + DeserializeOwned + Node,
 {
     let doc = parse::parse(text, sugar)?;
-    lower::lower(doc, now)
+    lower::lower::<N>(doc, now)
 }
 
 /// [`from_str`], resolving names the document does not define through `seed`
@@ -91,12 +93,12 @@ pub fn from_str_seeded<N>(
     text: &str,
     now: Timestamp,
     seed: &std::collections::BTreeMap<String, gantz_ca::GraphAddr>,
-) -> Result<Loaded<N>, FormatError>
+) -> Result<Loaded, FormatError>
 where
-    N: Serialize + DeserializeOwned + CaHash + NodeSugar + 'static,
+    N: Serialize + DeserializeOwned + Node + NodeSugar,
 {
     let doc = parse::parse(text, &N::sugar())?;
-    lower::lower_seeded(doc, now, seed)
+    lower::lower_seeded::<N>(doc, now, seed)
 }
 
 /// Serialize a registry to `.gantz` text (with gantz's built-in node keywords),
@@ -106,23 +108,23 @@ where
 /// Metadata sections are written as generic `(section ...)` forms, except
 /// the ids in `claimed`, which the caller renders itself with friendly
 /// forms (e.g. `(descriptions ...)`).
-pub fn to_string<N>(registry: &Registry<Graph<N>>, claimed: &[&str]) -> Result<Dumped, FormatError>
+pub fn to_string<N>(registry: &Registry<DataGraph>, claimed: &[&str]) -> Result<Dumped, FormatError>
 where
     N: Serialize + DeserializeOwned + NodeSugar,
 {
-    to_string_with(registry, &N::sugar(), claimed)
+    to_string_with::<N>(registry, &N::sugar(), claimed)
 }
 
 /// Serialize a registry to `.gantz` text using a custom keyword [`Sugar`].
 pub fn to_string_with<N>(
-    registry: &Registry<Graph<N>>,
+    registry: &Registry<DataGraph>,
     sugar: &dyn Sugar,
     claimed: &[&str],
 ) -> Result<Dumped, FormatError>
 where
     N: Serialize + DeserializeOwned,
 {
-    raise::raise(registry, sugar, claimed)
+    raise::raise::<N>(registry, sugar, claimed)
 }
 
 /// Serialize a registry in the inline-name format: each named graph is emitted
@@ -130,25 +132,25 @@ where
 /// references resolved by name. Intended for hand-editable, churn-free files
 /// such as the baked-in base. See [`to_string`] for `claimed`.
 pub fn to_string_named<N>(
-    registry: &Registry<Graph<N>>,
+    registry: &Registry<DataGraph>,
     claimed: &[&str],
 ) -> Result<Dumped, FormatError>
 where
     N: Serialize + DeserializeOwned + NodeSugar,
 {
-    to_string_named_with(registry, &N::sugar(), claimed)
+    to_string_named_with::<N>(registry, &N::sugar(), claimed)
 }
 
 /// As [`to_string_named`], with a custom keyword [`Sugar`].
 pub fn to_string_named_with<N>(
-    registry: &Registry<Graph<N>>,
+    registry: &Registry<DataGraph>,
     sugar: &dyn Sugar,
     claimed: &[&str],
 ) -> Result<Dumped, FormatError>
 where
     N: Serialize + DeserializeOwned,
 {
-    raise::raise_named(registry, sugar, claimed)
+    raise::raise_named::<N>(registry, sugar, claimed)
 }
 
 #[cfg(test)]
@@ -159,30 +161,29 @@ mod tests {
     //! `(node "Tag" ...)` form. This guards that property.
 
     use super::*;
-    use gantz_ca::{CaHash, Hasher};
     use gantz_nodetag::NodeTag;
     use serde::{Deserialize, Serialize};
 
     // A self-contained node-set with one node type that implements neither
     // `NodeSugar` nor any `Sugar` - it carries no first-class keyword at all.
-    trait Widget: std::any::Any + CaHash {}
+    trait Widget: std::any::Any + Node {}
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, NodeTag)]
     struct Knob {
         value: i64,
     }
 
-    impl CaHash for Knob {
-        fn hash(&self, hasher: &mut Hasher) {
-            self.value.hash(hasher);
+    impl Node for Knob {
+        fn expr(&self, _: gantz_core::node::ExprCtx) -> gantz_core::node::ExprResult {
+            unimplemented!("not compiled in these tests")
         }
     }
 
     impl Widget for Knob {}
 
     // `Box<dyn Widget>` is the node-set type `N`: `impl_node_set_serde!`
-    // supplies its Serialize/Deserialize, and `gantz_ca`'s blanket
-    // `CaHash for Box<T>` covers the rest. It implements no `NodeSugar`.
+    // supplies its Serialize/Deserialize, and `gantz_core`'s blanket
+    // `Node for Box<T>` covers the rest. It implements no `NodeSugar`.
     crate::impl_node_set_serde! {
         dyn Widget {
             Knob,
@@ -200,8 +201,8 @@ mod tests {
         // `from_str`/`to_string` would instead require a `NodeSugar` impl.)
         let loaded = from_str_with::<Box<dyn Widget>>(text, std::time::Duration::ZERO, &CoreSugar)
             .expect("parse without NodeSugar");
-        let dumped =
-            to_string_with(&loaded.registry, &CoreSugar, &[]).expect("write without NodeSugar");
+        let dumped = to_string_with::<Box<dyn Widget>>(&loaded.registry, &CoreSugar, &[])
+            .expect("write without NodeSugar");
 
         // The node survived the round-trip through the generic form.
         assert!(
@@ -216,7 +217,7 @@ mod tests {
             from_str_with::<Box<dyn Widget>>(&dumped.text, std::time::Duration::ZERO, &CoreSugar)
                 .expect("reparse");
         assert_eq!(
-            to_string_with(&reloaded.registry, &CoreSugar, &[])
+            to_string_with::<Box<dyn Widget>>(&reloaded.registry, &CoreSugar, &[])
                 .expect("rewrite")
                 .text,
             dumped.text,
@@ -249,7 +250,8 @@ mod tests {
 
         // The merge parent survives a write + reparse; non-merge commits carry
         // no `merge-parents` clause.
-        let dumped = to_string_with(&loaded.registry, &CoreSugar, &[]).expect("write merge commit");
+        let dumped = to_string_with::<Box<dyn Widget>>(&loaded.registry, &CoreSugar, &[])
+            .expect("write merge commit");
         assert_eq!(dumped.text.matches("(merge-parents").count(), 1);
         let reloaded =
             from_str_with::<Box<dyn Widget>>(&dumped.text, std::time::Duration::ZERO, &CoreSugar)
@@ -267,13 +269,12 @@ mod tests {
 #[cfg(test)]
 mod seed_tests {
     use super::*;
-    use gantz_ca::{CaHash, Hasher};
     use gantz_nodetag::NodeTag;
     use serde::{Deserialize, Serialize};
 
     // A ref-capable node set: one type matching the wire tag the format's
     // ref lowering produces.
-    trait RefNode: std::any::Any + CaHash {}
+    trait RefNode: std::any::Any + Node {}
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, NodeTag)]
     #[tag("NamedRef")]
@@ -284,10 +285,13 @@ mod seed_tests {
         sync: bool,
     }
 
-    impl CaHash for TestRef {
-        fn hash(&self, hasher: &mut Hasher) {
-            CaHash::hash(&self.ref_, hasher);
-            hasher.update(self.name.as_bytes());
+    impl Node for TestRef {
+        fn expr(&self, _: gantz_core::node::ExprCtx) -> gantz_core::node::ExprResult {
+            unimplemented!("not compiled in these tests")
+        }
+
+        fn required_addrs(&self) -> Vec<gantz_ca::ContentAddr> {
+            vec![self.ref_.content_addr()]
         }
     }
 
@@ -309,12 +313,14 @@ mod seed_tests {
         gantz_ca::GraphAddr::from(gantz_ca::ContentAddr::from([7u8; 32]))
     }
 
-    fn ref_addr_of(loaded: &Loaded<Box<dyn RefNode>>, name: &str) -> gantz_ca::ContentAddr {
+    fn ref_addr_of(loaded: &Loaded, name: &str) -> gantz_ca::ContentAddr {
         let commit = loaded.names[name];
-        let graph = loaded
+        let data_graph = loaded
             .registry
             .commit_graph_ref(&commit)
             .expect("graph for name");
+        let graph: gantz_core::node::graph::Graph<Box<dyn RefNode>> =
+            gantz_core::data::reify(data_graph).expect("reify through the node set");
         let node = graph
             .node_indices()
             .find_map(|ix| (&*graph[ix] as &dyn std::any::Any).downcast_ref::<TestRef>())

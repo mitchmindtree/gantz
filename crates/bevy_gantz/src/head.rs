@@ -3,10 +3,11 @@
 //! This module provides Bevy components and resources for managing open graph
 //! heads as entities rather than parallel `Vec`s.
 
-use crate::reg::Registry;
+use crate::reg::{GraphCache, Registry};
 use bevy_ecs::{prelude::*, query::QueryData};
 use bevy_log as log;
 use gantz_ca as ca;
+use serde::de::DeserializeOwned;
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
@@ -321,6 +322,24 @@ pub fn set_description<G>(reg: &mut ca::Registry<G>, name: ca::Name, description
     }
 }
 
+/// Resolve the head's committed graph as a typed working copy.
+///
+/// Ensures the graph (and its transitive references) is reified into the
+/// cache on the hard-error path: any failure to reify logs and returns
+/// `None`, so callers leave their state unchanged.
+fn head_working_graph<N: Clone + DeserializeOwned>(
+    registry: &Registry,
+    cache: &mut GraphCache<N>,
+    head: &ca::Head,
+) -> Option<gantz_core::node::graph::Graph<N>> {
+    let addr = registry.head_commit(head)?.graph;
+    if let Err(e) = cache.ensure(registry, [addr.into()]) {
+        log::error!("failed to reify graph for head {head:?}: {e}");
+        return None;
+    }
+    cache.get(&addr).cloned()
+}
+
 /// Check if the given head is the currently focused head.
 pub fn is_focused(
     head: &ca::Head,
@@ -340,12 +359,13 @@ pub fn is_focused(
 pub fn on_open<N>(
     trigger: On<OpenEvent>,
     mut cmds: Commands,
-    registry: Res<Registry<N>>,
+    registry: Res<Registry>,
+    mut cache: ResMut<GraphCache<N>>,
     mut tab_order: ResMut<HeadTabOrder>,
     mut focused: ResMut<FocusedHead>,
     heads: Query<(Entity, &HeadRef), With<OpenHead>>,
 ) where
-    N: 'static + Clone + Send + Sync,
+    N: 'static + Clone + DeserializeOwned + Send + Sync,
 {
     let OpenEvent(new_head) = trigger.event();
 
@@ -355,9 +375,9 @@ pub fn on_open<N>(
         return;
     }
 
-    // Get graph from registry.
-    let Some(graph) = registry.head_graph(new_head).cloned() else {
-        log::error!("cannot open head: graph missing from registry");
+    // Reify the head's graph from the registry.
+    let Some(graph) = head_working_graph(&registry, &mut cache, new_head) else {
+        log::error!("cannot open head: graph missing or failed to reify");
         return;
     };
 
@@ -382,12 +402,13 @@ pub fn on_open<N>(
 pub fn on_replace<N>(
     trigger: On<ReplaceEvent>,
     mut cmds: Commands,
-    registry: Res<Registry<N>>,
+    registry: Res<Registry>,
+    mut cache: ResMut<GraphCache<N>>,
     mut focused: ResMut<FocusedHead>,
     mut vms: NonSendMut<HeadVms>,
     heads: Query<(Entity, &HeadRef), With<OpenHead>>,
 ) where
-    N: 'static + Clone + ca::CaHash + Send + Sync,
+    N: 'static + Clone + DeserializeOwned + Send + Sync,
 {
     let ReplaceEvent(new_head) = trigger.event();
 
@@ -402,9 +423,9 @@ pub fn on_replace<N>(
     };
     let old_head = heads.get(focused_entity).ok().map(|(_, h)| (**h).clone());
 
-    // Get new graph.
-    let Some(graph) = registry.head_graph(new_head).cloned() else {
-        log::error!("cannot replace head: graph missing from registry");
+    // Reify the new head's graph from the registry.
+    let Some(graph) = head_working_graph(&registry, &mut cache, new_head) else {
+        log::error!("cannot replace head: graph missing or failed to reify");
         return;
     };
 
@@ -449,16 +470,14 @@ pub fn on_replace<N>(
 }
 
 /// Handle request to close a head tab.
-pub fn on_close<N>(
+pub fn on_close(
     trigger: On<CloseEvent>,
     mut cmds: Commands,
     mut tab_order: ResMut<HeadTabOrder>,
     mut focused: ResMut<FocusedHead>,
     mut vms: NonSendMut<HeadVms>,
     heads: Query<(Entity, &HeadRef), With<OpenHead>>,
-) where
-    N: 'static + Send + Sync,
-{
+) {
     let CloseEvent(head) = trigger.event();
 
     // Don't close if last head.
@@ -492,14 +511,12 @@ pub fn on_close<N>(
 }
 
 /// Handle request to create a new branch from an existing head.
-pub fn on_branch_head<N>(
+pub fn on_branch_head(
     trigger: On<BranchHeadEvent>,
     mut cmds: Commands,
-    mut registry: ResMut<Registry<N>>,
+    mut registry: ResMut<Registry>,
     mut heads: Query<(Entity, &mut HeadRef), With<OpenHead>>,
-) where
-    N: 'static + Send + Sync,
-{
+) {
     let BranchHeadEvent { original, new_name } = trigger.event();
     let new_name: ca::Name = new_name.parse().expect("infallible");
 
@@ -551,10 +568,11 @@ pub fn on_branch_head<N>(
 pub fn on_move_branch<N>(
     trigger: On<MoveBranchEvent>,
     mut cmds: Commands,
-    mut registry: ResMut<Registry<N>>,
+    mut registry: ResMut<Registry>,
+    mut cache: ResMut<GraphCache<N>>,
     mut vms: NonSendMut<HeadVms>,
 ) where
-    N: 'static + Clone + ca::CaHash + Send + Sync,
+    N: 'static + Clone + DeserializeOwned + Send + Sync,
 {
     let event = trigger.event();
     let head = ca::Head::Branch(event.name.clone());
@@ -563,9 +581,18 @@ pub fn on_move_branch<N>(
     // state below.
     let old_ca = registry.head_commit_ca(&head);
     let old_graph = registry.head_commit(&head).map(|c| c.graph);
-    registry.set_head(event.name.clone(), event.target);
-    let Some(graph) = registry.head_graph(&head).cloned() else {
-        log::error!("MoveBranch: graph missing for target commit");
+    let prev = registry.set_head(event.name.clone(), event.target);
+    let Some(graph) = head_working_graph(&registry, &mut cache, &head) else {
+        log::error!("MoveBranch: graph missing or failed to reify for target commit");
+        // Leave state unchanged: restore the branch pointer.
+        match prev {
+            Some(ca) => {
+                registry.set_head(event.name.clone(), ca);
+            }
+            None => {
+                registry.remove_head(&event.name);
+            }
+        }
         return;
     };
     // When the target shares the old commit's graph content (a layout-only

@@ -26,6 +26,7 @@ use petgraph::Direction;
 use petgraph::visit::EdgeRef;
 
 use gantz_ca::ContentAddr;
+use gantz_core::data::ReifiedGraphs;
 use gantz_core::node::graph::{Graph, NodeIx};
 use gantz_core::node::{AsRefNode, MetaCtx};
 use plyphon::Rate;
@@ -58,21 +59,21 @@ struct Memos {
     outlet_stack: Vec<(ContentAddr, usize)>,
 }
 
-/// Classify `graph`'s root-level ports, resolving references through
-/// `registry` and attaching the [`PortShape`]s recorded in `shapes` (the
+/// Classify `graph`'s root-level ports, resolving references through the
+/// `reified` cache and attaching the [`PortShape`]s recorded in `shapes` (the
 /// union of the head's derived parts' shapes, keyed by node paths absolute
 /// to `graph` - see [`PortShapes`]).
 pub fn root_port_info<N>(
     graph: &Graph<N>,
-    registry: &gantz_ca::Registry<Graph<N>>,
+    reified: &ReifiedGraphs<N>,
     shapes: &PortShapes,
 ) -> RootPortInfo
 where
     N: gantz_core::Node + AsRefNode + ToNodeDsp,
 {
     let get_node = |ca: &ContentAddr| {
-        registry
-            .graph(&(*ca).into())
+        reified
+            .get(&(*ca).into())
             .map(|g| g as &dyn gantz_core::Node)
     };
     let ctx = MetaCtx::new(&get_node);
@@ -92,7 +93,7 @@ where
             }
         } else if let Some(r) = graph[ix].as_ref_node() {
             let ca = r.content_addr();
-            for (p, signal) in signal_inlets(registry, ctx, ca, &mut memos)
+            for (p, signal) in signal_inlets(reified, ctx, ca, &mut memos)
                 .iter()
                 .enumerate()
             {
@@ -100,8 +101,8 @@ where
                     info.signal_inputs.insert((i, p));
                 }
             }
-            for p in 0..n_outlets(registry, ctx, ca) {
-                let sources = outlet_sources(registry, ctx, ca, p, &mut memos);
+            for p in 0..n_outlets(reified, ctx, ca) {
+                let sources = outlet_sources(reified, ctx, ca, p, &mut memos);
                 if !sources.is_empty() {
                     info.signal_outputs
                         .insert((i, p), sum_shape(shapes, i, &sources));
@@ -144,7 +145,7 @@ where
 /// reference's inputs carry signals. Empty when `ca` is unresolved or
 /// re-entered (a reference cycle).
 fn signal_inlets<N>(
-    registry: &gantz_ca::Registry<Graph<N>>,
+    reified: &ReifiedGraphs<N>,
     ctx: MetaCtx,
     ca: ContentAddr,
     memos: &mut Memos,
@@ -158,7 +159,7 @@ where
     if memos.inlet_stack.contains(&ca) {
         return Vec::new();
     }
-    let Some(graph) = registry.graph(&ca.into()) else {
+    let Some(graph) = reified.get(&ca.into()) else {
         memos.inlets.insert(ca, Vec::new());
         return Vec::new();
     };
@@ -178,7 +179,7 @@ where
             if let Some(dsp) = graph[t].to_node_dsp() {
                 tp < dsp.n_dsp_inputs()
             } else if let Some(r) = graph[t].as_ref_node() {
-                signal_inlets(registry, ctx, r.content_addr(), memos)
+                signal_inlets(reified, ctx, r.content_addr(), memos)
                     .get(tp)
                     .copied()
                     .unwrap_or(false)
@@ -194,12 +195,12 @@ where
 }
 
 /// The number of outlets of the graph at `ca` (a reference's output count).
-fn n_outlets<N>(registry: &gantz_ca::Registry<Graph<N>>, ctx: MetaCtx, ca: ContentAddr) -> usize
+fn n_outlets<N>(reified: &ReifiedGraphs<N>, ctx: MetaCtx, ca: ContentAddr) -> usize
 where
     N: gantz_core::Node,
 {
-    registry
-        .graph(&ca.into())
+    reified
+        .get(&ca.into())
         .map(|g| g.node_indices().filter(|&n| g[n].outlet(ctx)).count())
         .unwrap_or(0)
 }
@@ -210,7 +211,7 @@ where
 /// (a non-DSP source, an inlet - parent-side wiring - or a cycle) contribute
 /// nothing; an empty result means the output carries no signal.
 fn outlet_sources<N>(
-    registry: &gantz_ca::Registry<Graph<N>>,
+    reified: &ReifiedGraphs<N>,
     ctx: MetaCtx,
     ca: ContentAddr,
     outlet: usize,
@@ -226,7 +227,7 @@ where
     if memos.outlet_stack.contains(&key) {
         return Vec::new();
     }
-    let Some(graph) = registry.graph(&ca.into()) else {
+    let Some(graph) = reified.get(&ca.into()) else {
         memos.outlets.insert(key, Vec::new());
         return Vec::new();
     };
@@ -249,7 +250,7 @@ where
                     sources.push((vec![s], sp));
                 }
             } else if let Some(r) = graph[six].as_ref_node() {
-                for (rel, port) in outlet_sources(registry, ctx, r.content_addr(), sp, memos) {
+                for (rel, port) in outlet_sources(reified, ctx, r.content_addr(), sp, memos) {
                     let mut path = vec![s];
                     path.extend(rel);
                     sources.push((path, port));

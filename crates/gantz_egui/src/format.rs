@@ -7,8 +7,7 @@
 //! [`gantz_format::from_str`]/[`gantz_format::to_string`], and applies those
 //! forms back into the registry's sections on parse.
 
-use gantz_ca::{CaHash, GraphAddr, Name, Registry, Timestamp};
-use gantz_core::node::graph::Graph;
+use gantz_ca::{DataGraph, GraphAddr, Name, Registry, Timestamp};
 use gantz_format::sexpr;
 use gantz_format::{Addr, Form, GraphLabels, Loaded};
 use serde::Serialize;
@@ -30,9 +29,9 @@ const CLAIMED: &[&str] = &[
 ///
 /// `now` provides the timestamp for any graph the document does not commit
 /// explicitly (hand-authored graphs).
-pub fn from_str<N>(text: &str, now: Timestamp) -> Result<Registry<Graph<N>>, FormatError>
+pub fn from_str<N>(text: &str, now: Timestamp) -> Result<Registry<DataGraph>, FormatError>
 where
-    N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
+    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
 {
     let loaded = gantz_format::from_str::<N>(text, now)?;
     Ok(registry_from_loaded(loaded))
@@ -45,9 +44,9 @@ pub fn from_str_seeded<N>(
     text: &str,
     now: Timestamp,
     seed: &std::collections::BTreeMap<String, GraphAddr>,
-) -> Result<Registry<Graph<N>>, FormatError>
+) -> Result<Registry<DataGraph>, FormatError>
 where
-    N: Serialize + DeserializeOwned + CaHash + gantz_format::NodeSugar + 'static,
+    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
 {
     let loaded = gantz_format::from_str_seeded::<N>(text, now, seed)?;
     Ok(registry_from_loaded(loaded))
@@ -55,7 +54,7 @@ where
 
 /// Apply the GUI-layer extra forms (`descriptions`, `layout`, `demo`) to a
 /// loaded registry's sections.
-fn registry_from_loaded<N: 'static>(mut loaded: Loaded<N>) -> Registry<Graph<N>> {
+fn registry_from_loaded(mut loaded: Loaded) -> Registry<DataGraph> {
     let extra = std::mem::take(&mut loaded.extra);
     for form in &extra {
         match form.head.as_str() {
@@ -68,8 +67,9 @@ fn registry_from_loaded<N: 'static>(mut loaded: Loaded<N>) -> Registry<Graph<N>>
     loaded.registry
 }
 
-/// Serialize a registry to a `.gantz` document.
-pub fn to_string<N>(registry: &Registry<Graph<N>>) -> Result<String, FormatError>
+/// Serialize a registry to a `.gantz` document, with `N` as the node-set
+/// codec for the graph forms.
+pub fn to_string<N>(registry: &Registry<DataGraph>) -> Result<String, FormatError>
 where
     N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
 {
@@ -105,7 +105,7 @@ where
 /// tables, references by name. The `(layout ...)` and `(demo ...)` forms are
 /// emitted in graph-name order so the output is stable across address changes -
 /// suited to a hand-editable, git-friendly base file.
-pub fn to_string_named<N>(registry: &Registry<Graph<N>>) -> Result<String, FormatError>
+pub fn to_string_named<N>(registry: &Registry<DataGraph>) -> Result<String, FormatError>
 where
     N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
 {
@@ -140,7 +140,7 @@ where
 
 // -- descriptions -------------------------------------------------------------
 
-fn apply_descriptions<N: 'static>(form: &Form, loaded: &mut Loaded<N>) {
+fn apply_descriptions(form: &Form, loaded: &mut Loaded) {
     let src = &form.raw;
     let Ok(forms) = sexpr::read(src) else { return };
     let Some(args) = forms.first().and_then(sexpr::list_args) else {
@@ -167,7 +167,7 @@ fn apply_descriptions<N: 'static>(form: &Form, loaded: &mut Loaded<N>) {
 
 /// The `(descriptions ...)` form for the registry's description section, in
 /// name order. `None` when there are no descriptions.
-fn descriptions_text<N>(registry: &Registry<Graph<N>>) -> Option<String> {
+fn descriptions_text(registry: &Registry<DataGraph>) -> Option<String> {
     let mut entries = crate::section::descriptions(registry).peekable();
     entries.peek()?;
     let mut s = "(descriptions".to_string();
@@ -180,7 +180,7 @@ fn descriptions_text<N>(registry: &Registry<Graph<N>>) -> Option<String> {
 
 // -- layout --------------------------------------------------------------------
 
-fn apply_layout<N: 'static>(form: &Form, loaded: &mut Loaded<N>) {
+fn apply_layout(form: &Form, loaded: &mut Loaded) {
     let src = &form.raw;
     let Ok(forms) = sexpr::read(src) else { return };
     let Some(args) = forms.first().and_then(sexpr::list_args) else {
@@ -288,7 +288,7 @@ fn layout_text(labels: &GraphLabels, view: &crate::SceneView, bare_id: bool) -> 
 
 // -- demos -------------------------------------------------------------------
 
-fn apply_demo<N: 'static>(form: &Form, loaded: &mut Loaded<N>) {
+fn apply_demo(form: &Form, loaded: &mut Loaded) {
     let src = &form.raw;
     let Ok(forms) = sexpr::read(src) else { return };
     let Some(args) = forms.first().and_then(sexpr::list_args) else {
@@ -320,7 +320,7 @@ fn addr_of(e: &sexpr::ExprKind) -> Option<Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_node::{TestGraph, TestNode, expr, named_ref};
+    use crate::test_node::{TestGraph, TestNode, commit_named, expr, named_ref};
     use gantz_ca::CommitAddr;
     use std::time::Duration;
 
@@ -330,19 +330,16 @@ mod tests {
 
     /// A registry with a `leaf` expr graph, a `root` graph referencing it,
     /// and a description, demo and view attached to `root`.
-    fn test_registry() -> (Registry<TestGraph>, CommitAddr) {
+    fn test_registry() -> (Registry<DataGraph>, CommitAddr) {
         let mut reg = Registry::default();
 
         let mut leaf_g = TestGraph::default();
         leaf_g.add_node(expr("(+ 1 1)"));
-        let leaf_ga = gantz_ca::graph_addr(&leaf_g);
-        reg.commit_graph_to_name(Duration::from_secs(1), leaf_ga, || leaf_g, &name("leaf"));
+        let (_, leaf_ga) = commit_named(&mut reg, Duration::from_secs(1), &leaf_g, &name("leaf"));
 
         let mut root_g = TestGraph::default();
         root_g.add_node(named_ref("leaf", leaf_ga));
-        let root_ga = gantz_ca::graph_addr(&root_g);
-        let root_ca =
-            reg.commit_graph_to_name(Duration::from_secs(2), root_ga, || root_g, &name("root"));
+        let (root_ca, _) = commit_named(&mut reg, Duration::from_secs(2), &root_g, &name("root"));
 
         crate::section::set_description(&mut reg, name("root"), "the root".to_string());
         crate::section::set_demo(&mut reg, name("root"), "demo-root".to_string());
@@ -360,7 +357,7 @@ mod tests {
         (reg, root_ca)
     }
 
-    fn assert_sections_survive(parsed: &Registry<TestGraph>) {
+    fn assert_sections_survive(parsed: &Registry<DataGraph>) {
         assert!(parsed.head(&name("leaf")).is_some());
         let root_ca = parsed.head(&name("root")).expect("root head survives");
         assert_eq!(
@@ -385,13 +382,13 @@ mod tests {
     #[test]
     fn sections_round_trip_through_text() {
         let (reg, root_ca) = test_registry();
-        let text = to_string(&reg).unwrap();
+        let text = to_string::<Box<dyn TestNode>>(&reg).unwrap();
         // Claimed sections must not also appear as generic forms.
         assert!(!text.contains("(section"));
         assert!(text.contains("(descriptions"));
         assert!(text.contains("(layout"));
         assert!(text.contains("(demo root"));
-        let parsed: Registry<TestGraph> =
+        let parsed: Registry<DataGraph> =
             from_str::<Box<dyn TestNode>>(&text, Duration::from_secs(9)).unwrap();
         // The commits table preserves the head commit exactly.
         assert_eq!(parsed.head(&name("root")), Some(root_ca));
@@ -403,9 +400,9 @@ mod tests {
     #[test]
     fn sections_round_trip_through_named_text() {
         let (reg, _root_ca) = test_registry();
-        let text = to_string_named(&reg).unwrap();
+        let text = to_string_named::<Box<dyn TestNode>>(&reg).unwrap();
         assert!(!text.contains("(section"));
-        let parsed: Registry<TestGraph> =
+        let parsed: Registry<DataGraph> =
             from_str::<Box<dyn TestNode>>(&text, Duration::from_secs(9)).unwrap();
         assert_sections_survive(&parsed);
     }
@@ -413,12 +410,11 @@ mod tests {
     /// A registry with no GUI sections emits no friendly forms.
     #[test]
     fn empty_sections_emit_no_forms() {
-        let mut reg = Registry::<TestGraph>::default();
+        let mut reg = Registry::<DataGraph>::default();
         let mut g = TestGraph::default();
         g.add_node(expr("(+ 1 1)"));
-        let ga = gantz_ca::graph_addr(&g);
-        reg.commit_graph_to_name(Duration::from_secs(1), ga, || g, &name("only"));
-        let text = to_string(&reg).unwrap();
+        commit_named(&mut reg, Duration::from_secs(1), &g, &name("only"));
+        let text = to_string::<Box<dyn TestNode>>(&reg).unwrap();
         assert!(!text.contains("(descriptions"));
         assert!(!text.contains("(layout"));
         assert!(!text.contains("(demo"));

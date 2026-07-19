@@ -7,8 +7,8 @@
 
 use crate::SceneView;
 use gantz_ca::{
-    CommitAddr, Liveness, MergePolicy, Name, Registry, SectionDecl, section_get, section_insert,
-    section_iter, section_remove,
+    CommitAddr, DataGraph, Liveness, MergePolicy, Name, Registry, SectionDecl, section_get,
+    section_insert, section_iter, section_remove,
 };
 
 /// Human-readable descriptions for named graphs.
@@ -57,64 +57,65 @@ impl SectionDecl for Views {
 }
 
 /// The stored description for the named graph, if any.
-pub fn description<G>(reg: &Registry<G>, name: &Name) -> Option<String> {
-    section_get::<Descriptions, G>(reg, name)
+pub fn description(reg: &Registry<DataGraph>, name: &Name) -> Option<String> {
+    section_get::<Descriptions, DataGraph>(reg, name)
 }
 
 /// Store a description for the named graph. An empty string removes the
 /// entry.
-pub fn set_description<G>(reg: &mut Registry<G>, name: Name, description: String) {
+pub fn set_description(reg: &mut Registry<DataGraph>, name: Name, description: String) {
     if description.is_empty() {
-        section_remove::<Descriptions, G>(reg, &name);
+        section_remove::<Descriptions, DataGraph>(reg, &name);
     } else {
-        section_insert::<Descriptions, G>(reg, name, &description)
+        section_insert::<Descriptions, DataGraph>(reg, name, &description)
             .expect("a `String` always encodes as a datum");
     }
 }
 
 /// All stored descriptions, in name order.
-pub fn descriptions<G>(reg: &Registry<G>) -> impl Iterator<Item = (Name, String)> + '_ {
-    section_iter::<Descriptions, G>(reg)
+pub fn descriptions(reg: &Registry<DataGraph>) -> impl Iterator<Item = (Name, String)> + '_ {
+    section_iter::<Descriptions, DataGraph>(reg)
 }
 
 /// The demo graph name associated with the named graph, if any.
-pub fn demo<G>(reg: &Registry<G>, name: &Name) -> Option<String> {
-    section_get::<Demos, G>(reg, name)
+pub fn demo(reg: &Registry<DataGraph>, name: &Name) -> Option<String> {
+    section_get::<Demos, DataGraph>(reg, name)
 }
 
 /// Associate the named graph with the given demo graph name.
-pub fn set_demo<G>(reg: &mut Registry<G>, name: Name, demo: String) {
-    section_insert::<Demos, G>(reg, name, &demo).expect("a `String` always encodes as a datum");
+pub fn set_demo(reg: &mut Registry<DataGraph>, name: Name, demo: String) {
+    section_insert::<Demos, DataGraph>(reg, name, &demo)
+        .expect("a `String` always encodes as a datum");
 }
 
 /// Remove the named graph's demo association.
-pub fn remove_demo<G>(reg: &mut Registry<G>, name: &Name) -> Option<String> {
-    section_remove::<Demos, G>(reg, name)
+pub fn remove_demo(reg: &mut Registry<DataGraph>, name: &Name) -> Option<String> {
+    section_remove::<Demos, DataGraph>(reg, name)
 }
 
 /// All demo associations, in name order.
-pub fn demos<G>(reg: &Registry<G>) -> impl Iterator<Item = (Name, String)> + '_ {
-    section_iter::<Demos, G>(reg)
+pub fn demos(reg: &Registry<DataGraph>) -> impl Iterator<Item = (Name, String)> + '_ {
+    section_iter::<Demos, DataGraph>(reg)
 }
 
 /// The stored scene view for the given commit, if any.
-pub fn view<G>(reg: &Registry<G>, ca: &CommitAddr) -> Option<SceneView> {
-    section_get::<Views, G>(reg, ca)
+pub fn view(reg: &Registry<DataGraph>, ca: &CommitAddr) -> Option<SceneView> {
+    section_get::<Views, DataGraph>(reg, ca)
 }
 
 /// Store a scene view for the given commit.
-pub fn set_view<G>(reg: &mut Registry<G>, ca: CommitAddr, view: &SceneView) {
-    if let Err(e) = section_insert::<Views, G>(reg, ca, view) {
+pub fn set_view(reg: &mut Registry<DataGraph>, ca: CommitAddr, view: &SceneView) {
+    if let Err(e) = section_insert::<Views, DataGraph>(reg, ca, view) {
         log::error!("failed to encode scene view for {ca}: {e}");
     }
 }
 
 /// Remove the stored scene view for the given commit.
-pub fn remove_view<G>(reg: &mut Registry<G>, ca: &CommitAddr) -> Option<SceneView> {
-    section_remove::<Views, G>(reg, ca)
+pub fn remove_view(reg: &mut Registry<DataGraph>, ca: &CommitAddr) -> Option<SceneView> {
+    section_remove::<Views, DataGraph>(reg, ca)
 }
 
 /// All stored scene views, in commit order.
-pub fn views<G>(reg: &Registry<G>) -> impl Iterator<Item = (CommitAddr, SceneView)> + '_ {
-    section_iter::<Views, G>(reg)
+pub fn views(reg: &Registry<DataGraph>) -> impl Iterator<Item = (CommitAddr, SceneView)> + '_ {
+    section_iter::<Views, DataGraph>(reg)
 }

@@ -1056,6 +1056,7 @@ dependencies = [
  "gantz_plyphon",
  "log",
  "plyphon",
+ "serde",
  "web-sys",
  "web-time",
 ]

@@ -31,7 +31,7 @@ use crate::{
     store::{self, SessionEntry, Shared},
     ticket::SessionTicket,
 };
-use gantz_ca::{Commit, CommitAddr, Name, RawGraph};
+use gantz_ca::{Commit, CommitAddr, DataGraph, GraphAddr, Name};
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayMode,
     address_lookup::{PkarrPublisher, PkarrResolver},
@@ -126,12 +126,14 @@ pub enum Command {
     Register(SessionEntry),
     /// Merge served content into a registered session's store:
     /// content-addressed commit/graph inserts (idempotent) and per-name head
-    /// upserts. Unknown sessions are ignored with a warning.
+    /// upserts. Graphs are verified against their claimed addresses (see
+    /// [`store::merge`]); a failed verification drops the whole update with
+    /// a warning. Unknown sessions are ignored with a warning.
     Update {
         session: SessionId,
         heads: Vec<(Name, CommitAddr)>,
         commits: Vec<(CommitAddr, Commit)>,
-        graphs: Vec<RawGraph>,
+        graphs: Vec<(GraphAddr, DataGraph)>,
     },
     /// Start serving and gossiping a session. The session must already be
     /// [`Register`](Command::Register)ed. Emits [`Event::TicketReady`].
@@ -388,7 +390,9 @@ async fn drive(
                     log::warn!("collab: update for an unregistered session");
                     continue;
                 };
-                store::merge(&mut entry.store, heads, commits, graphs);
+                if let Err(e) = store::merge(&mut entry.store, heads, commits, graphs) {
+                    log::warn!("collab: update rejected: {e}");
+                }
             }
             Command::Forget(session) => {
                 let mut state = shared.lock();

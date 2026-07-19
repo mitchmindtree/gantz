@@ -20,11 +20,8 @@
 //!   the results tracks a node's identity through content edits, so an edit
 //!   diffs as a *modification* rather than a remove + add.
 
-use crate::{CaHash, CommitAddr, Registry, Timestamp, content_addr, history};
-use petgraph::{Directed, graph::IndexType};
+use crate::{CommitAddr, DataGraph, Edge, Registry, Timestamp, content_addr, history};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-
-type Graph<N, E, Ix> = petgraph::graph::Graph<N, E, Directed, Ix>;
 
 /// A node identity mapping between two versions of a graph: left node index
 /// to right node index. Injective: no two left nodes map to the same right
@@ -38,7 +35,7 @@ pub type Matching = BTreeMap<usize, usize>;
 /// treated as sets of `(source, target, weight)` triples; parallel edges with
 /// identical weights are not distinguished.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Diff<E> {
+pub struct Diff {
     /// Base node index to other node index, for nodes present in both.
     pub matched: Matching,
     /// The subset of `matched` (base indices) whose node content changed.
@@ -51,10 +48,10 @@ pub struct Diff<E> {
     ///
     /// Only edges whose endpoints both survive into `other`: edges lost as a
     /// consequence of node removal are implied by `removed_nodes`.
-    pub removed_edges: BTreeSet<(usize, usize, E)>,
+    pub removed_edges: BTreeSet<(usize, usize, Edge)>,
     /// Edges present in `other` but not `base`, in *other* coordinates
     /// (endpoints may be added nodes).
-    pub added_edges: BTreeSet<(usize, usize, E)>,
+    pub added_edges: BTreeSet<(usize, usize, Edge)>,
 }
 
 /// Change counts for a [`Diff`], e.g. for GUI hover summaries.
@@ -67,7 +64,7 @@ pub struct DiffSummary {
     pub edges_removed: usize,
 }
 
-impl<E> Diff<E> {
+impl Diff {
     /// Change counts for this diff.
     pub fn summary(&self) -> DiffSummary {
         DiffSummary {
@@ -91,11 +88,7 @@ impl<E> Diff<E> {
 
 /// The content address of every node, indexed by node index (contiguous for
 /// a plain `petgraph::Graph`).
-fn node_cas<N, E, Ix>(g: &Graph<N, E, Ix>) -> Vec<crate::ContentAddr>
-where
-    N: CaHash,
-    Ix: IndexType,
-{
+fn node_cas(g: &DataGraph) -> Vec<crate::ContentAddr> {
     g.node_weights().map(crate::content_addr).collect()
 }
 
@@ -122,11 +115,7 @@ fn match_cas(a: &[crate::ContentAddr], b: &[crate::ContentAddr]) -> Matching {
 /// Nodes are grouped by content address and paired within each group in
 /// ascending-index order (canonical rank). Conservative: a node whose content
 /// was edited is left unmatched on both sides.
-pub fn match_nodes<N, E, Ix>(a: &Graph<N, E, Ix>, b: &Graph<N, E, Ix>) -> Matching
-where
-    N: CaHash,
-    Ix: IndexType,
-{
+pub fn match_nodes(a: &DataGraph, b: &DataGraph) -> Matching {
     match_cas(&node_cas(a), &node_cas(b))
 }
 
@@ -156,15 +145,7 @@ fn match_step_cas(prev: &[crate::ContentAddr], next: &[crate::ContentAddr]) -> M
 /// when `base` is not on the chain or an intermediate graph is unavailable.
 /// Returns `None` only when an endpoint commit or graph is missing from the
 /// registry.
-pub fn matching<N, E, Ix>(
-    reg: &Registry<Graph<N, E, Ix>>,
-    base: CommitAddr,
-    tip: CommitAddr,
-) -> Option<Matching>
-where
-    N: CaHash,
-    Ix: IndexType,
-{
+pub fn matching(reg: &Registry, base: CommitAddr, tip: CommitAddr) -> Option<Matching> {
     matching_with_times(reg, base, tip).map(|(matching, _)| matching)
 }
 
@@ -176,20 +157,16 @@ where
 /// [`crate::merge::BothModified::KeepNewest`]). The direct-matching fallback
 /// has no chain to read times from, so it returns them empty; callers fall
 /// back to the tips' own timestamps.
-pub fn matching_with_times<N, E, Ix>(
-    reg: &Registry<Graph<N, E, Ix>>,
+pub fn matching_with_times(
+    reg: &Registry,
     base: CommitAddr,
     tip: CommitAddr,
-) -> Option<(Matching, BTreeMap<usize, Timestamp>)>
-where
-    N: CaHash,
-    Ix: IndexType,
-{
+) -> Option<(Matching, BTreeMap<usize, Timestamp>)> {
     let commits = reg.commits();
     let graphs = reg.graphs();
     let base_graph = graphs.get(&commits.get(&base)?.graph)?;
     let tip_graph = graphs.get(&commits.get(&tip)?.graph)?;
-    let identity = |g: &Graph<N, E, Ix>| (0..g.node_count()).map(|ix| (ix, ix)).collect();
+    let identity = |g: &DataGraph| (0..g.node_count()).map(|ix| (ix, ix)).collect();
     let direct = || (match_nodes(base_graph, tip_graph), BTreeMap::new());
 
     let Some(chain) = history::first_parent_chain_to(commits, tip, base) else {
@@ -235,16 +212,7 @@ where
 
 /// The structural diff of `other` relative to `base` under the given node
 /// [`Matching`] (see [`Diff`]).
-pub fn diff<N, E, Ix>(
-    base: &Graph<N, E, Ix>,
-    other: &Graph<N, E, Ix>,
-    matching: &Matching,
-) -> Diff<E>
-where
-    N: CaHash,
-    E: Clone + Ord,
-    Ix: IndexType,
-{
+pub fn diff(base: &DataGraph, other: &DataGraph, matching: &Matching) -> Diff {
     let matched_other: HashSet<usize> = matching.values().copied().collect();
     let modified = matching
         .iter()
@@ -262,14 +230,6 @@ where
         .filter(|ix| !matched_other.contains(ix))
         .collect();
 
-    let edge_set = |g: &Graph<N, E, Ix>| -> BTreeSet<(usize, usize, E)> {
-        g.edge_indices()
-            .map(|e| {
-                let (s, d) = g.edge_endpoints(e).expect("edge must have endpoints");
-                (s.index(), d.index(), g[e].clone())
-            })
-            .collect()
-    };
     let base_edges = edge_set(base);
     let other_edges = edge_set(other);
 
@@ -281,7 +241,7 @@ where
                 // An endpoint was removed: implied by `removed_nodes`.
                 return false;
             };
-            !other_edges.contains(&(os, od, w.clone()))
+            !other_edges.contains(&(os, od, *w))
         })
         .cloned()
         .collect();
@@ -294,7 +254,7 @@ where
                 // An endpoint is an added node: the edge is necessarily new.
                 return true;
             };
-            !base_edges.contains(&(bs, bd, w.clone()))
+            !base_edges.contains(&(bs, bd, *w))
         })
         .cloned()
         .collect();
@@ -309,34 +269,51 @@ where
     }
 }
 
+/// A graph's edges as a set of `(source, target, weight)` triples.
+pub(crate) fn edge_set(g: &DataGraph) -> BTreeSet<(usize, usize, Edge)> {
+    g.edge_indices()
+        .map(|e| {
+            let (s, d) = g.edge_endpoints(e).expect("edge must have endpoints");
+            (s.index(), d.index(), g[e])
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Commit, Timestamp, commit_addr, graph_addr};
+    use crate::{Commit, Datum, NodeData, Timestamp, commit_addr, graph_addr};
     use std::time::Duration;
 
-    type G = petgraph::graph::Graph<String, u32, Directed, usize>;
-
-    fn graph(nodes: &[&str], edges: &[(usize, usize, u32)]) -> G {
-        let mut g = G::default();
+    fn graph(nodes: &[&str], edges: &[(usize, usize, u16)]) -> DataGraph {
+        let mut g = DataGraph::default();
         for n in nodes {
-            g.add_node(n.to_string());
+            g.add_node(NodeData::new(*n, Datum::Map(vec![])));
         }
         for &(s, d, w) in edges {
-            g.add_edge(s.into(), d.into(), w);
+            g.add_edge(s.into(), d.into(), Edge::from((w, 0u16)));
         }
         g
     }
 
+    fn edge(w: u16) -> Edge {
+        Edge::from((w, 0u16))
+    }
+
     /// Commit `g` on top of `parent` in `reg`, returning the commit addr.
-    fn commit(reg: &mut Registry<G>, secs: u64, parent: Option<CommitAddr>, g: &G) -> CommitAddr {
+    fn commit(
+        reg: &mut Registry,
+        secs: u64,
+        parent: Option<CommitAddr>,
+        g: &DataGraph,
+    ) -> CommitAddr {
         reg.commit_graph(Duration::from_secs(secs), parent, graph_addr(g), || {
             g.clone()
         })
     }
 
     /// [`match_step_cas`] over whole graphs, for test brevity.
-    fn match_step(prev: &G, next: &G) -> Matching {
+    fn match_step(prev: &DataGraph, next: &DataGraph) -> Matching {
         match_step_cas(&node_cas(prev), &node_cas(next))
     }
 
@@ -377,7 +354,7 @@ mod tests {
 
     #[test]
     fn matching_composes_along_the_chain() {
-        let mut reg = Registry::<G>::default();
+        let mut reg = Registry::default();
         let g0 = graph(&["a", "b"], &[]);
         let g1 = graph(&["a", "b2"], &[]); // edit ix 1
         let g2 = graph(&["a", "b2", "c"], &[]); // add ix 2
@@ -400,7 +377,7 @@ mod tests {
 
     #[test]
     fn matching_with_times_stamps_the_last_content_change() {
-        let mut reg = Registry::<G>::default();
+        let mut reg = Registry::default();
         let g0 = graph(&["a", "b"], &[]);
         let g1 = graph(&["a", "b2"], &[]); // edit ix 1 @ t=2
         let g2 = graph(&["a", "b2", "c"], &[]); // add ix 2 @ t=3
@@ -445,8 +422,8 @@ mod tests {
         assert_eq!(d.modified, BTreeSet::from([1]));
         assert!(d.removed_nodes.is_empty());
         assert_eq!(d.added_nodes, BTreeSet::from([2]));
-        assert_eq!(d.removed_edges, BTreeSet::from([(0, 1, 0)]));
-        assert_eq!(d.added_edges, BTreeSet::from([(0, 2, 1)]));
+        assert_eq!(d.removed_edges, BTreeSet::from([(0, 1, edge(0))]));
+        assert_eq!(d.added_edges, BTreeSet::from([(0, 2, edge(1))]));
         let s = d.summary();
         assert_eq!(
             (s.nodes_added, s.nodes_removed, s.nodes_modified),

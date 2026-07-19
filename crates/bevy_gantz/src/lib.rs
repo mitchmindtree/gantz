@@ -145,13 +145,6 @@ where
     }
 }
 
-/// Clone a graph.
-pub fn clone_graph<N: Clone>(
-    graph: &gantz_core::node::graph::Graph<N>,
-) -> gantz_core::node::graph::Graph<N> {
-    graph.map(|_, n| n.clone(), |_, e| *e)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

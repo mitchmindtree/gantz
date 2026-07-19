@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn base_gantz_deserializes() {
-        let _registry: gantz_ca::Registry<gantz_ca::DataGraph> =
+        let _registry: gantz_ca::Registry =
             gantz_egui::export::parse_export::<Box<dyn super::node::Node>>(BASE_GANTZ)
                 .expect("valid .gantz");
     }

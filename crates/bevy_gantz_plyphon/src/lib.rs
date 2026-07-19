@@ -1001,7 +1001,7 @@ fn park_head(state: &mut HeadSynths, entity: Entity, graph_ca: ca::GraphAddr) {
 ///
 /// The registry's audio-buffer blob entries, or the empty store when the
 /// `dsp.buffer` section is absent.
-fn buffer_blobs<G>(reg: &ca::Registry<G>) -> &BufferBlobs {
+fn buffer_blobs(reg: &ca::Registry) -> &BufferBlobs {
     reg.blobs()
         .get(gantz_plyphon::BUFFER_SECTION)
         .map(|store| &store.entries)

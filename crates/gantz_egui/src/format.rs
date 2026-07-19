@@ -7,7 +7,7 @@
 //! [`gantz_format::from_str`]/[`gantz_format::to_string`], and applies those
 //! forms back into the registry's sections on parse.
 
-use gantz_ca::{DataGraph, GraphAddr, Name, Registry, Timestamp};
+use gantz_ca::{GraphAddr, Name, Registry, Timestamp};
 use gantz_format::sexpr;
 use gantz_format::{Addr, Form, GraphLabels, Loaded};
 use serde::Serialize;
@@ -29,7 +29,7 @@ const CLAIMED: &[&str] = &[
 ///
 /// `now` provides the timestamp for any graph the document does not commit
 /// explicitly (hand-authored graphs).
-pub fn from_str<N>(text: &str, now: Timestamp) -> Result<Registry<DataGraph>, FormatError>
+pub fn from_str<N>(text: &str, now: Timestamp) -> Result<Registry, FormatError>
 where
     N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
 {
@@ -44,7 +44,7 @@ pub fn from_str_seeded<N>(
     text: &str,
     now: Timestamp,
     seed: &std::collections::BTreeMap<String, GraphAddr>,
-) -> Result<Registry<DataGraph>, FormatError>
+) -> Result<Registry, FormatError>
 where
     N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
 {
@@ -54,7 +54,7 @@ where
 
 /// Apply the GUI-layer extra forms (`descriptions`, `layout`, `demo`) to a
 /// loaded registry's sections.
-fn registry_from_loaded(mut loaded: Loaded) -> Registry<DataGraph> {
+fn registry_from_loaded(mut loaded: Loaded) -> Registry {
     let extra = std::mem::take(&mut loaded.extra);
     for form in &extra {
         match form.head.as_str() {
@@ -69,7 +69,7 @@ fn registry_from_loaded(mut loaded: Loaded) -> Registry<DataGraph> {
 
 /// Serialize a registry to a `.gantz` document, with `N` selecting the node
 /// set's keyword [`gantz_format::Sugar`] for the graph forms.
-pub fn to_string<N>(registry: &Registry<DataGraph>) -> Result<String, FormatError>
+pub fn to_string<N>(registry: &Registry) -> Result<String, FormatError>
 where
     N: gantz_format::NodeSugar,
 {
@@ -105,7 +105,7 @@ where
 /// tables, references by name. The `(layout ...)` and `(demo ...)` forms are
 /// emitted in graph-name order so the output is stable across address changes -
 /// suited to a hand-editable, git-friendly base file.
-pub fn to_string_named<N>(registry: &Registry<DataGraph>) -> Result<String, FormatError>
+pub fn to_string_named<N>(registry: &Registry) -> Result<String, FormatError>
 where
     N: gantz_format::NodeSugar,
 {
@@ -167,7 +167,7 @@ fn apply_descriptions(form: &Form, loaded: &mut Loaded) {
 
 /// The `(descriptions ...)` form for the registry's description section, in
 /// name order. `None` when there are no descriptions.
-fn descriptions_text(registry: &Registry<DataGraph>) -> Option<String> {
+fn descriptions_text(registry: &Registry) -> Option<String> {
     let mut entries = crate::section::descriptions(registry).peekable();
     entries.peek()?;
     let mut s = "(descriptions".to_string();
@@ -330,7 +330,7 @@ mod tests {
 
     /// A registry with a `leaf` expr graph, a `root` graph referencing it,
     /// and a description, demo and view attached to `root`.
-    fn test_registry() -> (Registry<DataGraph>, CommitAddr) {
+    fn test_registry() -> (Registry, CommitAddr) {
         let mut reg = Registry::default();
 
         let mut leaf_g = TestGraph::default();
@@ -357,7 +357,7 @@ mod tests {
         (reg, root_ca)
     }
 
-    fn assert_sections_survive(parsed: &Registry<DataGraph>) {
+    fn assert_sections_survive(parsed: &Registry) {
         assert!(parsed.head(&name("leaf")).is_some());
         let root_ca = parsed.head(&name("root")).expect("root head survives");
         assert_eq!(
@@ -388,7 +388,7 @@ mod tests {
         assert!(text.contains("(descriptions"));
         assert!(text.contains("(layout"));
         assert!(text.contains("(demo root"));
-        let parsed: Registry<DataGraph> =
+        let parsed: Registry =
             from_str::<Box<dyn TestNode>>(&text, Duration::from_secs(9)).unwrap();
         // The commits table preserves the head commit exactly.
         assert_eq!(parsed.head(&name("root")), Some(root_ca));
@@ -402,7 +402,7 @@ mod tests {
         let (reg, _root_ca) = test_registry();
         let text = to_string_named::<Box<dyn TestNode>>(&reg).unwrap();
         assert!(!text.contains("(section"));
-        let parsed: Registry<DataGraph> =
+        let parsed: Registry =
             from_str::<Box<dyn TestNode>>(&text, Duration::from_secs(9)).unwrap();
         assert_sections_survive(&parsed);
     }
@@ -410,7 +410,7 @@ mod tests {
     /// A registry with no GUI sections emits no friendly forms.
     #[test]
     fn empty_sections_emit_no_forms() {
-        let mut reg = Registry::<DataGraph>::default();
+        let mut reg = Registry::default();
         let mut g = TestGraph::default();
         g.add_node(expr("(+ 1 1)"));
         commit_named(&mut reg, Duration::from_secs(1), &g, &name("only"));

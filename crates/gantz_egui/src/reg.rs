@@ -6,7 +6,6 @@
 
 use crate::Registry;
 use gantz_ca as ca;
-use gantz_ca::DataGraph;
 use gantz_core::data::ReifiedGraphs;
 use gantz_core::node;
 use gantz_core::{Builtins, Node};
@@ -21,7 +20,7 @@ use std::collections::BTreeMap;
 /// nodes, and builtin nodes, implementing the [`Registry`] trait required by
 /// the gantz_egui widgets.
 pub struct RegistryRef<'a, N: 'static + Send + Sync> {
-    ca_registry: &'a ca::Registry<DataGraph>,
+    ca_registry: &'a ca::Registry,
     reified: &'a ReifiedGraphs<N>,
     builtins: &'a dyn Builtins<Node = N>,
 }
@@ -33,7 +32,7 @@ impl<'a, N: 'static + Send + Sync> RegistryRef<'a, N> {
     /// Construct from a CA registry, its reified-graph cache and a builtins
     /// provider.
     pub fn new(
-        ca_registry: &'a ca::Registry<DataGraph>,
+        ca_registry: &'a ca::Registry,
         reified: &'a ReifiedGraphs<N>,
         builtins: &'a dyn Builtins<Node = N>,
     ) -> Self {
@@ -45,7 +44,7 @@ impl<'a, N: 'static + Send + Sync> RegistryRef<'a, N> {
     }
 
     /// Access the underlying CA registry.
-    pub fn ca_registry(&self) -> &ca::Registry<DataGraph> {
+    pub fn ca_registry(&self) -> &ca::Registry {
         self.ca_registry
     }
 
@@ -106,7 +105,7 @@ where
         + Send
         + Sync,
 {
-    fn ca(&self) -> &ca::Registry<DataGraph> {
+    fn ca(&self) -> &ca::Registry {
         self.ca_registry
     }
 
@@ -286,12 +285,12 @@ where
 
 /// The graph address at the tip of the named line of history: the address a
 /// [`Ref`](gantz_core::node::Ref) to the name should pin.
-pub fn head_graph_addr(reg: &ca::Registry<DataGraph>, name: &ca::Name) -> Option<ca::GraphAddr> {
+pub fn head_graph_addr(reg: &ca::Registry, name: &ca::Name) -> Option<ca::GraphAddr> {
     let head_ca = reg.head(name)?;
     reg.commits().get(&head_ca).map(|commit| commit.graph)
 }
 
 /// All name -> head commit pairs, in name order.
-pub fn names(reg: &ca::Registry<DataGraph>) -> Vec<(ca::Name, ca::CommitAddr)> {
+pub fn names(reg: &ca::Registry) -> Vec<(ca::Name, ca::CommitAddr)> {
     reg.heads().map(|(name, ca)| (name.clone(), ca)).collect()
 }

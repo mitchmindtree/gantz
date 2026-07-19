@@ -1,18 +1,20 @@
 //! Commit operations over a [`Registry`]: minting commits and advancing
 //! heads.
 
-use crate::{Commit, CommitAddr, GraphAddr, Head, Name, Registry, Timestamp, commit_addr};
+use crate::{
+    Commit, CommitAddr, DataGraph, GraphAddr, Head, Name, Registry, Timestamp, commit_addr,
+};
 
 /// Commit the graph at the given address.
 ///
 /// If the graph doesn't exist, calls `graph()` to retrieve the graph for the
 /// registry.
-pub fn commit_graph<G>(
-    reg: &mut Registry<G>,
+pub fn commit_graph(
+    reg: &mut Registry,
     timestamp: Timestamp,
     parent_ca: Option<CommitAddr>,
     graph_ca: GraphAddr,
-    graph: impl FnOnce() -> G,
+    graph: impl FnOnce() -> DataGraph,
 ) -> CommitAddr {
     insert_graph_lazily(reg, graph_ca, graph);
     let commit = Commit::new(timestamp, parent_ca, graph_ca);
@@ -25,11 +27,11 @@ pub fn commit_graph<G>(
 ///
 /// If the graph doesn't exist, calls `graph()` to retrieve the graph for the
 /// registry.
-pub fn commit_graph_to_name<G>(
-    reg: &mut Registry<G>,
+pub fn commit_graph_to_name(
+    reg: &mut Registry,
     timestamp: Timestamp,
     graph_ca: GraphAddr,
-    graph: impl FnOnce() -> G,
+    graph: impl FnOnce() -> DataGraph,
     name: &Name,
 ) -> CommitAddr {
     let parent_ca = reg.head(name);
@@ -42,11 +44,11 @@ pub fn commit_graph_to_name<G>(
 ///
 /// If the graph doesn't exist, calls `graph()` to retrieve the graph for the
 /// registry.
-pub fn commit_graph_to_head<G>(
-    reg: &mut Registry<G>,
+pub fn commit_graph_to_head(
+    reg: &mut Registry,
     timestamp: Timestamp,
     graph_ca: GraphAddr,
-    graph: impl FnOnce() -> G,
+    graph: impl FnOnce() -> DataGraph,
     head: &mut Head,
 ) -> CommitAddr {
     let parent_ca = reg.head_commit_ca(head).unwrap();
@@ -60,11 +62,11 @@ pub fn commit_graph_to_head<G>(
 ///
 /// If the graph doesn't exist, calls `graph()` to retrieve the graph for the
 /// registry.
-pub fn commit_merge_to_head<G>(
-    reg: &mut Registry<G>,
+pub fn commit_merge_to_head(
+    reg: &mut Registry,
     timestamp: Timestamp,
     graph_ca: GraphAddr,
-    graph: impl FnOnce() -> G,
+    graph: impl FnOnce() -> DataGraph,
     theirs: CommitAddr,
     head: &mut Head,
 ) -> CommitAddr {
@@ -82,12 +84,12 @@ pub fn commit_merge_to_head<G>(
 ///
 /// If the graph doesn't exist, calls `graph()` to retrieve the graph for the
 /// registry.
-pub fn commit_merge_canonical<G>(
-    reg: &mut Registry<G>,
+pub fn commit_merge_canonical(
+    reg: &mut Registry,
     a: CommitAddr,
     b: CommitAddr,
     graph_ca: GraphAddr,
-    graph: impl FnOnce() -> G,
+    graph: impl FnOnce() -> DataGraph,
     head: &mut Head,
 ) -> CommitAddr {
     let (first, second) = crate::sync::canonical_tips(reg.commits(), a, b);
@@ -102,7 +104,7 @@ pub fn commit_merge_canonical<G>(
 
 /// Point the head at the given commit: a branch head updates the heads
 /// section, a detached head is reassigned directly.
-pub fn point_head_at<G>(reg: &mut Registry<G>, head: &mut Head, commit_ca: CommitAddr) {
+pub fn point_head_at(reg: &mut Registry, head: &mut Head, commit_ca: CommitAddr) {
     match *head {
         Head::Commit(ref mut ca) => *ca = commit_ca,
         Head::Branch(ref name) => {
@@ -113,7 +115,7 @@ pub fn point_head_at<G>(reg: &mut Registry<G>, head: &mut Head, commit_ca: Commi
 
 /// Insert the graph at the given address, calling `graph()` only when the
 /// address is absent.
-fn insert_graph_lazily<G>(reg: &mut Registry<G>, graph_ca: GraphAddr, graph: impl FnOnce() -> G) {
+fn insert_graph_lazily(reg: &mut Registry, graph_ca: GraphAddr, graph: impl FnOnce() -> DataGraph) {
     if reg.graph(&graph_ca).is_none() {
         reg.insert_graph_at(graph_ca, graph());
     }

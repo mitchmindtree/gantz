@@ -1620,25 +1620,24 @@ pub fn on_reset_base_graph<N>(
         return;
     };
     let seed = base::seed_graph_addrs(&base_names.0, &registry);
-    let export: gantz_ca::Registry<gantz_ca::DataGraph> =
-        match gantz_egui::export::parse_export_seeded_at::<N>(
-            source.bytes,
-            crate::base::BASE_TIMESTAMP,
-            &seed,
-        ) {
-            Ok(e) => e,
-            Err(e) => {
-                log::error!(
-                    "ResetBaseGraph: failed to parse base source `{}`: {e}",
-                    source.name
-                );
-                return;
-            }
-        };
+    let export: gantz_ca::Registry = match gantz_egui::export::parse_export_seeded_at::<N>(
+        source.bytes,
+        crate::base::BASE_TIMESTAMP,
+        &seed,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            log::error!(
+                "ResetBaseGraph: failed to parse base source `{}`: {e}",
+                source.name
+            );
+            return;
+        }
+    };
     // Extract just the content reachable from the target name (all parents,
     // so merge ancestry survives a reset).
     if let Some(base_commit_ca) = export.head(name) {
-        let live = ca::closure_from(&export, [base_commit_ca], ca::data_graph_out);
+        let live = ca::closure_from(&export, [base_commit_ca]);
         let mut subset = ca::export(&export, &live);
         subset.set_head(name.clone(), base_commit_ca);
         registry.merge(subset);

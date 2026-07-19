@@ -8,7 +8,7 @@
 //! nodes.
 
 use crate::ToNodeDsp;
-use gantz_ca::{ContentAddr, DataGraph, GraphAddr};
+use gantz_ca::{ContentAddr, GraphAddr};
 use gantz_core::data::ReifiedGraphs;
 use gantz_core::node::AsRefNode;
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,7 @@ pub struct DspRefExt {
 /// through the reified cache - and hand the set to `DspRefExtUi`. Graphs
 /// missing from the cache classify as non-DSP.
 pub fn dsp_graphs<N>(
-    registry: &gantz_ca::Registry<DataGraph>,
+    registry: &gantz_ca::Registry,
     reified: &ReifiedGraphs<N>,
 ) -> HashSet<ContentAddr>
 where

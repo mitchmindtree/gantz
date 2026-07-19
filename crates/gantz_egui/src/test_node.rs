@@ -47,7 +47,7 @@ pub fn named_ref(name: &str, graph_ca: gantz_ca::GraphAddr) -> Box<dyn TestNode>
 /// Erase `graph` and commit it under `name`, returning the new commit and the
 /// erased graph's address (the registry's identity for the graph).
 pub fn commit_named(
-    reg: &mut gantz_ca::Registry<gantz_ca::DataGraph>,
+    reg: &mut gantz_ca::Registry,
     timestamp: std::time::Duration,
     graph: &TestGraph,
     name: &gantz_ca::Name,

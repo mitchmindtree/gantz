@@ -76,7 +76,7 @@ impl Environment {
 }
 
 /// Registry of graphs (in erased data form), commits and branch names.
-type Registry = gantz_ca::Registry<gantz_ca::DataGraph>;
+type Registry = gantz_ca::Registry;
 
 /// Constructors for all primitive nodes.
 type Primitives = BTreeMap<String, Box<dyn Fn() -> Box<dyn Node>>>;
@@ -603,7 +603,7 @@ impl App {
             let seeds = heads
                 .iter()
                 .filter_map(|(h, _, _)| env.registry.head_commit_ca(h));
-            gantz_ca::closure(&env.registry, seeds, gantz_ca::data_graph_out)
+            gantz_ca::closure(&env.registry, seeds)
         };
         gantz_ca::prune(&mut env.registry, &live);
         env.reified.retain_live(&live);

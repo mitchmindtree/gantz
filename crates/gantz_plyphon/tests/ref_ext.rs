@@ -2,7 +2,7 @@
 //! ref-extension UI - and for the `DspRefExt`-driven lowering decision in
 //! `flatten_from_registry`.
 
-use gantz_ca::{ContentAddr, DataGraph};
+use gantz_ca::ContentAddr;
 use gantz_core::data::ReifiedGraphs;
 use gantz_core::node::graph::Graph;
 use gantz_core::node::{AsRefNode, ExprCtx, ExprResult, MetaCtx, Ref, parse_expr};
@@ -60,11 +60,7 @@ impl gantz_core::Node for N {
 
 /// Commit `graph` (erased) under `name`, returning its graph address as a
 /// `ContentAddr` (the form `Ref::content_addr` reports).
-fn commit(
-    registry: &mut gantz_ca::Registry<DataGraph>,
-    name: &str,
-    graph: Graph<N>,
-) -> ContentAddr {
+fn commit(registry: &mut gantz_ca::Registry, name: &str, graph: Graph<N>) -> ContentAddr {
     let now = std::time::Duration::from_secs(1);
     let (dg, addr) = gantz_core::data::erase_with_addr(&graph).expect("erase");
     let ca = registry.commit_graph(now, None, addr, || dg);
@@ -73,7 +69,7 @@ fn commit(
 }
 
 /// Reify the whole registry column into a typed cache.
-fn reify_all(registry: &gantz_ca::Registry<DataGraph>) -> ReifiedGraphs<N> {
+fn reify_all(registry: &gantz_ca::Registry) -> ReifiedGraphs<N> {
     let mut reified = ReifiedGraphs::new();
     let errs = reified.ensure_all(registry);
     assert!(errs.is_empty(), "{errs:?}");
@@ -89,7 +85,7 @@ fn ref_node(ca: ContentAddr) -> N {
 /// references to missing addresses.
 #[test]
 fn dsp_graphs_discovers_direct_and_transitive() {
-    let mut registry = gantz_ca::Registry::<DataGraph>::default();
+    let mut registry = gantz_ca::Registry::default();
 
     // A graph containing a DSP node directly.
     let mut dsp: Graph<N> = Graph::default();
@@ -132,7 +128,7 @@ fn dsp_graphs_discovers_direct_and_transitive() {
 fn default_lowering_instances_dsp_refs_and_splices_the_rest() {
     use gantz_plyphon::{DSP_REF_EXT_KEY, DspRefExt, Flat};
 
-    let mut registry = gantz_ca::Registry::<DataGraph>::default();
+    let mut registry = gantz_ca::Registry::default();
 
     // A DSP-bearing child.
     let mut dsp: Graph<N> = Graph::default();

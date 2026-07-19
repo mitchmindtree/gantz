@@ -150,7 +150,7 @@ mod tests {
     use super::Node;
 
     /// The data registry: graphs stored erased.
-    type DataReg = gantz_ca::Registry<gantz_ca::DataGraph>;
+    type DataReg = gantz_ca::Registry;
     /// The typed cache serving the registry's graphs as the app's node set.
     type Reified = gantz_core::data::ReifiedGraphs<Box<dyn Node>>;
 
@@ -2178,7 +2178,7 @@ mod tests {
         let mut registry = startup;
         let demo = name("demo-arithmetic");
         let demo_commit = reparse.head(&demo).expect("demo name");
-        let live = gantz_ca::closure_from(&reparse, [demo_commit], gantz_ca::data_graph_out);
+        let live = gantz_ca::closure_from(&reparse, [demo_commit]);
         let mut subset = gantz_ca::export(&reparse, &live);
         subset.set_head(demo.clone(), demo_commit);
         registry.merge(subset);
@@ -2223,11 +2223,7 @@ mod tests {
         registry.set_head(name("sampler"), commit);
 
         // Heads are a Root-liveness section, so the closure seeds from them.
-        let live = gantz_ca::closure(
-            &registry,
-            [] as [gantz_ca::CommitAddr; 0],
-            gantz_ca::data_graph_out,
-        );
+        let live = gantz_ca::closure(&registry, [] as [gantz_ca::CommitAddr; 0]);
         assert!(live.blob_live(gantz_plyphon::BUFFER_SECTION, &used_addr));
         assert!(!live.blob_live(gantz_plyphon::BUFFER_SECTION, &unused_addr));
 

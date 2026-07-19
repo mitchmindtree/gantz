@@ -297,7 +297,7 @@ pub fn find_entity(
 /// Reads the shared `gantz.description` section (see
 /// [`DESCRIPTIONS_ID`]) directly so this crate stays independent of the
 /// GUI layer that declares the typed accessor.
-pub fn description<G>(reg: &ca::Registry<G>, name: &ca::Name) -> Option<String> {
+pub fn description(reg: &ca::Registry, name: &ca::Name) -> Option<String> {
     let key = ca::Key::Name(name.clone());
     reg.section_entry(DESCRIPTIONS_ID, &key)
         .and_then(ca::section::value_from_datum)
@@ -305,7 +305,7 @@ pub fn description<G>(reg: &ca::Registry<G>, name: &ca::Name) -> Option<String> 
 
 /// Store a description for the named graph in the shared `gantz.description`
 /// section. An empty string removes the entry.
-pub fn set_description<G>(reg: &mut ca::Registry<G>, name: ca::Name, description: String) {
+pub fn set_description(reg: &mut ca::Registry, name: ca::Name, description: String) {
     let key = ca::Key::Name(name);
     if description.is_empty() {
         reg.remove_section_entry(DESCRIPTIONS_ID, &key);

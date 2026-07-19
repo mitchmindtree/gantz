@@ -3,9 +3,8 @@
 //!
 //! Edge rules:
 //! - A commit contributes its parents and its graph.
-//! - A graph contributes whatever `graph_out` reports: nested graph
-//!   references and blob references. Only the application can see inside
-//!   node payloads, so this is the one caller-supplied part.
+//! - A graph contributes its nodes' structural reference columns (see
+//!   [`data_graph_out`]): nested graph references and blob references.
 //! - Blobs and section values are leaves.
 //!
 //! Roots are the entries of `Root`-liveness sections (the `heads` section
@@ -22,8 +21,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
-/// The outgoing content references of a single graph, as reported by the
-/// application (it alone can interpret node payloads).
+/// The outgoing content references of a single graph.
 #[derive(Clone, Debug, Default)]
 pub struct OutRefs {
     /// Nested graph references (e.g. `Ref` nodes).
@@ -52,8 +50,8 @@ impl LiveSet {
 /// structural [`refs`](crate::NodeData::refs)/[`blobs`](crate::NodeData::blobs)
 /// columns, sorted and deduplicated.
 ///
-/// The `graph_out` for `Registry<DataGraph>` walks: a pure data walk, so any
-/// peer can compute reachability without the node types compiled in.
+/// A pure data walk, so any peer can compute reachability without the node
+/// types compiled in.
 pub fn data_graph_out(g: &DataGraph) -> OutRefs {
     let mut graphs: Vec<GraphAddr> = g
         .node_weights()
@@ -73,15 +71,8 @@ pub fn data_graph_out(g: &DataGraph) -> OutRefs {
 /// The live closure of `reg` from its `Root`-liveness sections plus the
 /// given extra commit seeds.
 ///
-/// `graph_out` maps a graph to its outgoing references (see [`OutRefs`]).
-/// Applications wrap their node-payload introspection here (nested `Ref`
-/// targets, blob references). Dangling seeds and references are tolerated
-/// and simply not walked.
-pub fn closure<G>(
-    reg: &Registry<G>,
-    extra_commits: impl IntoIterator<Item = CommitAddr>,
-    graph_out: impl Fn(&G) -> OutRefs,
-) -> LiveSet {
+/// Dangling seeds and references are tolerated and simply not walked.
+pub fn closure(reg: &Registry, extra_commits: impl IntoIterator<Item = CommitAddr>) -> LiveSet {
     // Roots: every commit-valued entry of every Root-liveness section.
     let roots = reg
         .sections()
@@ -93,7 +84,7 @@ pub fn closure<G>(
             _ => None,
         })
         .collect::<Vec<_>>();
-    closure_from(reg, roots.into_iter().chain(extra_commits), graph_out)
+    closure_from(reg, roots.into_iter().chain(extra_commits))
 }
 
 /// The live closure of `reg` from ONLY the given commit seeds, ignoring the
@@ -101,11 +92,7 @@ pub fn closure<G>(
 ///
 /// For minimal exports of a specific head set. [`closure`] is this plus the
 /// `Root`-liveness section seeds.
-pub fn closure_from<G>(
-    reg: &Registry<G>,
-    seeds: impl IntoIterator<Item = CommitAddr>,
-    graph_out: impl Fn(&G) -> OutRefs,
-) -> LiveSet {
+pub fn closure_from(reg: &Registry, seeds: impl IntoIterator<Item = CommitAddr>) -> LiveSet {
     let mut live = LiveSet::default();
     let mut commit_queue: VecDeque<CommitAddr> = VecDeque::new();
     let mut graph_queue: VecDeque<GraphAddr> = VecDeque::new();
@@ -127,7 +114,7 @@ pub fn closure_from<G>(
             if !live.graphs.insert(ga) {
                 continue;
             }
-            let out = graph_out(graph);
+            let out = data_graph_out(graph);
             graph_queue.extend(out.graphs);
             for (section, addr) in out.blobs {
                 live.blobs.entry(section).or_default().insert(addr);
@@ -167,7 +154,7 @@ pub fn closure_from<G>(
 /// section entries filtered by their stored liveness against the exported
 /// content. Heads whose commit falls outside the export are dropped, and
 /// their `WithName` metadata with them.
-pub fn export<G: Clone>(reg: &Registry<G>, live: &LiveSet) -> Registry<G> {
+pub fn export(reg: &Registry, live: &LiveSet) -> Registry {
     let mut exported = reg.clone();
     prune(&mut exported, live);
     exported
@@ -178,14 +165,14 @@ pub fn export<G: Clone>(reg: &Registry<G>, live: &LiveSet) -> Registry<G> {
 /// filtered by its stored liveness rule against the surviving state, and
 /// invalid commit parents are detached. Emptied sections and blob stores
 /// are removed.
-pub fn prune<G>(reg: &mut Registry<G>, live: &LiveSet) {
+pub fn prune(reg: &mut Registry, live: &LiveSet) {
     reg.retain_live(live);
 }
 
 /// Whether a section entry is live against the given registry + live set.
 /// Used by [`closure`]'s blob-reference pass. `Root` entries are treated
 /// conservatively as live (their commit values were the walk's seeds).
-fn entry_live<G>(reg: &Registry<G>, liveness: Liveness, key: &crate::Key, live: &LiveSet) -> bool {
+fn entry_live(reg: &Registry, liveness: Liveness, key: &crate::Key, live: &LiveSet) -> bool {
     use crate::Key;
     match liveness {
         Liveness::Pinned | Liveness::Root => true,
@@ -207,48 +194,49 @@ fn entry_live<G>(reg: &Registry<G>, liveness: Liveness, key: &crate::Key, live: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ContentAddr, Key, MergePolicy, Name, registry::section_insert_datum};
+    use crate::{
+        ContentAddr, Datum, Key, MergePolicy, Name, NodeData, registry::section_insert_datum,
+    };
     use std::collections::BTreeMap;
     use std::time::Duration;
-
-    fn graph_addr(n: u8) -> GraphAddr {
-        GraphAddr::from(ContentAddr::from([n; 32]))
-    }
 
     fn name(s: &str) -> Name {
         s.parse().unwrap()
     }
 
-    /// A registry whose "graphs" are lists of nested graph addrs, so
-    /// `graph_out` can be pure data.
-    type TestGraph = Vec<GraphAddr>;
-
-    fn out(g: &TestGraph) -> OutRefs {
-        OutRefs {
-            graphs: g.clone(),
-            blobs: vec![],
-        }
+    /// A node with the given structural reference columns.
+    fn node(refs: Vec<GraphAddr>, blobs: Vec<(SectionId, ContentAddr)>) -> NodeData {
+        let mut n = NodeData::new("test", Datum::Map(vec![]));
+        n.refs = refs.into_iter().map(Into::into).collect();
+        n.blobs = blobs;
+        n.canonicalize();
+        n
     }
 
-    /// Add a graph of raw nested addrs under a synthetic address (the test
-    /// graph type is plain data, so petgraph hashing does not apply).
-    fn add_test_graph(reg: &mut Registry<TestGraph>, n: u8, nested: TestGraph) -> GraphAddr {
-        let ga = graph_addr(n);
-        reg.insert_graph_at(ga, nested);
-        ga
+    /// Add a one-node graph carrying the given reference columns.
+    fn add_graph(
+        reg: &mut Registry,
+        refs: Vec<GraphAddr>,
+        blobs: Vec<(SectionId, ContentAddr)>,
+    ) -> GraphAddr {
+        let mut g = DataGraph::default();
+        g.add_node(node(refs, blobs));
+        reg.add_graph(g)
     }
 
     #[test]
     fn closure_walks_heads_parents_and_nested_graphs() {
-        let mut reg: Registry<TestGraph> = Registry::default();
-        let nested = add_test_graph(&mut reg, 1, vec![]);
-        let root_ga = add_test_graph(&mut reg, 2, vec![nested]);
+        let mut reg = Registry::default();
+        let nested = add_graph(&mut reg, vec![], vec![]);
+        let root_ga = add_graph(&mut reg, vec![nested], vec![]);
         let c1 = reg.commit_graph(Duration::from_secs(1), None, root_ga, || unreachable!());
         let c2 = reg.commit_graph(Duration::from_secs(2), Some(c1), root_ga, || unreachable!());
         reg.set_head(name("alpha"), c2);
-        let dead_ga = add_test_graph(&mut reg, 3, vec![graph_addr(99)]);
+        // A dead graph whose sole node references a dangling address.
+        let dangling = GraphAddr::from(ContentAddr::from([99; 32]));
+        let dead_ga = add_graph(&mut reg, vec![dangling], vec![]);
         let _dead = reg.commit_graph(Duration::from_secs(3), None, dead_ga, || unreachable!());
-        let live = closure(&reg, [], out);
+        let live = closure(&reg, []);
         assert!(live.commits.contains(&c1));
         assert!(live.commits.contains(&c2));
         assert!(live.graphs.contains(&root_ga));
@@ -259,20 +247,20 @@ mod tests {
 
     #[test]
     fn graphs_stay_live_through_content_refs_without_commits() {
-        let mut reg: Registry<TestGraph> = Registry::default();
-        let nested = add_test_graph(&mut reg, 1, vec![]);
-        let root_ga = add_test_graph(&mut reg, 2, vec![nested]);
+        let mut reg = Registry::default();
+        let nested = add_graph(&mut reg, vec![], vec![]);
+        let root_ga = add_graph(&mut reg, vec![nested], vec![]);
         let c = reg.commit_graph(Duration::from_secs(1), None, root_ga, || unreachable!());
         reg.set_head(name("alpha"), c);
-        let live = closure(&reg, [], out);
+        let live = closure(&reg, []);
         prune(&mut reg, &live);
         assert!(reg.graph(&nested).is_some());
     }
 
     #[test]
     fn prune_drops_dead_content_and_sections_follow() {
-        let mut reg: Registry<TestGraph> = Registry::default();
-        let ga = add_test_graph(&mut reg, 1, vec![]);
+        let mut reg = Registry::default();
+        let ga = add_graph(&mut reg, vec![], vec![]);
         let live_c = reg.commit_graph(Duration::from_secs(1), None, ga, || unreachable!());
         let dead_c = reg.commit_graph(Duration::from_secs(2), None, ga, || unreachable!());
         reg.set_head(name("alpha"), live_c);
@@ -287,7 +275,7 @@ mod tests {
             )
             .unwrap();
         }
-        let live = closure(&reg, [], out);
+        let live = closure(&reg, []);
         prune(&mut reg, &live);
         assert!(reg.commits().contains_key(&live_c));
         assert!(!reg.commits().contains_key(&dead_c));
@@ -298,8 +286,8 @@ mod tests {
 
     #[test]
     fn prune_detaches_pruned_parents() {
-        let mut reg: Registry<TestGraph> = Registry::default();
-        let ga = add_test_graph(&mut reg, 1, vec![]);
+        let mut reg = Registry::default();
+        let ga = add_graph(&mut reg, vec![], vec![]);
         let old = reg.commit_graph(Duration::from_secs(1), None, ga, || unreachable!());
         let tip = reg.commit_graph(Duration::from_secs(2), Some(old), ga, || unreachable!());
         reg.set_head(name("alpha"), tip);
@@ -315,21 +303,17 @@ mod tests {
 
     #[test]
     fn blob_liveness_follows_content_refs() {
-        let mut reg: Registry<TestGraph> = Registry::default();
+        let mut reg = Registry::default();
         let used = reg.add_blob("dsp.buffer", BlobLiveness::ContentReferenced, &b"used"[..]);
         let unused = reg.add_blob(
             "dsp.buffer",
             BlobLiveness::ContentReferenced,
             &b"unused"[..],
         );
-        let ga = add_test_graph(&mut reg, 1, vec![]);
+        let ga = add_graph(&mut reg, vec![], vec![("dsp.buffer".to_string(), used)]);
         let c = reg.commit_graph(Duration::from_secs(1), None, ga, || unreachable!());
         reg.set_head(name("alpha"), c);
-        let graph_out = |_: &TestGraph| OutRefs {
-            graphs: vec![],
-            blobs: vec![("dsp.buffer".to_string(), used)],
-        };
-        let live = closure(&reg, [], graph_out);
+        let live = closure(&reg, []);
         assert!(live.blob_live("dsp.buffer", &used));
         assert!(!live.blob_live("dsp.buffer", &unused));
         prune(&mut reg, &live);
@@ -339,11 +323,11 @@ mod tests {
 
     #[test]
     fn blob_liveness_follows_section_values() {
-        let mut reg: Registry<TestGraph> = Registry::default();
+        let mut reg = Registry::default();
         let pinned_by_section =
             reg.add_blob("ui.assets", BlobLiveness::SectionReferenced, &b"icon"[..]);
         let orphan = reg.add_blob("ui.assets", BlobLiveness::SectionReferenced, &b"old"[..]);
-        let ga = add_test_graph(&mut reg, 1, vec![]);
+        let ga = add_graph(&mut reg, vec![], vec![]);
         let c = reg.commit_graph(Duration::from_secs(1), None, ga, || unreachable!());
         reg.set_head(name("alpha"), c);
         reg.set_section_value(
@@ -353,15 +337,15 @@ mod tests {
             Key::Name(name("alpha")),
             Value::Blob("ui.assets".to_string(), pinned_by_section),
         );
-        let live = closure(&reg, [], out);
+        let live = closure(&reg, []);
         assert!(live.blob_live("ui.assets", &pinned_by_section));
         assert!(!live.blob_live("ui.assets", &orphan));
     }
 
     #[test]
     fn export_filters_heads_to_exported_commits() {
-        let mut reg: Registry<TestGraph> = Registry::default();
-        let ga = add_test_graph(&mut reg, 1, vec![]);
+        let mut reg = Registry::default();
+        let ga = add_graph(&mut reg, vec![], vec![]);
         let ca = reg.commit_graph(Duration::from_secs(1), None, ga, || unreachable!());
         let cb = reg.commit_graph(Duration::from_secs(2), None, ga, || unreachable!());
         reg.set_head(name("alpha"), ca);
@@ -383,8 +367,8 @@ mod tests {
 
     #[test]
     fn export_keeps_with_name_metadata_for_exported_heads_only() {
-        let mut reg: Registry<TestGraph> = Registry::default();
-        let ga = add_test_graph(&mut reg, 1, vec![]);
+        let mut reg = Registry::default();
+        let ga = add_graph(&mut reg, vec![], vec![]);
         let ca = reg.commit_graph(Duration::from_secs(1), None, ga, || unreachable!());
         let cb = reg.commit_graph(Duration::from_secs(2), None, ga, || unreachable!());
         reg.set_head(name("alpha"), ca);
@@ -413,8 +397,8 @@ mod tests {
 
     #[test]
     fn unknown_section_survives_export_and_merge() {
-        let mut reg: Registry<TestGraph> = Registry::default();
-        let ga = add_test_graph(&mut reg, 1, vec![]);
+        let mut reg = Registry::default();
+        let ga = add_graph(&mut reg, vec![], vec![]);
         let ca = reg.commit_graph(Duration::from_secs(1), None, ga, || unreachable!());
         reg.set_head(name("alpha"), ca);
         section_insert_datum(
@@ -426,10 +410,10 @@ mod tests {
             &vec![255u8, 0, 128],
         )
         .unwrap();
-        let live = closure(&reg, [], out);
+        let live = closure(&reg, []);
         let exported = export(&reg, &live);
         assert!(exported.section("laser.palette").is_some());
-        let mut other: Registry<TestGraph> = Registry::default();
+        let mut other = Registry::default();
         other.merge(exported);
         let section = other.section("laser.palette").unwrap();
         assert_eq!(section.entries.len(), 1);
@@ -437,34 +421,16 @@ mod tests {
     }
 
     /// The full walk over stored data graphs: nested graphs and blobs stay
-    /// live purely through the structural refs columns, with no
-    /// application-supplied callback logic.
+    /// live purely through the structural refs columns.
     #[test]
     fn data_graph_closure_is_a_pure_data_walk() {
-        use crate::NodeData;
-
-        let node = |refs: Vec<GraphAddr>, blobs: Vec<(SectionId, ContentAddr)>| {
-            let mut n = NodeData::new("test", crate::Datum::Map(vec![]));
-            n.refs = refs.into_iter().map(Into::into).collect();
-            n.blobs = blobs;
-            n.canonicalize();
-            n
-        };
-        let mut reg: Registry<crate::DataGraph> = Registry::default();
+        let mut reg = Registry::default();
         let buf = reg.add_blob("dsp.buffer", BlobLiveness::ContentReferenced, &b"pcm"[..]);
         let orphan = reg.add_blob("dsp.buffer", BlobLiveness::ContentReferenced, &b"old"[..]);
-        let nested = {
-            let mut g = crate::DataGraph::default();
-            g.add_node(node(vec![], vec![("dsp.buffer".to_string(), buf)]));
-            reg.add_graph(g)
-        };
-        let root = {
-            let mut g = crate::DataGraph::default();
-            g.add_node(node(vec![nested], vec![]));
-            reg.add_graph(g)
-        };
+        let nested = add_graph(&mut reg, vec![], vec![("dsp.buffer".to_string(), buf)]);
+        let root = add_graph(&mut reg, vec![nested], vec![]);
         let dead = {
-            let mut g = crate::DataGraph::default();
+            let mut g = DataGraph::default();
             g.add_node(node(vec![], vec![("dsp.buffer".to_string(), orphan)]));
             g.add_node(node(vec![], vec![]));
             reg.add_graph(g)
@@ -472,7 +438,7 @@ mod tests {
         let c = reg.commit_graph(Duration::from_secs(1), None, root, || unreachable!());
         reg.set_head(name("alpha"), c);
 
-        let live = closure(&reg, [], data_graph_out);
+        let live = closure(&reg, []);
         assert!(live.graphs.contains(&root));
         assert!(live.graphs.contains(&nested));
         assert!(!live.graphs.contains(&dead));
@@ -485,8 +451,8 @@ mod tests {
 
     #[test]
     fn export_of_nothing_is_empty() {
-        let mut reg: Registry<TestGraph> = Registry::default();
-        let ga = add_test_graph(&mut reg, 1, vec![]);
+        let mut reg = Registry::default();
+        let ga = add_graph(&mut reg, vec![], vec![]);
         let ca = reg.commit_graph(Duration::from_secs(1), None, ga, || unreachable!());
         reg.set_head(name("alpha"), ca);
         let exported = export(&reg, &LiveSet::default());

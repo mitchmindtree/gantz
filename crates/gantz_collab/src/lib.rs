@@ -2,11 +2,12 @@
 //!
 //! A *session* shares one named graph (and its registry dependency closure)
 //! between peers over [iroh]. This crate owns everything network-shaped and
-//! nothing node-shaped: graphs cross the wire (and sit in the served
-//! [`SessionRegistry`]) as opaque serialized blobs
-//! ([`gantz_ca::RawGraph`]), so the crate stays agnostic of the
-//! application's node type. Validating, merging and applying received
-//! content is the application layer's job, built on `gantz_ca::sync`.
+//! nothing node-shaped: graphs sit in the served [`SessionRegistry`] in
+//! their erased data form ([`gantz_ca::DataGraph`]) and cross the wire as
+//! RON blobs ([`proto::encode_graph`]), so the crate stays agnostic of the
+//! application's node types while still re-hashing and verifying every
+//! graph it serves. Merging and applying received content is the
+//! application layer's job, built on `gantz_ca::sync`.
 //!
 //! Two planes:
 //!

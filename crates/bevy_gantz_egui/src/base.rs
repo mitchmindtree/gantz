@@ -110,26 +110,25 @@ pub fn load<N>(
         let mut deferred: Vec<&BaseSource> = Vec::new();
         for source in pending.iter().copied() {
             let seed = seed_graph_addrs(&base_names.0, &registry);
-            let parsed: gantz_ca::Registry<gantz_ca::DataGraph> =
-                match gantz_egui::export::parse_export_seeded_at::<N>(
-                    source.bytes,
-                    BASE_TIMESTAMP,
-                    &seed,
-                ) {
-                    Ok(e) => e,
-                    // An unresolved reference may resolve once another
-                    // source loads - retry next round.
-                    Err(gantz_egui::export::ParseExportError::Format(e))
-                        if matches!(e.kind, gantz_format::ErrorKind::MissingDependency(_)) =>
-                    {
-                        deferred.push(source);
-                        continue;
-                    }
-                    Err(e) => {
-                        log::error!("base source `{}`: {e}", source.name);
-                        continue;
-                    }
-                };
+            let parsed: gantz_ca::Registry = match gantz_egui::export::parse_export_seeded_at::<N>(
+                source.bytes,
+                BASE_TIMESTAMP,
+                &seed,
+            ) {
+                Ok(e) => e,
+                // An unresolved reference may resolve once another
+                // source loads - retry next round.
+                Err(gantz_egui::export::ParseExportError::Format(e))
+                    if matches!(e.kind, gantz_format::ErrorKind::MissingDependency(_)) =>
+                {
+                    deferred.push(source);
+                    continue;
+                }
+                Err(e) => {
+                    log::error!("base source `{}`: {e}", source.name);
+                    continue;
+                }
+            };
             for (name, ca) in parsed.heads() {
                 let display = name.to_string();
                 if let Some(prev) = name_sources.0.get(&display) {
@@ -229,31 +228,12 @@ pub fn export_to_file<N>(
     }
 }
 
-/// Serialize all named graphs to `.gantz` text in the inline-name format.
-///
-/// This is the base writer for the `update-base` developer workflow, so it uses
-/// [`gantz_egui::export::export_heads_sexpr_named`]: graphs named inline, no
-/// commits/names tables, references by name - keeping `base.gantz` hand-editable
-/// and free of churning addresses. (Other export paths keep the default
-/// address-based format.) Returns `None` on serialization failure.
-pub fn export_all_named<N>(registry: &Registry) -> Option<String>
-where
-    N: 'static + serde::Serialize + serde::de::DeserializeOwned + gantz_format::NodeSugar,
-{
-    let named_heads: Vec<gantz_ca::Head> = registry
-        .heads()
-        .map(|(name, _)| gantz_ca::Head::Branch(name.clone()))
-        .collect();
-
-    gantz_egui::export::export_heads_sexpr_named::<N>(registry, named_heads.iter()).ok()
-}
-
 /// The name -> head graph address seed for a seeded base parse: each known
 /// base name resolved to its head commit's graph in the given registry (see
 /// [`gantz_egui::export::parse_export_seeded_at`]).
-pub fn seed_graph_addrs<G>(
+pub fn seed_graph_addrs(
     names: &gantz_egui::reg::Names,
-    registry: &gantz_ca::Registry<G>,
+    registry: &gantz_ca::Registry,
 ) -> BTreeMap<String, gantz_ca::GraphAddr> {
     names
         .iter()

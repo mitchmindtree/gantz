@@ -11,7 +11,6 @@ use crate::reg::{GraphCache, Registry, lookup_node};
 use bevy_ecs::prelude::*;
 use bevy_log as log;
 use gantz_ca as ca;
-use gantz_ca::DataGraph;
 use gantz_core::data::erase_with_addr;
 use gantz_core::node::{self, GetNode, graph::Graph};
 use gantz_core::vm::{CompileError, Compiled};
@@ -188,7 +187,7 @@ where
 /// history-pane jumps). `None` only when an endpoint commit or graph is
 /// missing from the registry.
 pub fn navigation_matching(
-    registry: &ca::Registry<DataGraph>,
+    registry: &ca::Registry,
     from: ca::CommitAddr,
     to: ca::CommitAddr,
 ) -> Option<ca::Matching> {
@@ -215,7 +214,7 @@ pub fn navigation_matching(
 /// The VM is dropped - falling back to a fresh init - only when no mapping
 /// can be derived or the state fails to remap.
 pub fn migrate_vm_state(
-    registry: &ca::Registry<DataGraph>,
+    registry: &ca::Registry,
     vms: &mut head::HeadVms,
     entity: Entity,
     from: Option<ca::CommitAddr>,
@@ -458,7 +457,7 @@ pub fn validate_committed<N>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gantz_ca::{Datum, NodeData};
+    use gantz_ca::{DataGraph, Datum, NodeData};
     use std::time::Duration;
 
     /// A minimal erased node distinguished by its payload value.
@@ -483,7 +482,7 @@ mod tests {
 
     /// A minimal registry: base `[10, 20, 30]`, then a child commit deleting
     /// index 1 (swap-removal: `[10, 30]`).
-    fn base_and_child() -> (ca::Registry<DataGraph>, ca::CommitAddr, ca::CommitAddr) {
+    fn base_and_child() -> (ca::Registry, ca::CommitAddr, ca::CommitAddr) {
         let mut reg = ca::Registry::default();
         let g = graph(&[10, 20, 30]);
         let base_ca = ca::graph_addr(&g);
@@ -513,7 +512,7 @@ mod tests {
 
     #[test]
     fn navigation_matching_falls_back_to_content_for_divergent_commits() {
-        let mut reg = ca::Registry::<DataGraph>::default();
+        let mut reg = ca::Registry::default();
         let g = graph(&[7]);
         let a_ca = ca::graph_addr(&g);
         let a = reg.commit_graph(Duration::from_secs(1), None, a_ca, || g);

@@ -2,23 +2,24 @@
 //!
 //! Everything here is plain serde encoded with [postcard] (compact,
 //! non-self-describing; `gantz_ca` addresses serialize as raw bytes and
-//! names as strings). Graphs are the exception: the application's node type
-//! needs a self-describing format, so graphs travel inside [`Objects`] as
-//! opaque pre-serialized blobs the application encodes/decodes. The blob
-//! format is entirely the application's choice; it must be a *faithful*
-//! serde codec, since a received graph only applies if its deserialized
-//! content address verifies against the announced one. The gantz app uses
-//! the same RON encoding as its persisted registry (`bevy_gantz::storage`),
-//! so wire and persistence cannot drift. The human-facing `.gantz` text
-//! format is deliberately not used here: it is a name-resolving projection
-//! for import/export (its round-trip re-seeds names and re-roots commits),
+//! names as strings). Graphs are the exception: erased node data
+//! ([`DataGraph`]) is self-describing, so graphs travel inside [`Objects`]
+//! as RON blobs ([`encode_graph`]/[`decode_graph`]) - the same encoding as
+//! the persisted registry (`bevy_gantz::storage`), so wire and persistence
+//! cannot drift. A received graph only applies if its decoded content
+//! re-verifies against the announced address (see
+//! [`gantz_ca::verify_graph`]). The human-facing `.gantz` text format is
+//! deliberately not used here: it is a name-resolving projection for
+//! import/export (its round-trip re-seeds names and re-roots commits),
 //! while sync ships bare address-keyed graphs and moves names only through
 //! the convergence rules.
 //!
 //! [postcard]: https://docs.rs/postcard
 
 use crate::session::{PeerId, SessionId};
-use gantz_ca::{BlobLiveness, Commit, CommitAddr, ContentAddr, GraphAddr, Name, SectionId};
+use gantz_ca::{
+    BlobLiveness, Commit, CommitAddr, ContentAddr, DataGraph, GraphAddr, Name, SectionId,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// A message broadcast on a session's gossip topic.
@@ -73,7 +74,7 @@ pub enum ObjectRef {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Object {
     Commit(CommitAddr, WireCommit),
-    /// A graph as an application-serialized (self-describing) blob.
+    /// A graph as a RON-serialized [`DataGraph`] blob (see [`encode_graph`]).
     Graph(GraphAddr, Vec<u8>),
     /// Raw blob bytes, with the store liveness that stamps the section if
     /// the receiver does not hold it yet.
@@ -188,6 +189,23 @@ pub fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 /// Decode a wire value with postcard.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, postcard::Error> {
     postcard::from_bytes(bytes)
+}
+
+/// Encode a graph as its wire blob: RON of the erased [`DataGraph`], the
+/// same self-describing encoding as the persisted registry.
+pub fn encode_graph(graph: &DataGraph) -> Vec<u8> {
+    // RON serialization of plain data cannot fail short of allocation
+    // failure.
+    ron::to_string(graph).unwrap_or_default().into_bytes()
+}
+
+/// Decode a graph wire blob (see [`encode_graph`]).
+///
+/// Decoding proves nothing: the caller must verify the decoded graph
+/// against the address it was announced under (see
+/// [`gantz_ca::verify_graph`]).
+pub fn decode_graph(bytes: &[u8]) -> Result<DataGraph, ron::de::SpannedError> {
+    ron::de::from_bytes(bytes)
 }
 
 /// The digest of a `name -> tip` head map, for [`GossipMsg::Digest`]

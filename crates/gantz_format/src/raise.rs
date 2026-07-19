@@ -45,7 +45,7 @@ pub struct GraphLabels {
 /// `(section ...)` form so unknown-domain data round-trips through text.
 /// The `heads` section is always covered by the `(names ...)` table.
 pub fn raise(
-    registry: &Registry<DataGraph>,
+    registry: &Registry,
     sugar: &dyn Sugar,
     claimed: &[&str],
 ) -> Result<Dumped, FormatError> {
@@ -110,7 +110,7 @@ pub fn raise(
 /// `(section ...)` forms, skipping `heads` (covered by the names table),
 /// the caller's `claimed` ids, and non-datum values (blob indirections do
 /// not travel through text yet).
-fn push_sections(doc: &mut Document, registry: &Registry<DataGraph>, claimed: &[&str]) {
+fn push_sections(doc: &mut Document, registry: &Registry, claimed: &[&str]) {
     for (id, section) in registry.sections() {
         if id == gantz_ca::registry::HEADS_ID || claimed.contains(&id.as_str()) {
             continue;
@@ -153,7 +153,7 @@ fn push_sections(doc: &mut Document, registry: &Registry<DataGraph>, claimed: &[
 /// Graphs with no name are skipped: a name-resolved `ref` can only target a
 /// named graph, so an unnamed graph is unreachable in this format.
 pub fn raise_named(
-    registry: &Registry<DataGraph>,
+    registry: &Registry,
     sugar: &dyn Sugar,
     claimed: &[&str],
 ) -> Result<Dumped, FormatError> {

@@ -1,7 +1,7 @@
 //! Tests for `root_port_info` - the root-level DSP port classification
 //! behind DSP edge styling (#300).
 
-use gantz_ca::{ContentAddr, DataGraph};
+use gantz_ca::ContentAddr;
 use gantz_core::Edge;
 use gantz_core::data::ReifiedGraphs;
 use gantz_core::node::graph::Graph;
@@ -76,7 +76,7 @@ impl gantz_core::Node for N {
 
 /// Commit `graph` (erased), returning its graph address as a `ContentAddr`
 /// (the form `Ref::content_addr` reports).
-fn commit(registry: &mut gantz_ca::Registry<DataGraph>, graph: Graph<N>) -> ContentAddr {
+fn commit(registry: &mut gantz_ca::Registry, graph: Graph<N>) -> ContentAddr {
     let now = std::time::Duration::from_secs(1);
     let (dg, addr) = gantz_core::data::erase_with_addr(&graph).expect("erase");
     registry.commit_graph(now, None, addr, || dg);
@@ -84,7 +84,7 @@ fn commit(registry: &mut gantz_ca::Registry<DataGraph>, graph: Graph<N>) -> Cont
 }
 
 /// Reify the whole registry column into a typed cache.
-fn reify_all(registry: &gantz_ca::Registry<DataGraph>) -> ReifiedGraphs<N> {
+fn reify_all(registry: &gantz_ca::Registry) -> ReifiedGraphs<N> {
     let mut reified = ReifiedGraphs::new();
     let errs = reified.ensure_all(registry);
     assert!(errs.is_empty(), "{errs:?}");
@@ -106,7 +106,7 @@ fn shapes<const M: usize>(entries: [(&[usize], usize, PortShape); M]) -> PortSha
 /// beyond `n_dsp_inputs` and non-DSP nodes stay unclassified.
 #[test]
 fn flat_graph_classifies_dsp_ports() {
-    let registry = gantz_ca::Registry::<DataGraph>::default();
+    let registry = gantz_ca::Registry::default();
     let mut g: Graph<N> = Graph::default();
     let sin = g.add_node(N::SinOsc(SinOsc::default()));
     let out = g.add_node(N::Out(Out::default()));
@@ -136,7 +136,7 @@ fn flat_graph_classifies_dsp_ports() {
 /// and its output shapes resolve through absolutized `PortShapes` keys.
 #[test]
 fn ref_ports_classify_through_child() {
-    let mut registry = gantz_ca::Registry::<DataGraph>::default();
+    let mut registry = gantz_ca::Registry::default();
 
     // Child: inlet -> ~lag -> outlet.
     let mut child: Graph<N> = Graph::default();
@@ -174,7 +174,7 @@ fn ref_ports_classify_through_child() {
 /// head derived silent) still classifies, with an unknown shape.
 #[test]
 fn ref_output_without_recorded_shape_is_signal_with_none() {
-    let mut registry = gantz_ca::Registry::<DataGraph>::default();
+    let mut registry = gantz_ca::Registry::default();
     let mut child: Graph<N> = Graph::default();
     let s = child.add_node(N::SinOsc(SinOsc::default()));
     let o = child.add_node(N::Outlet);
@@ -192,7 +192,7 @@ fn ref_output_without_recorded_shape_is_signal_with_none() {
 /// relative paths into the absolutized key.
 #[test]
 fn nested_ref_paths_compose() {
-    let mut registry = gantz_ca::Registry::<DataGraph>::default();
+    let mut registry = gantz_ca::Registry::default();
 
     // Inner: ~sinosc -> outlet.
     let mut inner: Graph<N> = Graph::default();
@@ -226,7 +226,7 @@ fn nested_ref_paths_compose() {
 /// interface edges).
 #[test]
 fn root_boundaries_forward_classification() {
-    let registry = gantz_ca::Registry::<DataGraph>::default();
+    let registry = gantz_ca::Registry::default();
     let mut g: Graph<N> = Graph::default();
     let i = g.add_node(N::Inlet);
     let l = g.add_node(N::Lag(Lag::default()));
@@ -252,7 +252,7 @@ fn root_boundaries_forward_classification() {
 /// A reference to a missing commit classifies as control without panicking.
 #[test]
 fn dangling_ref_is_control() {
-    let registry = gantz_ca::Registry::<DataGraph>::default();
+    let registry = gantz_ca::Registry::default();
     let mut g: Graph<N> = Graph::default();
     let r = g.add_node(N::Ref(Ref::new(ContentAddr::from([9u8; 32]))));
     let sin = g.add_node(N::SinOsc(SinOsc::default()));
@@ -267,7 +267,7 @@ fn dangling_ref_is_control() {
 /// widest summand and audio rate dominates (mirroring derivation).
 #[test]
 fn multi_fed_ref_outlet_sums_shapes() {
-    let mut registry = gantz_ca::Registry::<DataGraph>::default();
+    let mut registry = gantz_ca::Registry::default();
 
     // Child: two sources feeding the one outlet.
     let mut child: Graph<N> = Graph::default();

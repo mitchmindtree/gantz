@@ -377,7 +377,7 @@ impl<'a> GraphSelect<'a> {
 /// The head-listing widgets (graph select, history view) share this ordering
 /// for their unnamed-commit rows.
 pub fn commits_by_recency(
-    reg: &gantz_ca::Registry<gantz_ca::DataGraph>,
+    reg: &gantz_ca::Registry,
 ) -> Vec<(&gantz_ca::CommitAddr, &gantz_ca::Commit)> {
     let mut commits: Vec<_> = reg.commits().iter().collect();
     commits.sort_by(|(_, a), (_, b)| b.timestamp.cmp(&a.timestamp));

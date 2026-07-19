@@ -8,7 +8,7 @@
 //! which editing a nested graph propagates up to its parents.
 
 use crate::node::NamedRef;
-use gantz_ca::{CommitAddr, DataGraph, GraphAddr, Name, Registry};
+use gantz_ca::{CommitAddr, GraphAddr, Name, Registry};
 use gantz_core::node::graph::Graph;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -47,10 +47,7 @@ pub struct Moved {
 
 /// Reify the stored graph at `source_commit` through the node set, logging
 /// (and skipping, via `None`) graphs that fail to decode.
-fn reify_commit_graph<N>(
-    registry: &Registry<DataGraph>,
-    source_commit: &CommitAddr,
-) -> Option<Graph<N>>
+fn reify_commit_graph<N>(registry: &Registry, source_commit: &CommitAddr) -> Option<Graph<N>>
 where
     N: DeserializeOwned,
 {
@@ -82,7 +79,7 @@ where
 /// Erase a rewritten graph and commit it under `name`, returning the new
 /// commit. Logs (and skips, via `None`) graphs that fail to erase.
 fn commit_erased<N>(
-    registry: &mut Registry<DataGraph>,
+    registry: &mut Registry,
     timestamp: Duration,
     name: &Name,
     graph: &Graph<N>,
@@ -104,7 +101,7 @@ where
 /// when something changed - commit the result under `name`. Returns the
 /// resulting [`Moved`], or `None` when nothing changed.
 fn commit_rewritten<N>(
-    registry: &mut Registry<DataGraph>,
+    registry: &mut Registry,
     timestamp: Duration,
     name: &Name,
     source_commit: CommitAddr,
@@ -161,7 +158,7 @@ fn renamed(descendant: &Name, old: &Name, new: &Name) -> Name {
 /// Children are copied deepest-first so a parent's references resolve to its
 /// already-copied children.
 pub fn fork_nested<N>(
-    registry: &mut Registry<DataGraph>,
+    registry: &mut Registry,
     timestamp: Duration,
     old: &Name,
     new: &Name,
@@ -232,7 +229,7 @@ where
 /// non-nesting reference shape. The loop cannot run forever even for a
 /// (degenerate) mutually-referencing registry - it simply stops once no graph
 /// changes.
-pub fn resync<N>(registry: &mut Registry<DataGraph>, timestamp: Duration) -> Vec<Moved>
+pub fn resync<N>(registry: &mut Registry, timestamp: Duration) -> Vec<Moved>
 where
     N: Serialize + DeserializeOwned + gantz_core::Node + AsNamedRefMut,
 {
@@ -295,7 +292,7 @@ where
 /// Returns the parent's move (if it changed) so an open parent head can be
 /// refreshed. A no-op (empty) when `old_nested` is not a nested name.
 pub fn promote_nested<N>(
-    registry: &mut Registry<DataGraph>,
+    registry: &mut Registry,
     timestamp: Duration,
     old_nested: &Name,
     new_name: &Name,

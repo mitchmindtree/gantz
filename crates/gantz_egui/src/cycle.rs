@@ -8,7 +8,7 @@
 //! load-time `CycleInRefs` check.
 
 use crate::sync::AsNamedRef;
-use gantz_ca::{DataGraph, Name, Registry};
+use gantz_ca::{Name, Registry};
 use gantz_core::data::ReifiedGraphs;
 use std::collections::HashSet;
 
@@ -21,7 +21,7 @@ use std::collections::HashSet;
 /// walk reads `NamedRef` names, so it goes through the reified cache: a graph
 /// missing from the cache likewise contributes no edges.
 pub fn would_cycle<N>(
-    registry: &Registry<DataGraph>,
+    registry: &Registry,
     reified: &ReifiedGraphs<N>,
     target: &Name,
     editing: &Name,
@@ -63,7 +63,7 @@ mod tests {
     }
 
     /// Commit a graph of `NamedRef`s (one per referenced name) under `name`.
-    fn commit_named_refs(registry: &mut Registry<DataGraph>, graph_name: &str, refs: &[&str]) {
+    fn commit_named_refs(registry: &mut Registry, graph_name: &str, refs: &[&str]) {
         let mut graph = TestGraph::default();
         for &r in refs {
             // The referenced content address is irrelevant to the name-based
@@ -90,7 +90,7 @@ mod tests {
 
     #[test]
     fn detects_cycles_by_name() {
-        let mut registry = Registry::<DataGraph>::default();
+        let mut registry = Registry::default();
         // `a` references `b`; `b` references `a`.
         commit_named_refs(&mut registry, "b", &[]);
         commit_named_refs(&mut registry, "a", &["b"]);

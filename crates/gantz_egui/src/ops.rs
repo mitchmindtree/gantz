@@ -10,7 +10,7 @@ use crate::sync::AsNamedRef;
 use crate::widget::gantz::OpenHeadState;
 use crate::widget::graph_scene::NodeIndex;
 use crate::{CreateNode, InspectEdge, PastePos, export, node::NamedRef};
-use gantz_ca::{CommitAddr, DataGraph, GraphAddr, Name};
+use gantz_ca::{CommitAddr, GraphAddr, Name};
 use gantz_core::data::ReifiedGraphs;
 use gantz_core::node::{self, GetNode, graph::Graph};
 use serde::Serialize;
@@ -26,7 +26,7 @@ use steel::steel_vm::engine::Engine;
 /// The newest existing commit pointing at the graph (if any) becomes the new
 /// commit's parent, preserving the fork point's history.
 pub fn branch_node<N>(
-    registry: &mut gantz_ca::Registry<DataGraph>,
+    registry: &mut gantz_ca::Registry,
     timestamp: std::time::Duration,
     graph: &mut Graph<N>,
     new_name: String,
@@ -71,7 +71,7 @@ pub fn branch_node<N>(
 /// The newest commit pointing at the given graph, if any (ties broken by
 /// address for determinism).
 fn newest_commit_for_graph(
-    registry: &gantz_ca::Registry<DataGraph>,
+    registry: &gantz_ca::Registry,
     graph_addr: GraphAddr,
 ) -> Option<CommitAddr> {
     registry
@@ -88,7 +88,7 @@ fn newest_commit_for_graph(
 /// the cause). Writing the resulting string to the clipboard is the caller's
 /// responsibility.
 pub fn copy_nodes<N>(
-    registry: &gantz_ca::Registry<DataGraph>,
+    registry: &gantz_ca::Registry,
     graph: &Graph<N>,
     head_view: &crate::SceneView,
     selection: &HashSet<NodeIndex>,
@@ -115,7 +115,7 @@ where
 /// Returns the index of the new node.
 #[allow(clippy::too_many_arguments)]
 pub fn create_node<N>(
-    registry: &gantz_ca::Registry<DataGraph>,
+    registry: &gantz_ca::Registry,
     reified: &ReifiedGraphs<N>,
     editing: Option<&str>,
     get_node: GetNode,
@@ -174,7 +174,7 @@ where
 /// `parent` is the emitting head's name; the new graph is named with the first
 /// free `<parent>:<n>` leaf. Returns the index of the new node.
 pub fn create_nested_graph<N>(
-    registry: &mut gantz_ca::Registry<DataGraph>,
+    registry: &mut gantz_ca::Registry,
     timestamp: std::time::Duration,
     graph: &mut Graph<N>,
     view: &mut crate::SceneView,
@@ -326,7 +326,7 @@ pub fn remove_nodes<N>(
 /// a failed copy never loses nodes. Like [`remove_nodes`], run this before the
 /// next recompile.
 pub fn cut_nodes<N>(
-    registry: &gantz_ca::Registry<DataGraph>,
+    registry: &gantz_ca::Registry,
     graph: &mut Graph<N>,
     vm: &mut Engine,
     head_view: &mut crate::SceneView,
@@ -410,7 +410,7 @@ pub fn inspect_edge<N>(
 /// their state initialized.
 #[allow(clippy::too_many_arguments)]
 pub fn paste<N>(
-    registry: &mut gantz_ca::Registry<DataGraph>,
+    registry: &mut gantz_ca::Registry,
     reified: &ReifiedGraphs<N>,
     editing: Option<&str>,
     graph: &mut Graph<N>,
@@ -473,7 +473,7 @@ where
 /// re-registers the root graph with the VM afterwards so the new nodes get
 /// their state initialized.
 pub fn duplicate_nodes<N>(
-    registry: &mut gantz_ca::Registry<DataGraph>,
+    registry: &mut gantz_ca::Registry,
     reified: &ReifiedGraphs<N>,
     editing: Option<&str>,
     graph: &mut Graph<N>,
@@ -510,7 +510,7 @@ where
 /// Returns `None` when the head has no parent commit to return to.
 /// Navigation itself is frontend-specific and stays with the caller.
 pub fn undo(
-    registry: &gantz_ca::Registry<DataGraph>,
+    registry: &gantz_ca::Registry,
     redo_stacks: &mut HashMap<gantz_ca::Head, Vec<CommitAddr>>,
     head: &gantz_ca::Head,
 ) -> Option<CommitAddr> {
@@ -610,7 +610,7 @@ pub enum MergeHeadOutcome {
 /// Fast-forwards mutate nothing - the caller navigates the head instead.
 #[allow(clippy::too_many_arguments)]
 pub fn merge_head<N>(
-    registry: &mut gantz_ca::Registry<DataGraph>,
+    registry: &mut gantz_ca::Registry,
     reified: &ReifiedGraphs<N>,
     timestamp: gantz_ca::Timestamp,
     head: &mut gantz_ca::Head,
@@ -747,7 +747,7 @@ where
 /// been seeded - or no node-position change). Seeding the new commit's view,
 /// clearing the redo stack and migrating GUI state stay with the caller.
 pub fn commit_layout(
-    registry: &mut gantz_ca::Registry<DataGraph>,
+    registry: &mut gantz_ca::Registry,
     timestamp: gantz_ca::Timestamp,
     head: &mut gantz_ca::Head,
     live: &crate::SceneView,
@@ -915,7 +915,7 @@ mod tests {
 
     /// Commit the erased form of `graph`, returning the new commit address.
     fn commit_test_graph(
-        reg: &mut gantz_ca::Registry<DataGraph>,
+        reg: &mut gantz_ca::Registry,
         secs: u64,
         parent: Option<CommitAddr>,
         graph: &Graph<TestNode>,
@@ -934,7 +934,7 @@ mod tests {
         base: &[u32],
         ours: &[u32],
         theirs: &[u32],
-    ) -> (gantz_ca::Registry<DataGraph>, gantz_ca::Head) {
+    ) -> (gantz_ca::Registry, gantz_ca::Head) {
         let mut reg = gantz_ca::Registry::default();
         let base_ca = commit_test_graph(&mut reg, 1, None, &test_graph(base));
         let ours_ca = commit_test_graph(&mut reg, 2, Some(base_ca), &test_graph(ours));
@@ -946,7 +946,7 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn run_merge(
-        reg: &mut gantz_ca::Registry<DataGraph>,
+        reg: &mut gantz_ca::Registry,
         head: &mut gantz_ca::Head,
         graph: &mut Graph<TestNode>,
         vm: &mut Engine,

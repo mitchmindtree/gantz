@@ -54,7 +54,7 @@ pub use sugar::{CoreSugar, NodeSugar, Sugar, SugarArgs, Sugars};
 #[doc(hidden)]
 pub use gantz_nodetag::NodeTag;
 
-use gantz_ca::{DataGraph, Registry, Timestamp};
+use gantz_ca::{Registry, Timestamp};
 use gantz_core::Node;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -112,7 +112,7 @@ where
 /// Metadata sections are written as generic `(section ...)` forms, except
 /// the ids in `claimed`, which the caller renders itself with friendly
 /// forms (e.g. `(descriptions ...)`).
-pub fn to_string<N>(registry: &Registry<DataGraph>, claimed: &[&str]) -> Result<Dumped, FormatError>
+pub fn to_string<N>(registry: &Registry, claimed: &[&str]) -> Result<Dumped, FormatError>
 where
     N: NodeSugar,
 {
@@ -121,7 +121,7 @@ where
 
 /// Serialize a registry to `.gantz` text using a custom keyword [`Sugar`].
 pub fn to_string_with(
-    registry: &Registry<DataGraph>,
+    registry: &Registry,
     sugar: &dyn Sugar,
     claimed: &[&str],
 ) -> Result<Dumped, FormatError> {
@@ -132,10 +132,7 @@ pub fn to_string_with(
 /// under its registry name, with no `(commits ...)` / `(names ...)` tables and
 /// references resolved by name. Intended for hand-editable, churn-free files
 /// such as the baked-in base. See [`to_string`] for `claimed`.
-pub fn to_string_named<N>(
-    registry: &Registry<DataGraph>,
-    claimed: &[&str],
-) -> Result<Dumped, FormatError>
+pub fn to_string_named<N>(registry: &Registry, claimed: &[&str]) -> Result<Dumped, FormatError>
 where
     N: NodeSugar,
 {
@@ -144,7 +141,7 @@ where
 
 /// As [`to_string_named`], with a custom keyword [`Sugar`].
 pub fn to_string_named_with(
-    registry: &Registry<DataGraph>,
+    registry: &Registry,
     sugar: &dyn Sugar,
     claimed: &[&str],
 ) -> Result<Dumped, FormatError> {
@@ -271,7 +268,7 @@ mod data_only_tests {
     //! export a registry.
 
     use super::*;
-    use gantz_ca::{Commit, Datum, Edge, NodeData};
+    use gantz_ca::{Commit, DataGraph, Datum, Edge, NodeData};
 
     #[test]
     fn raising_needs_no_node_set() {
@@ -286,7 +283,7 @@ mod data_only_tests {
         ));
         graph.add_edge(expr, gain, Edge::from((0u16, 0u16)));
 
-        let mut registry: Registry<DataGraph> = Registry::default();
+        let mut registry: Registry = Registry::default();
         let g_addr = registry.add_graph(graph);
         let c_addr = registry.add_commit(Commit::new(Timestamp::ZERO, None, g_addr));
         registry.set_head("patch".parse().expect("valid name"), c_addr);

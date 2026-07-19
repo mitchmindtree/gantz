@@ -10,7 +10,6 @@ use crate::head::{HeadRef, OpenHead};
 use bevy_ecs::prelude::*;
 use bevy_log as log;
 use gantz_ca as ca;
-use gantz_ca::DataGraph;
 use gantz_core::Node;
 use gantz_core::data::ReifiedGraphs;
 use serde::de::DeserializeOwned;
@@ -22,10 +21,10 @@ use std::time::Duration;
 
 /// A `Resource` wrapper around the data-level [`gantz_ca::Registry`].
 ///
-/// The registry stores graphs as concrete data ([`DataGraph`]); typed graphs
+/// The registry stores graphs as concrete data ([`gantz_ca::DataGraph`]); typed graphs
 /// are served from the [`GraphCache`].
 #[derive(Default, Resource)]
-pub struct Registry(pub ca::Registry<DataGraph>);
+pub struct Registry(pub ca::Registry);
 
 /// A `Resource` wrapper around the append-only reified-graph cache serving
 /// the registry's graphs as typed `Graph<N>`s.
@@ -36,7 +35,7 @@ pub struct Registry(pub ca::Registry<DataGraph>);
 pub struct GraphCache<N>(pub ReifiedGraphs<N>);
 
 impl std::ops::Deref for Registry {
-    type Target = ca::Registry<DataGraph>;
+    type Target = ca::Registry;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -121,7 +120,7 @@ pub fn prune_unused<N>(
         .iter()
         .filter_map(|h| registry.head_commit_ca(&**h))
         .collect::<Vec<_>>();
-    let live = ca::closure(&registry.0, extra, ca::data_graph_out);
+    let live = ca::closure(&registry.0, extra);
     ca::prune(&mut registry.0, &live);
     cache.retain_live(&live);
 }

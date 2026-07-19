@@ -56,7 +56,7 @@ impl MergePreview {
 ///
 /// Skips ours' own name and nested (`parent:child`) graphs. Candidates are
 /// ordered by name (the registry's name order).
-pub fn merge_candidates(reg: &ca::Registry<DataGraph>, ours: &ca::Head) -> Vec<MergeCandidate> {
+pub fn merge_candidates(reg: &ca::Registry, ours: &ca::Head) -> Vec<MergeCandidate> {
     let Some(ours_tip) = reg.head_commit_ca(ours) else {
         return vec![];
     };
@@ -90,7 +90,7 @@ pub fn merge_candidates(reg: &ca::Registry<DataGraph>, ours: &ca::Head) -> Vec<M
 /// Returns `None` when there is nothing to merge (unknown source, unrelated or
 /// already-up-to-date histories, or missing registry data).
 pub fn merge_preview<N>(
-    reg: &ca::Registry<DataGraph>,
+    reg: &ca::Registry,
     reified: &ReifiedGraphs<N>,
     ours: &ca::Head,
     source: &str,
@@ -131,7 +131,7 @@ where
 /// through the node set first. A graph that fails to decode is itself a
 /// blocker - its references cannot be checked.
 fn data_graph_blockers<N>(
-    reg: &ca::Registry<DataGraph>,
+    reg: &ca::Registry,
     reified: &ReifiedGraphs<N>,
     ours: &ca::Head,
     merged: &DataGraph,
@@ -179,7 +179,7 @@ pub fn summary_text(s: &ca::DiffSummary) -> String {
 /// Render merge conflicts for display, phrased from the current head's
 /// perspective ("here" = ours, "the branch" = theirs). Each line names the
 /// resolution the merge applied (per the selected [`ca::Resolutions`]).
-pub fn conflict_strings(conflicts: &[ca::Conflict<gantz_core::Edge>]) -> Vec<String> {
+pub fn conflict_strings(conflicts: &[ca::Conflict]) -> Vec<String> {
     conflicts
         .iter()
         .map(|conflict| match conflict {
@@ -221,7 +221,7 @@ pub fn conflict_strings(conflicts: &[ca::Conflict<gantz_core::Edge>]) -> Vec<Str
 /// a reference cycle back to the edited graph (mirroring the guard in
 /// [`crate::ops::paste`]; with sync enabled such a cycle recommits endlessly).
 pub fn merge_blockers<N>(
-    reg: &ca::Registry<DataGraph>,
+    reg: &ca::Registry,
     reified: &ReifiedGraphs<N>,
     ours: &ca::Head,
     merged: &Graph<N>,

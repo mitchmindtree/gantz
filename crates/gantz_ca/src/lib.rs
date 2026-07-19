@@ -16,10 +16,7 @@ pub use edge::{Edge, Input, Output};
 /// Re-export the derive macro.
 pub use gantz_ca_derive::CaHash;
 #[doc(inline)]
-pub use graph::{
-    GraphAddr, GraphHash, RawGraph, addr as graph_addr, addr_with_nodes as graph_addr_with_nodes,
-    hash_graph, hash_graph_with_nodes, node_addrs,
-};
+pub use graph::{GraphAddr, addr as graph_addr};
 #[doc(inline)]
 pub use hash::{CaHash, Hasher};
 #[doc(inline)]
@@ -46,7 +43,7 @@ pub use section::{
     SectionId, Value, blob_addr,
 };
 #[doc(inline)]
-pub use sync::{SyncStep, monotonic_timestamp, plan_sync_step};
+pub use sync::{SyncStep, monotonic_timestamp, plan_sync_step, verify_graph};
 
 mod ca;
 mod commit;

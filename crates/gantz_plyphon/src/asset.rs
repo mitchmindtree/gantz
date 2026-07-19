@@ -160,13 +160,13 @@ impl From<AudioAsset> for plyphon::Buffer {
 /// Insert the asset's canonical encoding into the registry's audio-buffer
 /// blob section, returning its content address. Idempotent: identical audio
 /// always lands at the same address.
-pub fn add_audio_asset<G>(reg: &mut Registry<G>, asset: &AudioAsset) -> ContentAddr {
+pub fn add_audio_asset(reg: &mut Registry, asset: &AudioAsset) -> ContentAddr {
     reg.add_blob(AudioBuffers::ID, AudioBuffers::LIVENESS, asset.encode())
 }
 
 /// Decode the audio asset stored at the given address in the registry's
 /// audio-buffer blob section, if present and well formed.
-pub fn audio_asset<G>(reg: &Registry<G>, addr: &ContentAddr) -> Option<AudioAsset> {
+pub fn audio_asset(reg: &Registry, addr: &ContentAddr) -> Option<AudioAsset> {
     let bytes = reg.blob(AudioBuffers::ID, addr)?;
     AudioAsset::decode(bytes).ok()
 }
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn registry_round_trip_through_the_buffer_section() {
-        let mut reg: Registry<Vec<u8>> = Registry::default();
+        let mut reg = Registry::default();
         let a = asset();
         let addr = add_audio_asset(&mut reg, &a);
         assert_eq!(addr, a.addr());

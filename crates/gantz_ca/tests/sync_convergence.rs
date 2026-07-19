@@ -11,15 +11,20 @@
 //! further announcements pending - the definition of convergence for #286.
 
 use gantz_ca::{
-    BothModified, CommitAddr, EditOrDelete, Head, Registry, Resolutions, SyncStep, commit_addr,
-    graph_addr, history, merge::MergeResolution, merge_commits, monotonic_timestamp,
-    plan_sync_step, sync::Staged,
+    BothModified, CommitAddr, DataGraph, Datum, EditOrDelete, Head, NodeData, Registry,
+    Resolutions, SyncStep, commit_addr, graph_addr, history, merge::MergeResolution, merge_commits,
+    monotonic_timestamp, plan_sync_step, sync::Staged,
 };
-use petgraph::{Directed, visit::EdgeRef};
+use petgraph::visit::EdgeRef;
 use std::time::Duration;
 
-type Graph = petgraph::graph::Graph<String, u32, Directed, usize>;
-type Reg = Registry<Graph>;
+type Graph = DataGraph;
+type Reg = Registry;
+
+/// A canonical test node with the given tag.
+fn node(tag: &str) -> NodeData {
+    NodeData::new(tag, Datum::Map(vec![]))
+}
 
 /// A peer's view of the shared session: its registry, its tip on the shared
 /// graph, and the session bookkeeping a live peer would hold.
@@ -168,8 +173,8 @@ impl Rng {
 /// Peers sharing a common root commit whose graph holds the given nodes.
 fn peers_with_base(n: usize, base_nodes: &[&str]) -> (Vec<Peer>, Net) {
     let mut graph = Graph::default();
-    for node in base_nodes {
-        graph.add_node(node.to_string());
+    for node_tag in base_nodes {
+        graph.add_node(node(node_tag));
     }
     let mut reg = Reg::default();
     let graph_ca = graph_addr(&graph);
@@ -245,7 +250,7 @@ fn assert_converged(peers: &[Peer]) -> CommitAddr {
 /// A graph's node weights in index order plus its sorted edge triples:
 /// equality here is stronger than address equality (it pins node indices,
 /// which cross-peer layout coherence relies on).
-fn graph_value(g: &Graph) -> (Vec<String>, Vec<(usize, usize, u32)>) {
+fn graph_value(g: &Graph) -> (Vec<NodeData>, Vec<(usize, usize, gantz_ca::Edge)>) {
     let nodes = g.node_weights().cloned().collect();
     let mut edges: Vec<_> = g
         .edge_references()
@@ -257,7 +262,7 @@ fn graph_value(g: &Graph) -> (Vec<String>, Vec<(usize, usize, u32)>) {
 
 /// The node weights of a peer's converged graph.
 fn node_set(peer: &Peer) -> Vec<String> {
-    let mut nodes: Vec<String> = peer.graph().node_weights().cloned().collect();
+    let mut nodes: Vec<String> = peer.graph().node_weights().map(|n| n.tag.clone()).collect();
     nodes.sort();
     nodes
 }
@@ -273,11 +278,11 @@ fn reachable_merge_commits(reg: &Reg, tip: CommitAddr) -> usize {
 fn two_peers_disjoint_adds_converge_with_one_merge() {
     let (mut peers, mut net) = peers_with_base(2, &["base"]);
     peers[0].edit(Duration::from_secs(10), |g| {
-        g.add_node("a".to_string());
+        g.add_node(node("a"));
     });
     announce(&mut peers, &mut net, 0);
     peers[1].edit(Duration::from_secs(20), |g| {
-        g.add_node("b".to_string());
+        g.add_node(node("b"));
     });
     announce(&mut peers, &mut net, 1);
     run(&mut peers, &mut net, 42);
@@ -296,11 +301,11 @@ fn convergence_is_delivery_order_independent() {
     let converged_tip = |seed: u64| {
         let (mut peers, mut net) = peers_with_base(2, &["base"]);
         peers[0].edit(Duration::from_secs(10), |g| {
-            g.add_node("a".to_string());
+            g.add_node(node("a"));
         });
         announce(&mut peers, &mut net, 0);
         peers[1].edit(Duration::from_secs(20), |g| {
-            g.add_node("b".to_string());
+            g.add_node(node("b"));
         });
         announce(&mut peers, &mut net, 1);
         run(&mut peers, &mut net, seed);
@@ -315,11 +320,11 @@ fn both_modified_resolves_to_newest_edit() {
     let (mut peers, mut net) = peers_with_base(2, &["n"]);
     // Both peers modify the same base node; peer 1's edit is newer.
     peers[0].edit(Duration::from_secs(10), |g| {
-        g[petgraph::graph::NodeIndex::new(0)] = "n-old".to_string();
+        g[petgraph::graph::NodeIndex::new(0)] = node("n-old");
     });
     announce(&mut peers, &mut net, 0);
     peers[1].edit(Duration::from_secs(20), |g| {
-        g[petgraph::graph::NodeIndex::new(0)] = "n-new".to_string();
+        g[petgraph::graph::NodeIndex::new(0)] = node("n-new");
     });
     announce(&mut peers, &mut net, 1);
     run(&mut peers, &mut net, 7);
@@ -339,7 +344,7 @@ fn delete_vs_modify_keeps_the_edit() {
     });
     announce(&mut peers, &mut net, 0);
     peers[1].edit(Duration::from_secs(20), |g| {
-        g[petgraph::graph::NodeIndex::new(1)] = "n-edited".to_string();
+        g[petgraph::graph::NodeIndex::new(1)] = node("n-edited");
     });
     announce(&mut peers, &mut net, 1);
     run(&mut peers, &mut net, 7);
@@ -356,7 +361,7 @@ fn three_peers_converge_under_arbitrary_delivery_orders() {
         let (mut peers, mut net) = peers_with_base(3, &["base"]);
         for (i, (name, secs)) in [("a", 10), ("b", 20), ("c", 30)].iter().enumerate() {
             peers[i].edit(Duration::from_secs(*secs), |g| {
-                g.add_node(name.to_string());
+                g.add_node(node(name));
             });
             announce(&mut peers, &mut net, i);
         }
@@ -376,11 +381,11 @@ fn twin_commits_adopt_without_merging() {
     // Both peers make the identical edit concurrently (e.g. two resync
     // passes): same graph, different timestamps.
     peers[0].edit(Duration::from_secs(10), |g| {
-        g.add_node("x".to_string());
+        g.add_node(node("x"));
     });
     announce(&mut peers, &mut net, 0);
     peers[1].edit(Duration::from_secs(20), |g| {
-        g.add_node("x".to_string());
+        g.add_node(node("x"));
     });
     announce(&mut peers, &mut net, 1);
     run(&mut peers, &mut net, 3);
@@ -394,7 +399,7 @@ fn twin_commits_adopt_without_merging() {
 fn fast_forwards_are_not_reannounced() {
     let (mut peers, mut net) = peers_with_base(2, &["base"]);
     peers[0].edit(Duration::from_secs(10), |g| {
-        g.add_node("a".to_string());
+        g.add_node(node("a"));
     });
     announce(&mut peers, &mut net, 0);
     // A single delivery: peer 1 fast-forwards and must stay silent.
@@ -408,11 +413,11 @@ fn fast_forwards_are_not_reannounced() {
 fn redelivery_is_idempotent() {
     let (mut peers, mut net) = peers_with_base(2, &["base"]);
     peers[0].edit(Duration::from_secs(10), |g| {
-        g.add_node("a".to_string());
+        g.add_node(node("a"));
     });
     announce(&mut peers, &mut net, 0);
     peers[1].edit(Duration::from_secs(20), |g| {
-        g.add_node("b".to_string());
+        g.add_node(node("b"));
     });
     announce(&mut peers, &mut net, 1);
     run(&mut peers, &mut net, 42);
@@ -439,14 +444,14 @@ fn slow_clock_edits_stay_causally_ordered() {
     let (mut peers, mut net) = peers_with_base(2, &["n"]);
     // Peer 0 edits at t=100; peer 1's wall clock is far behind (t=51).
     peers[0].edit(Duration::from_secs(100), |g| {
-        g[petgraph::graph::NodeIndex::new(0)] = "n-first".to_string();
+        g[petgraph::graph::NodeIndex::new(0)] = node("n-first");
     });
     announce(&mut peers, &mut net, 0);
     run(&mut peers, &mut net, 0);
     assert_converged(&peers);
     // Peer 1 edits *after observing* the t=100 commit, with its slow clock.
     let tip = peers[1].edit(Duration::from_secs(51), |g| {
-        g[petgraph::graph::NodeIndex::new(0)] = "n-after".to_string();
+        g[petgraph::graph::NodeIndex::new(0)] = node("n-after");
     });
     // The monotonic guard orders the edit strictly after everything observed,
     // so "last edit wins" respects causality despite the skew.
@@ -465,10 +470,10 @@ fn join_snapshot_tolerates_pruned_history() {
     let (mut host_peers, _) = peers_with_base(1, &["base"]);
     let mut host = host_peers.remove(0);
     host.edit(Duration::from_secs(10), |g| {
-        g.add_node("a".to_string());
+        g.add_node(node("a"));
     });
     host.edit(Duration::from_secs(20), |g| {
-        g.add_node("b".to_string());
+        g.add_node(node("b"));
     });
     let tip = host.tip;
     let live = gantz_ca::LiveSet {
@@ -509,11 +514,11 @@ fn join_snapshot_tolerates_pruned_history() {
     let mut peers = vec![host, joiner];
     let mut net = Net::default();
     peers[0].edit(Duration::from_secs(30), |g| {
-        g.add_node("host-edit".to_string());
+        g.add_node(node("host-edit"));
     });
     announce(&mut peers, &mut net, 0);
     peers[1].edit(Duration::from_secs(40), |g| {
-        g.add_node("joiner-edit".to_string());
+        g.add_node(node("joiner-edit"));
     });
     announce(&mut peers, &mut net, 1);
     run(&mut peers, &mut net, 5);

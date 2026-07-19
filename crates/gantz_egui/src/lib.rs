@@ -54,7 +54,7 @@ pub use view::{Camera, SceneView};
 /// [`gantz_ca::Registry`] with [`gantz_core::Builtins`].
 pub trait Registry {
     /// The underlying content-addressed data registry.
-    fn ca(&self) -> &gantz_ca::Registry<gantz_ca::DataGraph>;
+    fn ca(&self) -> &gantz_ca::Registry;
 
     /// Look up a node by content address.
     ///

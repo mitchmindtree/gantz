@@ -1,32 +1,40 @@
 //! The served session content, owned by the network runtime.
 //!
-//! Each session serves a plain [`gantz_ca::Registry`] over [`RawGraph`]
-//! payloads: graphs sit at rest as application-serialized blobs under the
-//! addresses the application validated them against, keeping the crate
-//! agnostic of the node type. The application mirrors each session's scoped
-//! closure (commits, graphs, heads) into the store via
-//! [`Command::Register`](crate::Command::Register) and
-//! [`Command::Update`](crate::Command::Update); the runtime's request
-//! handler answers peers from it synchronously. Content-addressed keys make
-//! every insert idempotent, so updates may be re-sent freely.
+//! Each session serves a plain [`gantz_ca::Registry`]: graphs sit at rest in
+//! their erased data form ([`gantz_ca::DataGraph`]), which any peer can
+//! re-hash and walk without the application's node types compiled in. The
+//! application mirrors each session's scoped closure (commits, graphs,
+//! heads) into the store via [`Command::Register`](crate::Command::Register)
+//! and [`Command::Update`](crate::Command::Update); the runtime's request
+//! handler answers peers from it synchronously, serializing graphs to the
+//! wire with [`proto::encode_graph`]. Content-addressed keys make every
+//! insert idempotent, so updates may be re-sent freely.
 //!
-//! The store is a relay: it holds what the local application (a decoding
-//! peer) verified, under the claimed addresses. Receiving peers re-verify
-//! everything through the typed `gantz_ca::sync::Staged` path on their own
-//! side, which is where the security boundary lives.
+//! The store VERIFIES the graphs it accepts: every graph offered to
+//! [`merge`] is re-hashed against its claimed address and checked for node
+//! canonicality (see [`gantz_ca::verify_graph`]), so tampered or aliased
+//! content is rejected at the store boundary rather than trusted under a
+//! claimed address. Receiving peers still re-verify everything through the
+//! [`gantz_ca::sync::Staged`] path on their own side. Holding decodable data
+//! graphs also means a serving peer can answer reachability questions
+//! itself (see [`gantz_ca::closure`]) - e.g. for future served-store GC -
+//! which the old opaque-bytes relay store could not.
 
 use crate::{
-    proto::{Object, ObjectRef, Objects, Want},
+    proto::{self, Object, ObjectRef, Objects, Want},
     session::{Access, PeerId, Session, SessionId},
 };
-use gantz_ca::{Commit, CommitAddr, GraphHash, MergeReport, Name, RawGraph, Registry};
+use gantz_ca::{
+    Commit, CommitAddr, DataGraph, GraphAddr, MergeReport, Name, Registry, sync::VerifyError,
+    verify_graph,
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 /// One session's served content. See the module docs.
-pub type SessionRegistry = Registry<RawGraph>;
+pub type SessionRegistry = Registry;
 
 /// A session's configuration plus its served content.
 #[derive(Debug)]
@@ -75,19 +83,23 @@ impl Shared {
 /// inserts (idempotent) and per-name head upserts (an incoming tip wins,
 /// reported).
 ///
-/// The content is trusted as-is under its claimed addresses (see the module
-/// docs): nothing is re-hashed, no parents are detached, so the store serves
-/// content byte-identical to what the application validated.
+/// Every graph is verified against its claimed address before anything is
+/// merged (strict re-hash plus node canonicality, see
+/// [`gantz_ca::verify_graph`]): an `Err` leaves the store untouched, so a
+/// tampered or aliased graph can never be served.
 pub fn merge(
     store: &mut SessionRegistry,
     heads: impl IntoIterator<Item = (Name, CommitAddr)>,
     commits: impl IntoIterator<Item = (CommitAddr, Commit)>,
-    graphs: impl IntoIterator<Item = RawGraph>,
-) -> MergeReport {
-    let graphs = graphs.into_iter().map(|g| (g.graph_addr(), g)).collect();
+    graphs: impl IntoIterator<Item = (GraphAddr, DataGraph)>,
+) -> Result<MergeReport, VerifyError> {
+    let graphs: HashMap<GraphAddr, DataGraph> = graphs.into_iter().collect();
+    for (ga, graph) in &graphs {
+        verify_graph(*ga, graph)?;
+    }
     let commits = commits.into_iter().collect();
     let heads = heads.into_iter().collect();
-    store.merge(Registry::from_parts(graphs, commits, heads))
+    Ok(store.merge(Registry::from_parts(graphs, commits, heads)))
 }
 
 /// The requested objects, where present. Absent objects are skipped: the
@@ -103,7 +115,7 @@ pub fn objects(store: &SessionRegistry, want: &Want) -> Objects {
                 .map(|c| Object::Commit(*ca, c.clone().into())),
             ObjectRef::Graph(ga) => store
                 .graph(ga)
-                .map(|g| Object::Graph(*ga, g.bytes.to_vec())),
+                .map(|g| Object::Graph(*ga, proto::encode_graph(g))),
             ObjectRef::Blob { section, addr } => store.blobs().get(section).and_then(|blobs| {
                 blobs.get(addr).map(|bytes| Object::Blob {
                     section: section.clone(),
@@ -125,7 +137,7 @@ pub fn snapshot(store: &SessionRegistry) -> (Vec<(Name, CommitAddr)>, Objects) {
         objects.push(Object::Commit(*ca, c.clone().into()));
     }
     for (ga, g) in store.graphs() {
-        objects.push(Object::Graph(*ga, g.bytes.to_vec()));
+        objects.push(Object::Graph(*ga, proto::encode_graph(g)));
     }
     for (section, blobs) in store.blobs() {
         for (addr, bytes) in &blobs.entries {
@@ -143,47 +155,52 @@ pub fn snapshot(store: &SessionRegistry) -> (Vec<(Name, CommitAddr)>, Objects) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gantz_ca::{BlobLiveness, ContentAddr, GraphAddr, commit_addr};
+    use gantz_ca::{BlobLiveness, ContentAddr, Datum, GraphAddr, NodeData, commit_addr};
     use std::time::Duration;
 
     fn name(s: &str) -> Name {
         s.parse().unwrap()
     }
 
-    fn graph_addr(n: u8) -> GraphAddr {
-        GraphAddr::from(ContentAddr::from([n; 32]))
+    /// A one-node graph tagged `tag`, with its content address.
+    fn graph(tag: &str) -> (GraphAddr, DataGraph) {
+        let mut g = DataGraph::default();
+        g.add_node(NodeData::new(tag, Datum::Map(vec![])));
+        (gantz_ca::graph_addr(&g), g)
     }
 
     /// A store with one head over a two-commit chain and its graphs.
-    fn test_store() -> (SessionRegistry, CommitAddr, CommitAddr) {
+    fn test_store() -> (SessionRegistry, CommitAddr, CommitAddr, GraphAddr) {
         let mut store = SessionRegistry::default();
-        let root = Commit::new(Duration::from_secs(1), None, graph_addr(1));
+        let (ga1, g1) = graph("g1");
+        let (ga2, g2) = graph("g2");
+        let root = Commit::new(Duration::from_secs(1), None, ga1);
         let root_ca = commit_addr(&root);
-        let tip = Commit::new(Duration::from_secs(2), Some(root_ca), graph_addr(2));
+        let tip = Commit::new(Duration::from_secs(2), Some(root_ca), ga2);
         let tip_ca = commit_addr(&tip);
         merge(
             &mut store,
             [(name("jam"), tip_ca)],
             [(root_ca, root), (tip_ca, tip)],
-            [
-                RawGraph::new(graph_addr(1), &b"g1"[..]),
-                RawGraph::new(graph_addr(2), &b"g2"[..]),
-            ],
-        );
-        (store, root_ca, tip_ca)
+            [(ga1, g1), (ga2, g2)],
+        )
+        .unwrap();
+        (store, root_ca, tip_ca, ga1)
     }
 
     #[test]
     fn merge_is_idempotent() {
-        let (mut store, root_ca, tip_ca) = test_store();
+        let (mut store, root_ca, tip_ca, ga1) = test_store();
         let root = store.commits()[&root_ca].clone();
         let tip = store.commits()[&tip_ca].clone();
+        let g1 = store.graph(&ga1).unwrap().clone();
         let report = merge(
             &mut store,
             [(name("jam"), tip_ca)],
             [(root_ca, root), (tip_ca, tip)],
-            [RawGraph::new(graph_addr(1), &b"g1"[..])],
-        );
+            [(ga1, g1)],
+        )
+        .unwrap();
         assert!(report.heads_added.is_empty());
         assert!(report.heads_replaced.is_empty());
         assert_eq!(store.commits().len(), 2);
@@ -192,22 +209,93 @@ mod tests {
 
     #[test]
     fn merge_repoints_heads() {
-        let (mut store, root_ca, tip_ca) = test_store();
-        let report = merge(&mut store, [(name("jam"), root_ca)], [], []);
+        let (mut store, root_ca, tip_ca, _ga1) = test_store();
+        let report = merge(&mut store, [(name("jam"), root_ca)], [], []).unwrap();
         assert_eq!(report.heads_replaced, vec![(name("jam"), tip_ca, root_ca)]);
         assert_eq!(store.head(&name("jam")), Some(root_ca));
     }
 
+    /// The trust-model flip: a graph offered under a claimed address whose
+    /// content does not re-hash to it is rejected outright, and the store is
+    /// left untouched. The old opaque-bytes relay store could not re-verify
+    /// and served whatever it was handed.
+    #[test]
+    fn merge_rejects_tampered_graph_content() {
+        let (mut store, _root_ca, _tip_ca, ga1) = test_store();
+        let heads_before = store
+            .heads()
+            .map(|(n, ca)| (n.clone(), ca))
+            .collect::<Vec<_>>();
+        // Honest content for `ga1`, then tampered: an extra node the claimed
+        // address does not cover.
+        let mut tampered = store.graph(&ga1).unwrap().clone();
+        tampered.add_node(NodeData::new("evil", Datum::Map(vec![])));
+        let actual = gantz_ca::graph_addr(&tampered);
+        let commit = Commit::new(Duration::from_secs(3), None, ga1);
+        let commit_ca = commit_addr(&commit);
+        let err = merge(
+            &mut store,
+            [(name("jam"), commit_ca)],
+            [(commit_ca, commit)],
+            [(ga1, tampered)],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            VerifyError::Graph {
+                claimed: ga1,
+                actual,
+            }
+        );
+        // Nothing was merged: no new commit, head unmoved.
+        assert!(!store.commits().contains_key(&commit_ca));
+        assert_eq!(
+            store
+                .heads()
+                .map(|(n, ca)| (n.clone(), ca))
+                .collect::<Vec<_>>(),
+            heads_before
+        );
+    }
+
+    /// A graph whose nodes are not in canonical form aliases the same
+    /// logical content under a second address: rejected likewise.
+    #[test]
+    fn merge_rejects_non_canonical_graph() {
+        let (mut store, _root_ca, _tip_ca, _ga1) = test_store();
+        let mut g = DataGraph::default();
+        g.add_node(NodeData::new(
+            "test",
+            Datum::Map(vec![
+                ("b".to_string(), Datum::Null),
+                ("a".to_string(), Datum::Bool(true)),
+            ]),
+        ));
+        // The non-canonical form hashes consistently with itself: the
+        // canonicality check, not the hash, must reject it.
+        let claimed = gantz_ca::graph_addr(&g);
+        let err = merge(&mut store, [], [], [(claimed, g)]).unwrap_err();
+        assert_eq!(
+            err,
+            VerifyError::NonCanonicalNode {
+                graph: claimed,
+                node_ix: 0,
+            }
+        );
+        assert!(store.graph(&claimed).is_none());
+    }
+
     #[test]
     fn objects_filters_to_present() {
-        let (store, root_ca, _tip_ca) = test_store();
+        let (store, root_ca, _tip_ca, ga1) = test_store();
         let absent_ca = CommitAddr::from(ContentAddr::from([9; 32]));
+        let absent_ga = GraphAddr::from(ContentAddr::from([9; 32]));
         let want = Want {
             refs: vec![
                 ObjectRef::Commit(root_ca),
                 ObjectRef::Commit(absent_ca),
-                ObjectRef::Graph(graph_addr(1)),
-                ObjectRef::Graph(graph_addr(9)),
+                ObjectRef::Graph(ga1),
+                ObjectRef::Graph(absent_ga),
                 ObjectRef::Blob {
                     section: "dsp.buffer".to_string(),
                     addr: ContentAddr::from([9; 32]),
@@ -217,14 +305,15 @@ mod tests {
         let objects = objects(&store, &want).objects;
         assert_eq!(objects.len(), 2);
         assert!(matches!(objects[0], Object::Commit(ca, _) if ca == root_ca));
+        let expected = proto::encode_graph(store.graph(&ga1).unwrap());
         assert!(
-            matches!(&objects[1], Object::Graph(ga, bytes) if *ga == graph_addr(1) && bytes == b"g1")
+            matches!(&objects[1], Object::Graph(ga, bytes) if *ga == ga1 && *bytes == expected)
         );
     }
 
     #[test]
     fn objects_serves_blobs() {
-        let (mut store, _root_ca, _tip_ca) = test_store();
+        let (mut store, _root_ca, _tip_ca, _ga1) = test_store();
         let addr = store.add_blob("dsp.buffer", BlobLiveness::ContentReferenced, &b"pcm"[..]);
         let want = Want {
             refs: vec![ObjectRef::Blob {
@@ -246,18 +335,21 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips() {
-        let (mut store, _root_ca, tip_ca) = test_store();
+        let (mut store, _root_ca, tip_ca, _ga1) = test_store();
         store.add_blob("dsp.buffer", BlobLiveness::ContentReferenced, &b"pcm"[..]);
         let (heads, objects) = snapshot(&store);
         assert_eq!(heads, vec![(name("jam"), tip_ca)]);
-        // Rebuild a store from the snapshot's wire objects.
+        // Rebuild a store from the snapshot's wire objects, decoding and
+        // re-verifying the graph bytes as a receiving peer would.
         let mut rebuilt = SessionRegistry::default();
         let mut commits = Vec::new();
         let mut graphs = Vec::new();
         for object in objects.objects {
             match object {
                 Object::Commit(ca, c) => commits.push((ca, c.into())),
-                Object::Graph(ga, bytes) => graphs.push(RawGraph::new(ga, bytes)),
+                Object::Graph(ga, bytes) => {
+                    graphs.push((ga, proto::decode_graph(&bytes).unwrap()));
+                }
                 Object::Blob {
                     section,
                     liveness,
@@ -268,10 +360,19 @@ mod tests {
                 }
             }
         }
-        merge(&mut rebuilt, heads, commits, graphs);
+        merge(&mut rebuilt, heads, commits, graphs).unwrap();
         assert_eq!(rebuilt.commits(), store.commits());
-        assert_eq!(rebuilt.graphs(), store.graphs());
         assert_eq!(rebuilt.blobs(), store.blobs());
+        assert_eq!(
+            rebuilt
+                .graphs()
+                .keys()
+                .collect::<std::collections::HashSet<_>>(),
+            store
+                .graphs()
+                .keys()
+                .collect::<std::collections::HashSet<_>>()
+        );
         assert_eq!(
             rebuilt.heads().collect::<Vec<_>>(),
             store.heads().collect::<Vec<_>>()

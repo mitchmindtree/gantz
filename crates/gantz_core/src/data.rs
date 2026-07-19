@@ -123,7 +123,7 @@ impl<N: DeserializeOwned> ReifiedGraphs<N> {
     /// addresses in a node's refs) are ignored, as are already-cached graphs.
     pub fn ensure(
         &mut self,
-        reg: &Registry<DataGraph>,
+        reg: &Registry,
         seeds: impl IntoIterator<Item = ContentAddr>,
     ) -> Result<(), EnsureError> {
         let mut queue: VecDeque<GraphAddr> = seeds.into_iter().map(GraphAddr::from).collect();
@@ -150,7 +150,7 @@ impl<N: DeserializeOwned> ReifiedGraphs<N> {
     /// Graphs that fail to reify (e.g. an unknown tag from a domain not
     /// compiled in) are skipped and reported, and remain cache misses that
     /// lookups degrade over the same way as any missing node.
-    pub fn ensure_all(&mut self, reg: &Registry<DataGraph>) -> Vec<EnsureError> {
+    pub fn ensure_all(&mut self, reg: &Registry) -> Vec<EnsureError> {
         let mut errs = vec![];
         for (addr, dg) in reg.graphs() {
             if self.graphs.contains_key(addr) {
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn ensure_reifies_transitive_refs_and_ignores_unresolved() {
-        let mut reg = Registry::<DataGraph>::default();
+        let mut reg = Registry::default();
         let leaf = reg.add_graph(erase(&graph([num(1)])).unwrap());
         let mid = {
             let g = graph([TestNode::Link { addr: leaf.into() }, num(2)]);

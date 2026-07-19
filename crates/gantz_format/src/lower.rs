@@ -13,7 +13,7 @@ use crate::model::{
     Addr, CommitDecl, Document, Form, GraphBody, GraphDef, NameDecl, NodeDecl, NodeSpec, RefSpec,
     SectionKey,
 };
-use gantz_ca::{Commit, CommitAddr, ContentAddr, DataGraph, GraphAddr, Key, Registry, Timestamp};
+use gantz_ca::{Commit, CommitAddr, ContentAddr, GraphAddr, Key, Registry, Timestamp};
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::{Graph, NodeIx};
 use gantz_core::node::{Input, Output};
@@ -30,7 +30,7 @@ use std::time::Duration;
 /// through is only the codec, not part of the result.
 pub struct Loaded {
     /// The content-addressed registry.
-    pub registry: Registry<DataGraph>,
+    pub registry: Registry,
     /// graph id -> head commit.
     pub graph_head: HashMap<Addr, CommitAddr>,
     /// graph id -> node label -> node index.
@@ -120,7 +120,7 @@ where
         compute_name_to_graph_id(&graphs, &name_decls, &commit_for_graph, &graph_of_commit);
     let order = topo_order(&graphs, &graphs_by_id, &name_to_graph_id)?;
 
-    let mut registry: Registry<DataGraph> = Registry::default();
+    let mut registry: Registry = Registry::default();
     let mut names: HashMap<String, CommitAddr> = HashMap::new();
     let mut name_graphs: HashMap<String, GraphAddr> = HashMap::new();
     let mut commit_ids: HashMap<Addr, CommitAddr> = HashMap::new();
@@ -339,7 +339,7 @@ fn resolve_ref_value(refspec: &RefSpec, resolve: &Resolve) -> Result<Datum, Form
 /// Build the head commit described by `decl`, pointing at `g_addr` (the graph
 /// it references, which has just been built).
 fn build_commit(
-    registry: &mut Registry<DataGraph>,
+    registry: &mut Registry,
     decl: &CommitDecl,
     g_addr: gantz_ca::GraphAddr,
     commit_ids: &HashMap<Addr, CommitAddr>,

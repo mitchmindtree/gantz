@@ -4,7 +4,7 @@
 //! so it is ignored by default; run manually with
 //! `cargo test -p gantz_collab -- --ignored`.
 
-use gantz_ca::{Commit, ContentAddr, GraphAddr, Name, RawGraph, commit_addr};
+use gantz_ca::{Commit, DataGraph, Datum, Name, NodeData, commit_addr};
 use gantz_collab::{
     Access, Command, Event, Handle, Identity, Object, ObjectRef, PeerId, Role, Session,
     SessionEntry, SessionId, SessionRegistry, SessionTicket, Want, store,
@@ -34,10 +34,12 @@ fn wait_for<T>(handle: &Handle, mut pred: impl FnMut(Event) -> Option<T>) -> T {
 #[ignore = "binds real sockets and may touch n0 discovery infrastructure"]
 fn share_join_and_fetch_between_two_runtimes() {
     let session_id = SessionId::generate();
-    let graph_ca = GraphAddr::from(ContentAddr::from([1; 32]));
+    let mut graph = DataGraph::default();
+    graph.add_node(NodeData::new("test", Datum::Map(vec![])));
+    let graph_ca = gantz_ca::graph_addr(&graph);
+    let graph_blob = gantz_collab::proto::encode_graph(&graph);
     let commit = Commit::new(Duration::from_secs(1), None, graph_ca);
     let tip = commit_addr(&commit);
-    let graph_blob = b"(fake serialized graph)".to_vec();
     let jam: Name = "jam".parse().unwrap();
 
     // The host runtime serves one session with a single-commit store.
@@ -51,8 +53,9 @@ fn share_join_and_fetch_between_two_runtimes() {
         &mut served,
         [(jam.clone(), tip)],
         [(tip, commit.clone())],
-        [RawGraph::new(graph_ca, graph_blob.clone())],
-    );
+        [(graph_ca, graph.clone())],
+    )
+    .unwrap();
     host.cmds
         .send_blocking(Command::Register(SessionEntry {
             session: Session {

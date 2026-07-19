@@ -61,7 +61,7 @@ mod tests {
     /// and payloads into its own response.
     #[test]
     fn named_ref_inspector_merges_ext_ui_responses() {
-        let registry = gantz_ca::Registry::<gantz_ca::DataGraph>::default();
+        let registry = gantz_ca::Registry::default();
         let reified = gantz_core::data::ReifiedGraphs::<NamedRef>::new();
         let builtins = gantz_core::BuiltinSet::<NamedRef>::from_specs([]);
         let reg_ref = crate::RegistryRef::new(&registry, &reified, &builtins);

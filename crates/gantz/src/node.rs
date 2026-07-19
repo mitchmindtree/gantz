@@ -236,7 +236,7 @@ mod tests {
     }
 
     /// Known-valid wire datums covering the node set, shared by the
-    /// round-trip and dehydration gate tests.
+    /// round-trip and erasure gate tests.
     fn node_set_cases() -> Vec<gantz_format::Datum> {
         use gantz_format::Datum;
         vec![
@@ -382,29 +382,28 @@ mod tests {
     }
 
     /// Gate test for the registry's erased representation: every node in the
-    /// set must dehydrate to canonical `NodeData` whose typed round-trip is a
+    /// set must erase to canonical `NodeData` whose typed round-trip is a
     /// fixpoint (a stable content address), with structural refs matching the
     /// graph-level reachability reporting. A node type with order- or
     /// shape-unstable serde fails here.
     #[test]
-    fn node_set_dehydrates_canonically() {
-        use gantz_core::data::{dehydrate_node, hydrate_node};
+    fn node_set_erases_canonically() {
+        use gantz_core::data::{erase_node, reify_node};
 
         fn no_node(_: &gantz_ca::ContentAddr) -> Option<&'static dyn gantz_core::Node> {
             None
         }
 
         for (i, node) in node_set_instances().into_iter().enumerate() {
-            let nd =
-                dehydrate_node(&node).unwrap_or_else(|e| panic!("case {i}: dehydrate failed: {e}"));
+            let nd = erase_node(&node).unwrap_or_else(|e| panic!("case {i}: erase failed: {e}"));
             assert!(
                 nd.is_canonical(),
-                "case {i} (`{}`): non-canonical dehydration: {nd:?}",
+                "case {i} (`{}`): non-canonical erasure: {nd:?}",
                 nd.tag,
             );
             let back: Box<dyn Node> =
-                hydrate_node(&nd).unwrap_or_else(|e| panic!("case {i}: hydrate failed: {e}"));
-            let nd2 = dehydrate_node(&back).expect("re-dehydrate");
+                reify_node(&nd).unwrap_or_else(|e| panic!("case {i}: reify failed: {e}"));
+            let nd2 = erase_node(&back).expect("re-erase");
             assert_eq!(
                 nd, nd2,
                 "case {i} (`{}`): typed round-trip shifts the node's data",
@@ -433,11 +432,11 @@ mod tests {
     /// fails here loudly and must be a deliberate decision.
     #[test]
     fn node_set_addr_pins() {
-        use gantz_core::data::dehydrate_node;
+        use gantz_core::data::erase_node;
 
         let mut seen = std::collections::BTreeMap::new();
         for node in node_set_instances() {
-            let nd = dehydrate_node(&node).expect("dehydrate");
+            let nd = erase_node(&node).expect("erase");
             seen.entry(nd.tag.clone())
                 .or_insert_with(|| nd.content_addr().to_string());
         }

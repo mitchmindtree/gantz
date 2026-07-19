@@ -1,9 +1,9 @@
 //! The codec between typed nodes and the registry's erased
-//! [`NodeData`]/[`DataGraph`] representation, plus the hydrated-graph cache.
+//! [`NodeData`]/[`DataGraph`] representation, plus the reified-graph cache.
 //!
 //! The registry stores graphs as plain data. Typed nodes cross that boundary
-//! here: [`dehydrate`] erases a working graph for storage and [`hydrate`]
-//! revives one for editing and compilation. Erasure rides the node set's
+//! here: [`erase`] erases a working graph for storage and [`reify`]
+//! reifies one for editing and compilation. Erasure rides the node set's
 //! tag-dispatched serde (`gantz_format::impl_node_set_serde!`) through
 //! [`Datum`], so the node-set manifest is the codec: a node type is storable
 //! exactly when it is listed there.
@@ -18,24 +18,24 @@ use petgraph::visit::EdgeRef;
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// An append-only cache of hydrated registry graphs, keyed by graph address.
+/// An append-only cache of reified registry graphs, keyed by graph address.
 ///
 /// Content addressing makes entries immutable: an address names exactly one
-/// graph forever, so the cache never invalidates. [`HydratedGraphs::retain_live`]
+/// graph forever, so the cache never invalidates. [`ReifiedGraphs::retain_live`]
 /// may drop entries to bound memory after a prune.
 ///
-/// Intended use is two-phase: [`HydratedGraphs::ensure`] everything a pass can
+/// Intended use is two-phase: [`ReifiedGraphs::ensure`] everything a pass can
 /// reach (requires `&mut self`), then serve the whole pass immutably through
-/// [`HydratedGraphs::get`] borrows (e.g. behind a `GetNode` closure).
+/// [`ReifiedGraphs::get`] borrows (e.g. behind a `GetNode` closure).
 #[derive(Debug)]
-pub struct HydratedGraphs<N> {
+pub struct ReifiedGraphs<N> {
     graphs: HashMap<GraphAddr, Graph<N>>,
 }
 
 /// Failure to erase a node: its serde did not produce a `type`-tagged map
 /// (i.e. it is not the node set's tag-dispatched serde), or errored outright.
 #[derive(Clone, Debug, thiserror::Error)]
-pub enum DehydrateNodeError {
+pub enum EraseNodeError {
     /// The node's own serde failed.
     #[error("node serde error: {0}")]
     Datum(#[from] DatumError),
@@ -47,19 +47,19 @@ pub enum DehydrateNodeError {
 /// Failure to erase one of a graph's nodes.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("node {node_ix}: {source}")]
-pub struct DehydrateError {
+pub struct EraseError {
     /// The graph index of the node that failed to erase.
     pub node_ix: usize,
     /// The node-level failure.
     #[source]
-    pub source: DehydrateNodeError,
+    pub source: EraseNodeError,
 }
 
-/// Failure to revive a typed node from its data form: the tag is unknown to
+/// Failure to reify a typed node from its data form: the tag is unknown to
 /// the node set, or the fields fail the node's own deserialization.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("node type `{tag}`: {source}")]
-pub struct HydrateNodeError {
+pub struct ReifyNodeError {
     /// The wire tag of the node that failed to decode.
     pub tag: String,
     /// The decode failure.
@@ -67,29 +67,29 @@ pub struct HydrateNodeError {
     pub source: DatumError,
 }
 
-/// Failure to revive one of a graph's nodes.
+/// Failure to reify one of a graph's nodes.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("node {node_ix}: {source}")]
-pub struct HydrateError {
+pub struct ReifyError {
     /// The graph index of the node that failed to decode.
     pub node_ix: usize,
     /// The node-level failure.
     #[source]
-    pub source: HydrateNodeError,
+    pub source: ReifyNodeError,
 }
 
-/// Failure to hydrate a registry graph while filling the cache.
+/// Failure to reify a registry graph while filling the cache.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("graph {graph}: {source}")]
 pub struct EnsureError {
-    /// The address of the registry graph that failed to hydrate.
+    /// The address of the registry graph that failed to reify.
     pub graph: GraphAddr,
     /// The graph-level failure.
     #[source]
-    pub source: HydrateError,
+    pub source: ReifyError,
 }
 
-impl<N> HydratedGraphs<N> {
+impl<N> ReifiedGraphs<N> {
     /// An empty cache.
     pub fn new() -> Self {
         Self {
@@ -97,12 +97,12 @@ impl<N> HydratedGraphs<N> {
         }
     }
 
-    /// The hydrated graph at the given address, if it has been ensured.
+    /// The reified graph at the given address, if it has been ensured.
     pub fn get(&self, addr: &GraphAddr) -> Option<&Graph<N>> {
         self.graphs.get(addr)
     }
 
-    /// Whether the given address has been hydrated.
+    /// Whether the given address has been reified.
     pub fn contains(&self, addr: &GraphAddr) -> bool {
         self.graphs.contains_key(addr)
     }
@@ -113,8 +113,8 @@ impl<N> HydratedGraphs<N> {
     }
 }
 
-impl<N: DeserializeOwned> HydratedGraphs<N> {
-    /// Hydrate the given seed addresses and every graph they transitively
+impl<N: DeserializeOwned> ReifiedGraphs<N> {
+    /// Reify the given seed addresses and every graph they transitively
     /// reference.
     ///
     /// References are resolved through the stored graphs' [`NodeData::refs`]
@@ -136,7 +136,7 @@ impl<N: DeserializeOwned> HydratedGraphs<N> {
                 dg.node_weights()
                     .flat_map(|n| n.refs.iter().copied().map(GraphAddr::from)),
             );
-            let g = hydrate(dg).map_err(|source| EnsureError {
+            let g = reify(dg).map_err(|source| EnsureError {
                 graph: addr,
                 source,
             })?;
@@ -146,7 +146,7 @@ impl<N: DeserializeOwned> HydratedGraphs<N> {
     }
 }
 
-impl<N> Default for HydratedGraphs<N> {
+impl<N> Default for ReifiedGraphs<N> {
     fn default() -> Self {
         Self::new()
     }
@@ -159,20 +159,20 @@ impl<N> Default for HydratedGraphs<N> {
 /// its own reporting ([`Node::required_addrs`]/[`Node::required_blobs`],
 /// including physically nested nodes). The result is canonical, so its
 /// [`NodeData::content_addr`] is the node's one network-wide address.
-pub fn dehydrate_node<N>(node: &N) -> Result<NodeData, DehydrateNodeError>
+pub fn erase_node<N>(node: &N) -> Result<NodeData, EraseNodeError>
 where
     N: Serialize + Node,
 {
     let datum = datum::to_datum(node)?;
     let Datum::Map(mut entries) = datum else {
-        return Err(DehydrateNodeError::Untagged);
+        return Err(EraseNodeError::Untagged);
     };
     let Some(ix) = entries.iter().position(|(k, _)| k == "type") else {
-        return Err(DehydrateNodeError::Untagged);
+        return Err(EraseNodeError::Untagged);
     };
     let (_, tag) = entries.remove(ix);
     let Datum::Str(tag) = tag else {
-        return Err(DehydrateNodeError::Untagged);
+        return Err(EraseNodeError::Untagged);
     };
     let (refs, blobs) = node_out_refs(node);
     let mut node_data = NodeData {
@@ -185,12 +185,12 @@ where
     Ok(node_data)
 }
 
-/// Revive one typed node: rebuild the tagged map and run node-set serde.
-pub fn hydrate_node<N>(node_data: &NodeData) -> Result<N, HydrateNodeError>
+/// Reify one typed node: rebuild the tagged map and run node-set serde.
+pub fn reify_node<N>(node_data: &NodeData) -> Result<N, ReifyNodeError>
 where
     N: DeserializeOwned,
 {
-    let err = |source| HydrateNodeError {
+    let err = |source| ReifyNodeError {
         tag: node_data.tag.clone(),
         source,
     };
@@ -202,15 +202,15 @@ where
     datum::from_datum(datum).map_err(err)
 }
 
-/// Erase a typed graph for storage: node weights through [`dehydrate_node`],
+/// Erase a typed graph for storage: node weights through [`erase_node`],
 /// indices and edges preserved verbatim.
-pub fn dehydrate<N>(g: &Graph<N>) -> Result<DataGraph, DehydrateError>
+pub fn erase<N>(g: &Graph<N>) -> Result<DataGraph, EraseError>
 where
     N: Serialize + Node,
 {
     let mut out = DataGraph::with_capacity(g.node_count(), g.edge_count());
     for (node_ix, w) in g.node_weights().enumerate() {
-        let node_data = dehydrate_node(w).map_err(|source| DehydrateError { node_ix, source })?;
+        let node_data = erase_node(w).map_err(|source| EraseError { node_ix, source })?;
         out.add_node(node_data);
     }
     for e in g.edge_references() {
@@ -219,15 +219,15 @@ where
     Ok(out)
 }
 
-/// Revive a typed graph from its stored data form: node weights through
-/// [`hydrate_node`], indices and edges preserved verbatim.
-pub fn hydrate<N>(g: &DataGraph) -> Result<Graph<N>, HydrateError>
+/// Reify a typed graph from its stored data form: node weights through
+/// [`reify_node`], indices and edges preserved verbatim.
+pub fn reify<N>(g: &DataGraph) -> Result<Graph<N>, ReifyError>
 where
     N: DeserializeOwned,
 {
     let mut out = Graph::with_capacity(g.node_count(), g.edge_count());
     for (node_ix, node_data) in g.node_weights().enumerate() {
-        let node = hydrate_node(node_data).map_err(|source| HydrateError { node_ix, source })?;
+        let node = reify_node(node_data).map_err(|source| ReifyError { node_ix, source })?;
         out.add_node(node);
     }
     for e in g.edge_references() {
@@ -306,15 +306,15 @@ mod tests {
     }
 
     #[test]
-    fn dehydrate_node_splits_tag_and_extracts_refs() {
-        let nd = dehydrate_node(&num(42)).unwrap();
+    fn erase_node_splits_tag_and_extracts_refs() {
+        let nd = erase_node(&num(42)).unwrap();
         assert_eq!(nd.tag, "Num");
         assert_eq!(nd.data, Datum::Map(vec![("v".into(), Datum::I64(42))]));
         assert!(nd.refs.is_empty() && nd.blobs.is_empty());
         assert!(nd.is_canonical());
 
         let target = ContentAddr([7; 32]);
-        let nd = dehydrate_node(&TestNode::Link { addr: target }).unwrap();
+        let nd = erase_node(&TestNode::Link { addr: target }).unwrap();
         assert_eq!(nd.tag, "Link");
         assert_eq!(nd.refs, vec![target]);
     }
@@ -324,8 +324,8 @@ mod tests {
         let mut g = graph([num(1), num(2), num(3)]);
         // A parallel edge and a distinct socket pairing survive.
         g.add_edge(0.into(), 2.into(), gantz_ca::Edge::from((1, 1)));
-        let dg = dehydrate(&g).unwrap();
-        let back: Graph<TestNode> = hydrate(&dg).unwrap();
+        let dg = erase(&g).unwrap();
+        let back: Graph<TestNode> = reify(&dg).unwrap();
         let weights: Vec<_> = back.node_weights().cloned().collect();
         assert_eq!(weights, vec![num(1), num(2), num(3)]);
         let edges: Vec<_> = back
@@ -340,22 +340,22 @@ mod tests {
     }
 
     #[test]
-    fn hydrate_unknown_tag_names_node_and_tag() {
-        let mut dg = dehydrate(&graph([num(1)])).unwrap();
+    fn reify_unknown_tag_names_node_and_tag() {
+        let mut dg = erase(&graph([num(1)])).unwrap();
         dg.node_weights_mut().for_each(|n| n.tag = "Mystery".into());
-        let err = hydrate::<TestNode>(&dg).unwrap_err();
+        let err = reify::<TestNode>(&dg).unwrap_err();
         assert_eq!(err.node_ix, 0);
         assert_eq!(err.source.tag, "Mystery");
         assert!(err.to_string().contains("Mystery"), "{err}");
     }
 
     #[test]
-    fn ensure_hydrates_transitive_refs_and_ignores_unresolved() {
+    fn ensure_reifies_transitive_refs_and_ignores_unresolved() {
         let mut reg = Registry::<DataGraph>::default();
-        let leaf = reg.add_graph(dehydrate(&graph([num(1)])).unwrap());
+        let leaf = reg.add_graph(erase(&graph([num(1)])).unwrap());
         let mid = {
             let g = graph([TestNode::Link { addr: leaf.into() }, num(2)]);
-            reg.add_graph(dehydrate(&g).unwrap())
+            reg.add_graph(erase(&g).unwrap())
         };
         let root = {
             // One resolvable ref and one dangling (builtin-style) addr.
@@ -363,10 +363,10 @@ mod tests {
             g.add_node(TestNode::Link {
                 addr: ContentAddr([9; 32]),
             });
-            reg.add_graph(dehydrate(&g).unwrap())
+            reg.add_graph(erase(&g).unwrap())
         };
 
-        let mut cache = HydratedGraphs::<TestNode>::new();
+        let mut cache = ReifiedGraphs::<TestNode>::new();
         cache.ensure(&reg, [root.into()]).unwrap();
         assert!(cache.contains(&root) && cache.contains(&mid) && cache.contains(&leaf));
         assert!(!cache.contains(&GraphAddr::from(ContentAddr([9; 32]))));

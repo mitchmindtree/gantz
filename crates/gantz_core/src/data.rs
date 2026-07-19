@@ -144,6 +144,30 @@ impl<N: DeserializeOwned> ReifiedGraphs<N> {
         }
         Ok(())
     }
+
+    /// Reify every graph in the registry's column, best effort.
+    ///
+    /// Graphs that fail to reify (e.g. an unknown tag from a domain not
+    /// compiled in) are skipped and reported, and remain cache misses that
+    /// lookups degrade over the same way as any missing node.
+    pub fn ensure_all(&mut self, reg: &Registry<DataGraph>) -> Vec<EnsureError> {
+        let mut errs = vec![];
+        for (addr, dg) in reg.graphs() {
+            if self.graphs.contains_key(addr) {
+                continue;
+            }
+            match reify(dg) {
+                Ok(g) => {
+                    self.graphs.insert(*addr, g);
+                }
+                Err(source) => errs.push(EnsureError {
+                    graph: *addr,
+                    source,
+                }),
+            }
+        }
+        errs
+    }
 }
 
 impl<N> Default for ReifiedGraphs<N> {
@@ -200,6 +224,21 @@ where
     // The tag leads, which is the node-set deserializer's streaming fast path.
     let datum = Datum::tagged(&node_data.tag, fields);
     datum::from_datum(datum).map_err(err)
+}
+
+/// Erase a typed graph and compute its registry address in one pass.
+///
+/// Registry graph addresses are ALWAYS computed on the erased form: the
+/// typed node `CaHash` impls are not load-bearing for graph identity. Any
+/// site that compares or mints a registry address for a typed working graph
+/// goes through here (or erases first).
+pub fn erase_with_addr<N>(g: &Graph<N>) -> Result<(DataGraph, GraphAddr), EraseError>
+where
+    N: Serialize + Node,
+{
+    let dg = erase(g)?;
+    let addr = gantz_ca::graph_addr(&dg);
+    Ok((dg, addr))
 }
 
 /// Erase a typed graph for storage: node weights through [`erase_node`],

@@ -8,8 +8,7 @@
 //! output where one is recoverable. Typed probes like [`ToNodeDsp`] are
 //! unreachable through the GUI's erased registry, so callers (e.g. a bevy
 //! provider system) compute this where the concrete node type is known and
-//! hand the result to the UI - the same shape as
-//! [`dsp_graphs`][crate::ref_ext::dsp_graphs].
+//! hand the result to the UI.
 //!
 //! Classification is structural, mirroring how flattening lowers the graph
 //! (see [`flatten`][crate::flatten()]): a concrete DSP node's ports come

@@ -214,7 +214,7 @@ where
                 (
                     sync_dsp_settings,
                     provide_dsp_pane,
-                    provide_dsp_ref_ext::<N>,
+                    provide_dsp_ref_ext,
                     provide_dsp_edge_style::<N>,
                 ),
             );
@@ -680,22 +680,16 @@ fn provide_dsp_pane(
 /// toggle for references to DSP graphs (see [`RefExtUis`] for the
 /// First/PreUpdate schedule contract).
 ///
-/// The DSP-graph set requires the concrete node type (typed probes like
-/// [`ToNodeDsp`] are unreachable through the GUI's erased registry), so it is
-/// computed here and handed to the UI - recomputed only when the registry
-/// changes.
-fn provide_dsp_ref_ext<N>(
+/// The DSP-graph set is a pure walk over the stored registry data (see
+/// [`gantz_plyphon::dsp_graphs`]), recomputed only when the registry changes
+/// and handed to the UI.
+fn provide_dsp_ref_ext(
     registry: Res<Registry>,
-    cache: Res<GraphCache<N>>,
     mut dsp_graphs: Local<Option<std::sync::Arc<std::collections::HashSet<ca::ContentAddr>>>>,
     mut ref_ext_uis: ResMut<RefExtUis>,
-) where
-    N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Send + Sync,
-{
-    if registry.is_changed() || cache.is_changed() || dsp_graphs.is_none() {
-        *dsp_graphs = Some(std::sync::Arc::new(gantz_plyphon::dsp_graphs(
-            &registry, &cache,
-        )));
+) {
+    if registry.is_changed() || dsp_graphs.is_none() {
+        *dsp_graphs = Some(std::sync::Arc::new(gantz_plyphon::dsp_graphs(&registry)));
     }
     let dsp_graphs = dsp_graphs.clone().expect("just initialised");
     ref_ext_uis.0.push(Box::new(DspRefExtUi { dsp_graphs }));

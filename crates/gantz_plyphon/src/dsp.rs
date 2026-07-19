@@ -518,6 +518,9 @@ impl DspBuilder {
 /// Node-set types (e.g. an app's `Box<dyn Node>`) can implement [`ToNodeDsp`]
 /// by delegating to this fn. Sets composing additional DSP node types chain
 /// their own downcasts via `.or_else(..)`.
+///
+/// Keep the probe list in step with `crate::ref_ext`'s data-level DSP tag
+/// set, which classifies the same types by wire tag.
 pub fn node_dsp_of(any: &dyn std::any::Any) -> Option<&dyn NodeDsp> {
     fn probe<T: NodeDsp + 'static>(any: &dyn std::any::Any) -> Option<&dyn NodeDsp> {
         any.downcast_ref::<T>().map(|n| n as &dyn NodeDsp)

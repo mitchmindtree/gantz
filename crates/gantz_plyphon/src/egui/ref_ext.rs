@@ -13,8 +13,8 @@ use std::sync::Arc;
 /// references whose graph contains DSP nodes (directly or transitively).
 #[derive(Debug, Default)]
 pub struct DspRefExtUi {
-    /// The graph addresses of DSP graphs, precomputed where the concrete
-    /// node type is known (see [`dsp_graphs`](crate::dsp_graphs)).
+    /// The graph addresses of DSP graphs, precomputed from the stored
+    /// registry data (see [`dsp_graphs`](crate::dsp_graphs)).
     pub dsp_graphs: Arc<HashSet<ContentAddr>>,
 }
 

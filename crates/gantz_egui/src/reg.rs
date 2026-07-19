@@ -117,13 +117,7 @@ impl<N: 'static + Node + Send + Sync> RegistryRef<'_, N> {
 
 impl<N> Registry for RegistryRef<'_, N>
 where
-    N: 'static
-        + Node
-        + crate::NodeUi
-        + crate::sync::AsNamedRef
-        + serde::de::DeserializeOwned
-        + Send
-        + Sync,
+    N: 'static + Node + crate::NodeUi + Send + Sync,
 {
     fn ca(&self) -> &ca::Registry {
         self.ca_registry
@@ -191,7 +185,7 @@ where
     fn would_ref_cycle(&self, target: &str, editing: &str) -> bool {
         let target: ca::Name = target.parse().expect("infallible");
         let editing: ca::Name = editing.parse().expect("infallible");
-        crate::cycle::would_cycle(self.ca_registry, self.reified, &target, &editing)
+        crate::cycle::would_cycle(self.ca_registry, &target, &editing)
     }
 
     fn demo_graph(&self, name: &str) -> Option<String> {
@@ -283,7 +277,7 @@ where
         source: &str,
         resolutions: ca::Resolutions,
     ) -> Option<crate::merge::MergePreview> {
-        crate::merge::merge_preview(self.ca_registry, self.reified, ours, source, resolutions)
+        crate::merge::merge_preview(self.ca_registry, ours, source, resolutions)
     }
 
     fn node_description(&self, name: &str) -> Option<Cow<'static, str>> {

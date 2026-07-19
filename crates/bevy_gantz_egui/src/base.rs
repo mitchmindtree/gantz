@@ -28,7 +28,7 @@ use bevy_log as log;
 use gantz_ca::Name;
 use std::collections::{BTreeMap, HashMap};
 
-use crate::BaseNames;
+use crate::{BaseNames, NodeCodecRes};
 
 /// One domain's baked-in base `.gantz` export.
 pub struct BaseSource {
@@ -94,26 +94,22 @@ pub fn load<N>(
     sources: Res<BaseSources>,
     mut registry: ResMut<Registry>,
     mut cache: ResMut<GraphCache<N>>,
+    codec: Res<NodeCodecRes>,
     mut base_names: ResMut<BaseNames>,
     mut name_sources: ResMut<BaseNameSources>,
 ) where
-    N: 'static
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_core::Node
-        + gantz_format::NodeSugar
-        + Send
-        + Sync,
+    N: 'static + serde::de::DeserializeOwned + Send + Sync,
 {
     let mut pending: Vec<&BaseSource> = sources.0.iter().collect();
     loop {
         let mut deferred: Vec<&BaseSource> = Vec::new();
         for source in pending.iter().copied() {
             let seed = seed_graph_addrs(&base_names.0, &registry);
-            let parsed: gantz_ca::Registry = match gantz_egui::export::parse_export_seeded_at::<N>(
+            let parsed: gantz_ca::Registry = match gantz_egui::export::parse_export_seeded_at(
                 source.bytes,
                 BASE_TIMESTAMP,
                 &seed,
+                &codec.0,
             ) {
                 Ok(e) => e,
                 // An unresolved reference may resolve once another
@@ -166,10 +162,11 @@ pub fn load<N>(
         if deferred.len() == pending.len() {
             let seed = seed_graph_addrs(&base_names.0, &registry);
             for source in deferred {
-                if let Err(err) = gantz_egui::export::parse_export_seeded_at::<N>(
+                if let Err(err) = gantz_egui::export::parse_export_seeded_at(
                     source.bytes,
                     BASE_TIMESTAMP,
                     &seed,
+                    &codec.0,
                 ) {
                     log::error!(
                         "base source `{}` has unresolvable references: {err}",
@@ -190,18 +187,12 @@ pub fn load<N>(
 ///
 /// Intended for the `update-base` developer binary. Pair with
 /// `DebouncedInputEvent` so it runs on save.
-pub fn export_to_file<N>(
+pub fn export_to_file(
     paths: Res<ExportPaths>,
     name_sources: Res<BaseNameSources>,
     registry: Res<Registry>,
-) where
-    N: 'static
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_format::NodeSugar
-        + Send
-        + Sync,
-{
+    codec: Res<NodeCodecRes>,
+) {
     let names: Vec<Name> = registry.heads().map(|(name, _)| name.clone()).collect();
     let partitioned = partition_names(&names, &name_sources, paths.default_source);
     for (source, names) in &partitioned {
@@ -217,7 +208,7 @@ pub fn export_to_file<N>(
         // by name only (no transitive closure) - loading resolves them via
         // the seeded parse.
         let names: Vec<String> = names.iter().map(|name| name.to_string()).collect();
-        match gantz_egui::export::export_names_sexpr_named::<N>(&registry, &names) {
+        match gantz_egui::export::export_names_sexpr_named(&registry, &names, &codec.0) {
             Ok(text) => {
                 if let Err(e) = std::fs::write(path, text) {
                     log::error!("export_to_file: failed to write {path}: {e}");

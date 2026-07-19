@@ -64,14 +64,8 @@ impl From<gantz_egui::node::NamedRef> for Box<dyn Node> {
     }
 }
 
-// Lets the reference-resync / rename machinery find `NamedRef`s within an
-// erased node by downcasting.
-impl gantz_egui::sync::AsNamedRefMut for Box<dyn Node> {
-    fn as_named_ref_mut(&mut self) -> Option<&mut gantz_egui::node::NamedRef> {
-        ((&mut **self) as &mut dyn Any).downcast_mut::<gantz_egui::node::NamedRef>()
-    }
-}
-
+// Lets typed-graph ops (paste's cycle check, `branch_node`) find `NamedRef`s
+// within an erased node by downcasting.
 impl gantz_egui::sync::AsNamedRef for Box<dyn Node> {
     fn as_named_ref(&self) -> Option<&gantz_egui::node::NamedRef> {
         ((&**self) as &dyn Any).downcast_ref::<gantz_egui::node::NamedRef>()
@@ -866,7 +860,7 @@ mod tests {
   (s ~sinosc) (out ~out) (i inlet) (o outlet)
   (-> s (out 0)))";
         let registry: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+            gantz_egui::format::from_str(text, Duration::from_secs(0), &super::codec())
                 .expect("from_str");
         let reified = reify_all(&registry);
         let head = gantz_ca::Head::Branch(name("head"));
@@ -934,7 +928,7 @@ mod tests {
   (s ~sinosc) (sub (ref env:1)) (out ~out)
   (-> s (sub 0)) (-> sub (out 0)))";
         let registry: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+            gantz_egui::format::from_str(text, Duration::from_secs(0), &super::codec())
                 .expect("from_str");
         let reified = reify_all(&registry);
         let parent_head = gantz_ca::Head::Branch(name("env"));
@@ -1004,7 +998,7 @@ mod tests {
 (graph env
   (a (ref voice)) (b (ref voice)))";
         let registry: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+            gantz_egui::format::from_str(text, Duration::from_secs(0), &super::codec())
                 .expect("from_str");
         let reified = reify_all(&registry);
         let head = gantz_ca::Head::Branch(name("env"));
@@ -1294,7 +1288,7 @@ mod tests {
     fn lower_mul_matches_base_graph_addr() {
         use std::time::Duration;
 
-        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+        let base: DataReg = gantz_egui::export::parse_export(gantz_base::BYTES, &super::codec())
             .expect("parse base");
         let base_head = gantz_ca::Head::Branch(name("mul"));
         let base_graph = base.head_graph(&base_head).expect("base mul graph");
@@ -1306,7 +1300,7 @@ mod tests {
   (l (inlet \"number\" \"left operand\")) (r (inlet \"number\" \"right operand\")) (out (outlet \"number\" \"product\"))
   (-> l (m 0)) (-> r (m 1)) (-> m out))";
         let mine: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+            gantz_egui::format::from_str(text, Duration::from_secs(0), &super::codec())
                 .expect("lower");
         let head = gantz_ca::Head::Branch(name("mul"));
         let graph = mine.head_graph(&head).expect("mul graph");
@@ -1336,10 +1330,10 @@ mod tests {
   (-> a (mref 0)) (-> b (mref 1)) (-> mref out))";
 
         let export1: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text1, now).expect("from_str 1");
-        let text2 = gantz_egui::format::to_string::<Box<dyn Node>>(&export1).expect("to_string");
+            gantz_egui::format::from_str(text1, now, &super::codec()).expect("from_str 1");
+        let text2 = gantz_egui::format::to_string(&export1, &super::codec()).expect("to_string");
         let export2: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(&text2, Duration::from_secs(7))
+            gantz_egui::format::from_str(&text2, Duration::from_secs(7), &super::codec())
                 .expect("from_str 2");
 
         let names1: BTreeSet<_> = export1.heads().map(|(n, _)| n.clone()).collect();
@@ -1370,11 +1364,11 @@ mod tests {
         use std::collections::BTreeSet;
         use std::time::Duration;
 
-        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+        let base: DataReg = gantz_egui::export::parse_export(gantz_base::BYTES, &super::codec())
             .expect("parse base");
-        let text = gantz_egui::format::to_string::<Box<dyn Node>>(&base).expect("to_string");
+        let text = gantz_egui::format::to_string(&base, &super::codec()).expect("to_string");
         let back: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(&text, Duration::from_secs(0))
+            gantz_egui::format::from_str(&text, Duration::from_secs(0), &super::codec())
                 .expect("from_str");
 
         let base_names: BTreeSet<_> = base.heads().map(|(n, _)| n.clone()).collect();
@@ -1413,10 +1407,10 @@ mod tests {
   (sub (ref env:1))
   (-> in (sub 0)) (-> sub out))";
         let e1: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text1, now).expect("from_str 1");
-        let text2 = gantz_egui::format::to_string::<Box<dyn Node>>(&e1).expect("to_string");
+            gantz_egui::format::from_str(text1, now, &super::codec()).expect("from_str 1");
+        let text2 = gantz_egui::format::to_string(&e1, &super::codec()).expect("to_string");
         let e2: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(&text2, now).expect("from_str 2");
+            gantz_egui::format::from_str(&text2, now, &super::codec()).expect("from_str 2");
 
         for n in ["env", "env:1"] {
             let head = gantz_ca::Head::Branch(name(n));
@@ -1445,9 +1439,9 @@ mod tests {
   (l (log warn))
   (-> n (s 0)) (-> (s 1) (b 0)))";
         let registry: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text1, Duration::from_secs(0))
+            gantz_egui::format::from_str(text1, Duration::from_secs(0), &super::codec())
                 .expect("from_str");
-        let out = gantz_egui::format::to_string::<Box<dyn Node>>(&registry).expect("to_string");
+        let out = gantz_egui::format::to_string(&registry, &super::codec()).expect("to_string");
         steel::parser::parser::Parser::parse(&out)
             .unwrap_or_else(|e| panic!("output is not valid Steel: {e}\n--- output ---\n{out}"));
     }
@@ -1467,7 +1461,7 @@ mod tests {
   (l (log warn))
   (-> t (l 0)))";
         let registry: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+            gantz_egui::format::from_str(text, Duration::from_secs(0), &super::codec())
                 .expect("from_str");
         let reified = reify_all(&registry);
         let head = gantz_ca::Head::Branch(name("g"));
@@ -1511,7 +1505,7 @@ mod tests {
 (commits (\"abcd1234\" (time 5 0) (parent \"deadbeef\") (graph g)))
 (names (gname \"abcd1234\"))";
         let registry: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text, Duration::from_secs(0))
+            gantz_egui::format::from_str(text, Duration::from_secs(0), &super::codec())
                 .expect("import");
         let commit = registry.named_commit(&name("gname")).expect("commit");
         assert_eq!(commit.parent, None, "absent parent must be cleared to None");
@@ -1536,7 +1530,7 @@ mod tests {
   (camera 25 -15 1.5))";
 
         let e1: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text1, now).expect("from_str 1");
+            gantz_egui::format::from_str(text1, now, &super::codec()).expect("from_str 1");
         let head = e1.head(&name("mul")).expect("mul name");
         let view = gantz_egui::section::view(&e1, &head).expect("view");
         // `m` is node index 0, `l` is 1.
@@ -1551,9 +1545,9 @@ mod tests {
         assert_eq!((view.camera.center.x, view.camera.center.y), (25.0, -15.0));
         assert_eq!(view.camera.zoom, 1.5);
 
-        let text2 = gantz_egui::format::to_string::<Box<dyn Node>>(&e1).expect("to_string");
+        let text2 = gantz_egui::format::to_string(&e1, &super::codec()).expect("to_string");
         let e2: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(&text2, now).expect("from_str 2");
+            gantz_egui::format::from_str(&text2, now, &super::codec()).expect("from_str 2");
         let head2 = e2.head(&name("mul")).expect("mul name 2");
         let view2 = gantz_egui::section::view(&e2, &head2).expect("view 2");
         assert_eq!(view.layout.len(), view2.layout.len());
@@ -1582,7 +1576,7 @@ mod tests {
   (scene -50 -50 100 100))";
 
         let e: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text, now).expect("from_str");
+            gantz_egui::format::from_str(text, now, &super::codec()).expect("from_str");
         let head = e.head(&name("mul")).expect("mul name");
         let view = gantz_egui::section::view(&e, &head).expect("view");
         // Centre of (-50,-50)..(100,100), default zoom.
@@ -1620,13 +1614,13 @@ mod tests {
         let selected: HashSet<gantz_core::node::graph::NodeIx> = [a, b].into_iter().collect();
 
         let copied = export::copy(&registry, &graph, &selected, &layout);
-        let text = export::copied_to_string(&copied).expect("copied to text");
+        let text = export::copied_to_string(&copied, &super::codec()).expect("copied to text");
         // The clipboard payload is itself reader-valid `.gantz` text.
         steel::parser::parser::Parser::parse(&text)
             .unwrap_or_else(|e| panic!("clipboard text is not valid Steel: {e}\n{text}"));
 
         let back: export::Copied<Box<dyn Node>> =
-            export::copied_from_str(&text).expect("copied from text");
+            export::copied_from_str(&text, &super::codec()).expect("copied from text");
         assert_eq!(back.graph.node_count(), 2);
         assert_eq!(back.graph.edge_count(), 1);
         assert_eq!(
@@ -1678,7 +1672,7 @@ mod tests {
         assert_ne!(child_old, child_new);
 
         // Resync: the parent must follow the child's new head graph.
-        let moves = gantz_egui::sync::resync::<Box<dyn Node>>(&mut registry, ts);
+        let moves = gantz_egui::sync::resync(&mut registry, ts);
         assert!(
             moves.iter().any(|m| m.name == name("p")),
             "parent should have recommitted: {moves:?}"
@@ -1733,12 +1727,7 @@ mod tests {
         registry.set_head(name("B"), b_commit);
 
         // Cascade: give "B" its own nested child "B:1".
-        let moves = gantz_egui::sync::fork_nested::<Box<dyn Node>>(
-            &mut registry,
-            ts,
-            &name("A"),
-            &name("B"),
-        );
+        let moves = gantz_egui::sync::fork_nested(&mut registry, ts, &name("A"), &name("B"));
         assert!(
             moves.iter().any(|m| m.name == name("B:1")),
             "B:1 should be created: {moves:?}"
@@ -1802,9 +1791,9 @@ mod tests {
 
         // Copy -> clipboard text -> paste.
         let copied = export::copy(&registry, &graph, &selected, &egui_graph::Layout::default());
-        let text = export::copied_to_string(&copied).expect("copied to text");
+        let text = export::copied_to_string(&copied, &super::codec()).expect("copied to text");
         let back: export::Copied<Box<dyn Node>> =
-            export::copied_from_str(&text).expect("copied from text");
+            export::copied_from_str(&text, &super::codec()).expect("copied from text");
 
         assert_eq!(back.graph.node_count(), 1, "the nested-ref node must paste");
         let kept = back.graph.node_weights().any(|n| {
@@ -1850,12 +1839,7 @@ mod tests {
         let a1_graph = registry.commits()[&a1].graph;
         let b = registry.commit_graph(ts, Some(a1), a1_graph, || unreachable!());
         registry.set_head(name("B"), b);
-        let moves = gantz_egui::sync::promote_nested::<Box<dyn Node>>(
-            &mut registry,
-            ts,
-            &name("A:1"),
-            &name("B"),
-        );
+        let moves = gantz_egui::sync::promote_nested(&mut registry, ts, &name("A:1"), &name("B"));
 
         assert!(
             moves.iter().any(|m| m.name == name("A")),
@@ -1896,7 +1880,7 @@ mod tests {
     /// `demo-all` catalog's otherwise-unconnected `ref` nodes).
     #[test]
     fn base_graphs_all_compile() {
-        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+        let base: DataReg = gantz_egui::export::parse_export(gantz_base::BYTES, &super::codec())
             .expect("parse base");
         let reified = reify_all(&base);
         let (builtins, instances) = builtins_with_instances();
@@ -1938,9 +1922,9 @@ mod tests {
     /// `#:sync` per `ref`.
     #[test]
     fn base_refs_are_synced() {
-        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+        let base: DataReg = gantz_egui::export::parse_export(gantz_base::BYTES, &super::codec())
             .expect("parse base");
-        let text = gantz_egui::format::to_string::<Box<dyn Node>>(&base).expect("to_string");
+        let text = gantz_egui::format::to_string(&base, &super::codec()).expect("to_string");
         let refs = text.matches("(ref ").count() + text.matches("(fn-ref ").count();
         let synced = text.matches("#:sync").count();
         assert!(refs > 0, "expected base to contain refs");
@@ -2083,11 +2067,11 @@ mod tests {
   (-> a (mref 0)) (-> b (mref 1)) (-> mref out))";
 
         let export1: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(text1, now).expect("from_str 1");
-        let text2 = gantz_egui::format::to_string::<Box<dyn Node>>(&export1).expect("to_string");
+            gantz_egui::format::from_str(text1, now, &super::codec()).expect("from_str 1");
+        let text2 = gantz_egui::format::to_string(&export1, &super::codec()).expect("to_string");
         assert!(text2.contains("#:ext"), "ext tail must survive\n{text2}");
         let export2: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(&text2, Duration::from_secs(7))
+            gantz_egui::format::from_str(&text2, Duration::from_secs(7), &super::codec())
                 .expect("from_str 2");
 
         for (name, head1) in export1.heads() {
@@ -2155,11 +2139,11 @@ mod tests {
     #[test]
     fn base_socket_docs() {
         use gantz_egui::{Registry as _, SocketKind};
-        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+        let base: DataReg = gantz_egui::export::parse_export(gantz_base::BYTES, &super::codec())
             .expect("parse base");
 
         // Completeness: no primitive socket serializes as a bare `inlet`/`outlet`.
-        let text = gantz_egui::format::to_string::<Box<dyn Node>>(&base).expect("to_string");
+        let text = gantz_egui::format::to_string(&base, &super::codec()).expect("to_string");
         let bare = text.matches(" inlet)").count() + text.matches(" outlet)").count();
         assert_eq!(
             bare, 0,
@@ -2200,7 +2184,7 @@ mod tests {
     fn demos_evaluate() {
         use gantz_core::compile::{EvalKind, entry_fn_name, push_pull_entrypoints};
 
-        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+        let base: DataReg = gantz_egui::export::parse_export(gantz_base::BYTES, &super::codec())
             .expect("parse base");
         let reified = reify_all(&base);
         let (builtins, instances) = builtins_with_instances();
@@ -2261,7 +2245,7 @@ mod tests {
 
         let ts = bevy_gantz_egui::base::BASE_TIMESTAMP;
         let parse = || -> DataReg {
-            gantz_egui::export::parse_export_at::<Box<dyn Node>>(gantz_base::BYTES, ts)
+            gantz_egui::export::parse_export_at(gantz_base::BYTES, ts, &super::codec())
                 .expect("parse base")
         };
         let heads = |reg: &DataReg| -> BTreeMap<_, _> {
@@ -2357,10 +2341,10 @@ mod tests {
         use std::collections::BTreeSet;
         use std::time::Duration;
 
-        let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
+        let base: DataReg = gantz_egui::export::parse_export(gantz_base::BYTES, &super::codec())
             .expect("parse base");
         let text =
-            gantz_egui::format::to_string_named::<Box<dyn Node>>(&base).expect("to_string_named");
+            gantz_egui::format::to_string_named(&base, &super::codec()).expect("to_string_named");
 
         // Inline names, no tables, references by name.
         assert!(!text.contains("(commits"), "no commits table:\n{text}");
@@ -2376,10 +2360,10 @@ mod tests {
 
         // Stable: reload the simplified text and re-serialize - byte-identical.
         let back: DataReg =
-            gantz_egui::format::from_str::<Box<dyn Node>>(&text, Duration::from_secs(0))
+            gantz_egui::format::from_str(&text, Duration::from_secs(0), &super::codec())
                 .expect("from_str");
         let text2 =
-            gantz_egui::format::to_string_named::<Box<dyn Node>>(&back).expect("to_string_named 2");
+            gantz_egui::format::to_string_named(&back, &super::codec()).expect("to_string_named 2");
         assert_eq!(text, text2, "inline-name export must be idempotent");
 
         // Names survive the round-trip.
@@ -2395,10 +2379,10 @@ mod tests {
     fn plyphon_base_export_is_stable() {
         let text1 = std::str::from_utf8(gantz_plyphon::BASE_BYTES).expect("utf8");
         let base: DataReg =
-            gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_plyphon::BASE_BYTES)
+            gantz_egui::export::parse_export(gantz_plyphon::BASE_BYTES, &super::codec())
                 .expect("parse base");
         let text2 =
-            gantz_egui::format::to_string_named::<Box<dyn Node>>(&base).expect("to_string_named");
+            gantz_egui::format::to_string_named(&base, &super::codec()).expect("to_string_named");
         assert_eq!(
             text1, text2,
             "the plyphon base file must match the writer's canonical form",
@@ -2412,9 +2396,10 @@ mod tests {
     fn merged_base_sources_all_compile() {
         let mut merged = DataReg::default();
         for bytes in [gantz_base::BYTES, gantz_plyphon::BASE_BYTES] {
-            let export: DataReg = gantz_egui::export::parse_export_at::<Box<dyn Node>>(
+            let export: DataReg = gantz_egui::export::parse_export_at(
                 bytes,
                 bevy_gantz_egui::base::BASE_TIMESTAMP,
+                &super::codec(),
             )
             .expect("parse source");
             merged.merge(export);
@@ -2446,9 +2431,10 @@ mod tests {
     #[test]
     fn plyphon_base_parses_reproducibly() {
         let parse = || -> DataReg {
-            gantz_egui::export::parse_export_at::<Box<dyn Node>>(
+            gantz_egui::export::parse_export_at(
                 gantz_plyphon::BASE_BYTES,
                 bevy_gantz_egui::base::BASE_TIMESTAMP,
+                &super::codec(),
             )
             .expect("parse")
         };
@@ -2469,7 +2455,7 @@ mod tests {
         let ts = bevy_gantz_egui::base::BASE_TIMESTAMP;
 
         let core: DataReg =
-            gantz_egui::export::parse_export_at::<Box<dyn Node>>(gantz_base::BYTES, ts)
+            gantz_egui::export::parse_export_at(gantz_base::BYTES, ts, &super::codec())
                 .expect("parse core");
         // Externally-known name -> head graph associations, the form the
         // seeded parse resolves foreign refs through.
@@ -2486,7 +2472,7 @@ mod tests {
   (-> a (add0 0)) (-> b (add0 1)) (-> add0 out))";
 
         // Unseeded: the foreign name cannot resolve.
-        match gantz_egui::export::parse_export_at::<Box<dyn Node>>(text.as_bytes(), ts) {
+        match gantz_egui::export::parse_export_at(text.as_bytes(), ts, &super::codec()) {
             Err(gantz_egui::export::ParseExportError::Format(e)) => assert!(
                 matches!(&e.kind, gantz_format::ErrorKind::MissingDependency(n) if n == "add"),
                 "unexpected error kind: {e:?}",
@@ -2497,7 +2483,7 @@ mod tests {
 
         // Seeded with the core source's names: resolves to the core content.
         let domain: DataReg =
-            gantz_egui::export::parse_export_seeded_at::<Box<dyn Node>>(text.as_bytes(), ts, &seed)
+            gantz_egui::export::parse_export_seeded_at(text.as_bytes(), ts, &seed, &super::codec())
                 .expect("seeded parse");
         let mut merged = core;
         merged.merge(domain);
@@ -2520,7 +2506,7 @@ mod tests {
 
         // The domain source's own export keeps `add` by name only.
         let out =
-            gantz_egui::export::export_names_sexpr_named::<Box<dyn Node>>(&merged, ["wrap-add"])
+            gantz_egui::export::export_names_sexpr_named(&merged, ["wrap-add"], &super::codec())
                 .expect("per-source export");
         assert!(out.contains("(graph wrap-add"), "own graph present:\n{out}");
         assert!(out.contains("(ref add"), "foreign ref by name:\n{out}");

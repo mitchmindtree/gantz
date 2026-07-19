@@ -6,12 +6,12 @@
 //! thin adapters around identical behaviour. Frontend-specific effects
 //! (clipboard access, file dialogs, head navigation) stay with the caller.
 
+use crate::node::NodeCodec;
 use crate::sync::AsNamedRef;
 use crate::widget::gantz::OpenHeadState;
 use crate::widget::graph_scene::NodeIndex;
 use crate::{CreateNode, InspectEdge, PastePos, export, node::NamedRef};
 use gantz_ca::{CommitAddr, GraphAddr, Name};
-use gantz_core::data::ReifiedGraphs;
 use gantz_core::node::{self, GetNode, graph::Graph};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -92,15 +92,16 @@ pub fn copy_nodes<N>(
     graph: &Graph<N>,
     head_view: &crate::SceneView,
     selection: &HashSet<NodeIndex>,
+    codec: &NodeCodec,
 ) -> Option<String>
 where
-    N: gantz_core::Node + Clone + Serialize + DeserializeOwned + gantz_format::NodeSugar,
+    N: gantz_core::Node + Clone + Serialize,
 {
     if selection.is_empty() {
         return None;
     }
     let copied = export::copy(registry, graph, selection, &head_view.layout);
-    match export::copied_to_string(&copied) {
+    match export::copied_to_string(&copied, codec) {
         Ok(text) => Some(text),
         Err(e) => {
             log::error!("CopyNodes: failed to serialize: {e}");
@@ -116,7 +117,6 @@ where
 #[allow(clippy::too_many_arguments)]
 pub fn create_node<N>(
     registry: &gantz_ca::Registry,
-    reified: &ReifiedGraphs<N>,
     editing: Option<&str>,
     get_node: GetNode,
     new_node: impl FnOnce(&str) -> Option<N>,
@@ -127,7 +127,7 @@ pub fn create_node<N>(
     cmd: CreateNode,
 ) -> Option<NodeIndex>
 where
-    N: gantz_core::Node + crate::sync::AsNamedRef,
+    N: gantz_core::Node,
 {
     let CreateNode { node_type, pos } = cmd;
     // Refuse references that would form a cycle back to the editing graph; with
@@ -136,7 +136,7 @@ where
     if editing.is_some_and(|editing| {
         let target: Name = node_type.parse().expect("infallible");
         let editing: Name = editing.parse().expect("infallible");
-        crate::cycle::would_cycle(registry, reified, &target, &editing)
+        crate::cycle::would_cycle(registry, &target, &editing)
     }) {
         log::warn!("CreateNode: '{node_type}' would create a reference cycle; skipping");
         return None;
@@ -332,11 +332,12 @@ pub fn cut_nodes<N>(
     head_view: &mut crate::SceneView,
     selection: &mut crate::widget::graph_scene::Selection,
     nodes: &HashSet<NodeIndex>,
+    codec: &NodeCodec,
 ) -> Option<String>
 where
-    N: gantz_core::Node + Clone + Serialize + DeserializeOwned + gantz_format::NodeSugar,
+    N: gantz_core::Node + Clone + Serialize,
 {
-    let text = copy_nodes(registry, graph, head_view, nodes)?;
+    let text = copy_nodes(registry, graph, head_view, nodes, codec)?;
     remove_nodes(
         graph,
         vm,
@@ -411,23 +412,18 @@ pub fn inspect_edge<N>(
 #[allow(clippy::too_many_arguments)]
 pub fn paste<N>(
     registry: &mut gantz_ca::Registry,
-    reified: &ReifiedGraphs<N>,
     editing: Option<&str>,
     graph: &mut Graph<N>,
     head_view: &mut crate::SceneView,
     head_state: &mut OpenHeadState,
     text: &str,
     pos: &PastePos,
+    codec: &NodeCodec,
 ) -> bool
 where
-    N: gantz_core::Node
-        + Clone
-        + Serialize
-        + DeserializeOwned
-        + AsNamedRef
-        + gantz_format::NodeSugar,
+    N: Clone + DeserializeOwned + AsNamedRef,
 {
-    let copied: export::Copied<N> = match export::copied_from_str(text) {
+    let copied: export::Copied<N> = match export::copied_from_str(text, codec) {
         Ok(c) => c,
         Err(e) => {
             log::debug!("Clipboard does not contain a valid gantz payload: {e}");
@@ -446,7 +442,7 @@ where
             .graph
             .node_weights()
             .filter_map(|n| n.as_named_ref())
-            .find(|nr| crate::cycle::would_cycle(registry, reified, nr.name(), &editing))
+            .find(|nr| crate::cycle::would_cycle(registry, nr.name(), &editing))
         {
             log::warn!(
                 "Paste: '{}' would create a reference cycle in '{editing}'; skipping paste",
@@ -474,33 +470,28 @@ where
 /// their state initialized.
 pub fn duplicate_nodes<N>(
     registry: &mut gantz_ca::Registry,
-    reified: &ReifiedGraphs<N>,
     editing: Option<&str>,
     graph: &mut Graph<N>,
     head_view: &mut crate::SceneView,
     head_state: &mut OpenHeadState,
     nodes: &HashSet<NodeIndex>,
+    codec: &NodeCodec,
 ) -> bool
 where
-    N: gantz_core::Node
-        + Clone
-        + Serialize
-        + DeserializeOwned
-        + AsNamedRef
-        + gantz_format::NodeSugar,
+    N: gantz_core::Node + Clone + Serialize + DeserializeOwned + AsNamedRef,
 {
-    let Some(text) = copy_nodes(registry, graph, head_view, nodes) else {
+    let Some(text) = copy_nodes(registry, graph, head_view, nodes, codec) else {
         return false;
     };
     paste(
         registry,
-        reified,
         editing,
         graph,
         head_view,
         head_state,
         &text,
         &PastePos::Offset(egui::vec2(20.0, 20.0)),
+        codec,
     )
 }
 
@@ -611,7 +602,6 @@ pub enum MergeHeadOutcome {
 #[allow(clippy::too_many_arguments)]
 pub fn merge_head<N>(
     registry: &mut gantz_ca::Registry,
-    reified: &ReifiedGraphs<N>,
     timestamp: gantz_ca::Timestamp,
     head: &mut gantz_ca::Head,
     graph: &mut Graph<N>,
@@ -623,7 +613,7 @@ pub fn merge_head<N>(
     auto_resolve: bool,
 ) -> MergeHeadOutcome
 where
-    N: DeserializeOwned + AsNamedRef,
+    N: DeserializeOwned,
 {
     let node_id = |ix: usize| egui_graph::NodeId::from_u64(ix as u64);
     let Some(ours_tip) = registry.head_commit_ca(head) else {
@@ -659,7 +649,7 @@ where
 
     // Refuse on hard blockers, and on conflicts unless the caller opted into
     // the selected resolutions.
-    let blockers = crate::merge::merge_blockers(registry, reified, head, &merged_graph);
+    let blockers = crate::merge::merge_blockers(registry, head, &outcome.graph);
     if !blockers.is_empty() {
         return MergeHeadOutcome::Refused(blockers);
     }
@@ -899,12 +889,6 @@ mod tests {
         }
     }
 
-    impl AsNamedRef for TestNode {
-        fn as_named_ref(&self) -> Option<&NamedRef> {
-            None
-        }
-    }
-
     fn test_graph(nodes: &[u32]) -> Graph<TestNode> {
         let mut g = Graph::default();
         for &n in nodes {
@@ -956,7 +940,6 @@ mod tests {
     ) -> MergeHeadOutcome {
         merge_head(
             reg,
-            &ReifiedGraphs::new(),
             std::time::Duration::from_secs(9),
             head,
             graph,

@@ -163,7 +163,7 @@ impl gantz_egui::Registry for Environment {
     fn would_ref_cycle(&self, target: &str, editing: &str) -> bool {
         let target: gantz_ca::Name = target.parse().expect("infallible");
         let editing: gantz_ca::Name = editing.parse().expect("infallible");
-        gantz_egui::cycle::would_cycle(&self.registry, &self.reified, &target, &editing)
+        gantz_egui::cycle::would_cycle(&self.registry, &target, &editing)
     }
 
     fn socket_doc(
@@ -266,7 +266,7 @@ impl gantz_egui::Registry for Environment {
         source: &str,
         resolutions: gantz_ca::Resolutions,
     ) -> Option<gantz_egui::merge::MergePreview> {
-        gantz_egui::merge::merge_preview(&self.registry, &self.reified, ours, source, resolutions)
+        gantz_egui::merge::merge_preview(&self.registry, ours, source, resolutions)
     }
 }
 
@@ -369,13 +369,8 @@ impl From<gantz_egui::node::NamedRef> for Box<dyn Node> {
     }
 }
 
-// Lets the reference-resync machinery find `NamedRef`s within an erased node.
-impl gantz_egui::sync::AsNamedRefMut for Box<dyn Node> {
-    fn as_named_ref_mut(&mut self) -> Option<&mut gantz_egui::node::NamedRef> {
-        ((&mut **self) as &mut dyn Any).downcast_mut::<gantz_egui::node::NamedRef>()
-    }
-}
-
+// Lets typed-graph ops (paste's cycle check, `branch_node`) find `NamedRef`s
+// within an erased node.
 impl gantz_egui::sync::AsNamedRef for Box<dyn Node> {
     fn as_named_ref(&self) -> Option<&gantz_egui::node::NamedRef> {
         ((&**self) as &dyn Any).downcast_ref::<gantz_egui::node::NamedRef>()
@@ -1141,7 +1136,6 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
         let (_, graph, view) = &mut state.heads[ix];
         gantz_egui::ops::create_node(
             &state.env.registry,
-            &state.env.reified,
             editing.as_deref(),
             &get_node,
             |node_type| env.new_node(node_type),
@@ -1185,7 +1179,7 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
             continue;
         };
         let (_, graph, gv) = &mut state.heads[ix];
-        let text = gantz_egui::ops::copy_nodes(&state.env.registry, graph, gv, &nodes);
+        let text = gantz_egui::ops::copy_nodes(&state.env.registry, graph, gv, &nodes, &codec());
         if let Some(text) = text {
             ctx.copy_text(text);
         }
@@ -1205,13 +1199,13 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
         let (_, graph, gv) = &mut state.heads[ix];
         let pasted = gantz_egui::ops::paste(
             &mut state.env.registry,
-            &state.env.reified,
             editing.as_deref(),
             graph,
             gv,
             head_state,
             &text,
             &pos,
+            &codec(),
         );
         // Re-register the full root graph so pasted nodes get their state
         // initialized. Idempotent for existing nodes.
@@ -1236,6 +1230,7 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
             gv,
             &mut head_state.scene.interaction.selection,
             &nodes,
+            &codec(),
         );
         if let Some(text) = text {
             ctx.copy_text(text);
@@ -1254,12 +1249,12 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
         let (_, graph, gv) = &mut state.heads[ix];
         let duplicated = gantz_egui::ops::duplicate_nodes(
             &mut state.env.registry,
-            &state.env.reified,
             editing.as_deref(),
             graph,
             gv,
             head_state,
             &nodes,
+            &codec(),
         );
         // Re-register the full root graph so the new nodes get their state
         // initialized. Idempotent for existing nodes.
@@ -1287,7 +1282,6 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
             let (h, graph, view) = &mut state.heads[ix];
             gantz_egui::ops::merge_head(
                 &mut state.env.registry,
-                &state.env.reified,
                 timestamp(),
                 h,
                 graph,
@@ -1347,16 +1341,14 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
 
     for (head, gantz_egui::ExportHead) in responses.take() {
         let Some(head) = head else { continue };
-        let text = match gantz_egui::export::export_heads_sexpr::<Box<dyn Node>>(
-            &state.env.registry,
-            [&head],
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!("ExportHead: failed to serialize: {e}");
-                continue;
-            }
-        };
+        let text =
+            match gantz_egui::export::export_heads_sexpr(&state.env.registry, [&head], &codec()) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("ExportHead: failed to serialize: {e}");
+                    continue;
+                }
+            };
         let default_name = gantz_egui::export::default_filename(&head);
         let ext = gantz_egui::export::FILE_EXTENSION;
         let dialog = rfd::AsyncFileDialog::new()
@@ -1383,9 +1375,10 @@ fn process_responses(ctx: &egui::Context, state: &mut State, mut responses: gant
             log::info!("ExportAllNamed: no named graphs to export");
             continue;
         }
-        let text = match gantz_egui::export::export_heads_sexpr::<Box<dyn Node>>(
+        let text = match gantz_egui::export::export_heads_sexpr(
             &state.env.registry,
             named_heads.iter(),
+            &codec(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1525,7 +1518,7 @@ fn gui(ui: &mut egui::Ui, state: &mut State) -> gantz_egui::Responses {
 /// Deserializes the export, merges into the registry, and optionally opens
 /// the unique root head.
 fn import_bytes(state: &mut State, bytes: Vec<u8>, open_head: bool) {
-    let imported = match gantz_egui::export::parse_export::<Box<dyn Node>>(&bytes) {
+    let imported = match gantz_egui::export::parse_export(&bytes, &codec()) {
         Ok(reg) => reg,
         Err(e) => {
             log::error!("Import: {e}");
@@ -1713,7 +1706,7 @@ fn apply_moves(state: &mut State, moves: &[gantz_egui::sync::Moved]) {
 /// sync-enabled `NamedRef`s, reload any open head whose commit moved, and
 /// recompile. This is how editing a nested graph propagates to its parents.
 fn resync_and_refresh(state: &mut State) {
-    let moves = gantz_egui::sync::resync::<Box<dyn Node>>(&mut state.env.registry, timestamp());
+    let moves = gantz_egui::sync::resync(&mut state.env.registry, timestamp());
     apply_moves(state, &moves);
 }
 
@@ -1810,9 +1803,8 @@ fn create_branch_from_head(
     // renamed to a root name) repoint its parent's references to it.
     if let (gantz_ca::Head::Branch(old), gantz_ca::Head::Branch(new)) = (original_head, &new_head) {
         let ts = timestamp();
-        let mut moves =
-            gantz_egui::sync::fork_nested::<Box<dyn Node>>(&mut state.env.registry, ts, old, new);
-        moves.extend(gantz_egui::sync::promote_nested::<Box<dyn Node>>(
+        let mut moves = gantz_egui::sync::fork_nested(&mut state.env.registry, ts, old, new);
+        moves.extend(gantz_egui::sync::promote_nested(
             &mut state.env.registry,
             ts,
             old,

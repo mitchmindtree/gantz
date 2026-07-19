@@ -54,7 +54,6 @@ trait PaneNode:
     + serde::Serialize
     + serde::de::DeserializeOwned
     + gantz_egui::NodeUi
-    + gantz_egui::sync::AsNamedRef
     + Send
     + Sync
 {
@@ -66,7 +65,6 @@ impl<N> PaneNode for N where
         + serde::Serialize
         + serde::de::DeserializeOwned
         + gantz_egui::NodeUi
-        + gantz_egui::sync::AsNamedRef
         + Send
         + Sync
 {

@@ -5,6 +5,7 @@
 //! type is needed. Serialization uses the `.gantz` S-expression text format
 //! (see [`crate::format`]) under the `.gantz` file extension.
 
+use crate::node::NodeCodec;
 use gantz_ca::{GraphAddr, Name};
 use gantz_core::node::{self, graph::Graph};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -45,11 +46,11 @@ impl std::error::Error for ParseExportError {
 /// Graphs the document does not commit explicitly (hand-authored graphs with no
 /// `(commits ...)` entry) are stamped with the current time. Use
 /// [`parse_export_at`] to stamp them with a fixed timestamp instead.
-pub fn parse_export<N>(bytes: &[u8]) -> Result<gantz_ca::Registry, ParseExportError>
-where
-    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
-{
-    parse_export_at::<N>(bytes, now())
+pub fn parse_export(
+    bytes: &[u8],
+    codec: &NodeCodec,
+) -> Result<gantz_ca::Registry, ParseExportError> {
+    parse_export_at(bytes, now(), codec)
 }
 
 /// Like [`parse_export`], but stamps uncommitted (hand-authored) graphs with the
@@ -59,31 +60,27 @@ where
 /// loads. This matters for content that is re-parsed and whose commits should
 /// line up with an already-loaded registry - e.g. the baked-in base, which is
 /// parsed both at startup and on demo reset.
-pub fn parse_export_at<N>(
+pub fn parse_export_at(
     bytes: &[u8],
     now: gantz_ca::Timestamp,
-) -> Result<gantz_ca::Registry, ParseExportError>
-where
-    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
-{
+    codec: &NodeCodec,
+) -> Result<gantz_ca::Registry, ParseExportError> {
     let text = std::str::from_utf8(bytes).map_err(ParseExportError::Utf8)?;
-    crate::format::from_str::<N>(text, now).map_err(ParseExportError::Format)
+    crate::format::from_str(text, now, codec).map_err(ParseExportError::Format)
 }
 
 /// Like [`parse_export_at`], resolving names the document does not define
 /// through `seed` (externally-known name -> head graph associations). Lets a
 /// base source reference graphs another source defines - see
 /// [`gantz_format::from_str_seeded`].
-pub fn parse_export_seeded_at<N>(
+pub fn parse_export_seeded_at(
     bytes: &[u8],
     now: gantz_ca::Timestamp,
     seed: &std::collections::BTreeMap<String, GraphAddr>,
-) -> Result<gantz_ca::Registry, ParseExportError>
-where
-    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
-{
+    codec: &NodeCodec,
+) -> Result<gantz_ca::Registry, ParseExportError> {
     let text = std::str::from_utf8(bytes).map_err(ParseExportError::Utf8)?;
-    crate::format::from_str_seeded::<N>(text, now, seed).map_err(ParseExportError::Format)
+    crate::format::from_str_seeded(text, now, seed, codec).map_err(ParseExportError::Format)
 }
 
 /// The current time as a [`gantz_ca::Timestamp`] (duration since the Unix epoch).
@@ -134,30 +131,26 @@ fn export_heads_registry(
 /// Covers both export-head and export-all-named: the export contains the heads'
 /// transitively required content along with their views, demos and
 /// descriptions. File IO stays with the caller.
-pub fn export_heads_sexpr<N>(
+pub fn export_heads_sexpr(
     registry: &gantz_ca::Registry,
     heads: impl IntoIterator<Item = impl std::borrow::Borrow<gantz_ca::Head>>,
-) -> Result<String, crate::format::FormatError>
-where
-    N: gantz_format::NodeSugar,
-{
+    codec: &NodeCodec,
+) -> Result<String, crate::format::FormatError> {
     let export_registry = export_heads_registry(registry, heads);
-    crate::format::to_string::<N>(&export_registry)
+    crate::format::to_string(&export_registry, codec)
 }
 
 /// As [`export_heads_sexpr`], but serializes in the inline-name format (see
 /// [`crate::format::to_string_named`]): graphs named inline, no commits/names
 /// tables, references by name. Used for the baked-in base so its file stays
 /// hand-editable and free of churning addresses.
-pub fn export_heads_sexpr_named<N>(
+pub fn export_heads_sexpr_named(
     registry: &gantz_ca::Registry,
     heads: impl IntoIterator<Item = impl std::borrow::Borrow<gantz_ca::Head>>,
-) -> Result<String, crate::format::FormatError>
-where
-    N: gantz_format::NodeSugar,
-{
+    codec: &NodeCodec,
+) -> Result<String, crate::format::FormatError> {
     let export_registry = export_heads_registry(registry, heads);
-    crate::format::to_string_named::<N>(&export_registry)
+    crate::format::to_string_named(&export_registry, codec)
 }
 
 /// As [`export_heads_sexpr_named`], but exports EXACTLY the given names with
@@ -167,13 +160,11 @@ where
 /// Used for per-source base write-back, where a source's file must contain
 /// only its own graphs - refs into other sources stay by name, and loading
 /// resolves them through the seeded parse (see [`parse_export_seeded_at`]).
-pub fn export_names_sexpr_named<N>(
+pub fn export_names_sexpr_named(
     registry: &gantz_ca::Registry,
     names: impl IntoIterator<Item = impl AsRef<str>>,
-) -> Result<String, crate::format::FormatError>
-where
-    N: gantz_format::NodeSugar,
-{
+    codec: &NodeCodec,
+) -> Result<String, crate::format::FormatError> {
     let requested: HashSet<Name> = names
         .into_iter()
         .map(|name| name.as_ref().parse().expect("infallible"))
@@ -202,7 +193,7 @@ where
     for name in extra {
         export_registry.remove_head(&name);
     }
-    crate::format::to_string_named::<N>(&export_registry)
+    crate::format::to_string_named(&export_registry, codec)
 }
 
 /// Derive a default export filename from a [`gantz_ca::Head`].
@@ -410,9 +401,12 @@ where
 /// stored as the clipboard commit's view section entry - alongside the
 /// registry dependencies, so the whole payload is one ordinary `.gantz`
 /// document. [`copied_from_str`] reverses this.
-pub fn copied_to_string<N>(copied: &Copied<N>) -> Result<String, crate::format::FormatError>
+pub fn copied_to_string<N>(
+    copied: &Copied<N>,
+    codec: &NodeCodec,
+) -> Result<String, crate::format::FormatError>
 where
-    N: Serialize + gantz_core::Node + gantz_format::NodeSugar,
+    N: Serialize + gantz_core::Node,
 {
     // Add the subgraph (erased) to the dependency registry as a fresh root
     // commit named `CLIPBOARD_NAME`. A fixed timestamp keeps the payload
@@ -436,18 +430,18 @@ where
     };
     crate::section::set_view(&mut registry, commit_ca, &view);
 
-    crate::format::to_string::<N>(&registry)
+    crate::format::to_string(&registry, codec)
 }
 
 /// Parse a clipboard payload produced by [`copied_to_string`].
 ///
 /// Splits the `clipboard` graph (and its positions) back out from the registry
 /// dependencies.
-pub fn copied_from_str<N>(text: &str) -> Result<Copied<N>, ParseCopiedError>
+pub fn copied_from_str<N>(text: &str, codec: &NodeCodec) -> Result<Copied<N>, ParseCopiedError>
 where
-    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
+    N: DeserializeOwned,
 {
-    let registry = crate::format::from_str::<N>(text, now()).map_err(ParseCopiedError::Format)?;
+    let registry = crate::format::from_str(text, now(), codec).map_err(ParseCopiedError::Format)?;
 
     let clipboard: Name = CLIPBOARD_NAME.parse().expect("infallible");
     let clip_ca = registry
@@ -572,7 +566,7 @@ mod tests {
     /// positions riding the clipboard commit's view section entry.
     #[test]
     fn clipboard_round_trip_carries_positions_and_deps() {
-        use crate::test_node::{TestGraph, TestNode, commit_named, expr, named_ref};
+        use crate::test_node::{TestGraph, TestNode, codec, commit_named, expr, named_ref};
 
         let mut reg = gantz_ca::Registry::default();
         let mut leaf_g = TestGraph::default();
@@ -593,8 +587,8 @@ mod tests {
         assert!(copied.registry.graph(&leaf_ga).is_some());
         assert!(copied.registry.head(&name("leaf")).is_some());
 
-        let text = copied_to_string(&copied).unwrap();
-        let back: Copied<Box<dyn TestNode>> = copied_from_str(&text).unwrap();
+        let text = copied_to_string(&copied, &codec()).unwrap();
+        let back: Copied<Box<dyn TestNode>> = copied_from_str(&text, &codec()).unwrap();
 
         // The subgraph and its positions survive.
         assert_eq!(back.graph.node_count(), 2);
@@ -641,7 +635,7 @@ mod tests {
     /// a parse + merge into a fresh registry.
     #[test]
     fn export_heads_text_round_trip() {
-        use crate::test_node::{TestGraph, TestNode, commit_named, expr, named_ref};
+        use crate::test_node::{TestGraph, codec, commit_named, expr, named_ref};
 
         let mut reg = gantz_ca::Registry::default();
         let mut leaf_g = TestGraph::default();
@@ -661,10 +655,9 @@ mod tests {
             gantz_ca::Head::Branch(name("root")),
             gantz_ca::Head::Branch(name("leaf")),
         ];
-        let text = export_heads_sexpr::<Box<dyn TestNode>>(&reg, heads.iter()).unwrap();
+        let text = export_heads_sexpr(&reg, heads.iter(), &codec()).unwrap();
 
-        let parsed =
-            parse_export_at::<Box<dyn TestNode>>(text.as_bytes(), Duration::from_secs(9)).unwrap();
+        let parsed = parse_export_at(text.as_bytes(), Duration::from_secs(9), &codec()).unwrap();
         let mut fresh = gantz_ca::Registry::default();
         let report = fresh.merge(parsed);
         assert_eq!(report.heads_added.len(), 2);

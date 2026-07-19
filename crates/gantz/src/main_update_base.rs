@@ -35,6 +35,9 @@ fn main() {
             assert!(errs.is_empty(), "builtins failed to reify: {errs:?}");
             builtins
         })
+        // The app's value-level node codec, for the `.gantz` parse/export
+        // paths (base load, import/export, clipboard, write-back).
+        .insert_resource(bevy_gantz_egui::NodeCodecRes(node::codec()))
         .add_plugins(DefaultPlugins.set(log_plugin()).set(window_plugin()))
         .add_plugins(EguiPlugin::default())
         .add_plugins(DebouncedInputPlugin::<DebouncedInputEvent>::new(0.25))
@@ -68,10 +71,7 @@ fn main() {
         .add_systems(EguiPrimaryContextPass, load_egui_memory)
         .add_systems(
             Update,
-            (
-                bevy_gantz_egui::base::export_to_file::<Box<dyn node::Node>>,
-                persist_state,
-            )
+            (bevy_gantz_egui::base::export_to_file, persist_state)
                 // After `settle_layout` so a layout commit settled this frame
                 // (and its seeded view) is exported/saved in the same pass.
                 .after(bevy_gantz_egui::settle_layout)

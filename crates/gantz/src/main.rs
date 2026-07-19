@@ -41,6 +41,9 @@ fn main() {
             assert!(errs.is_empty(), "builtins failed to reify: {errs:?}");
             builtins
         })
+        // The app's value-level node codec, for the `.gantz` parse/export
+        // paths (base load, import/export, clipboard).
+        .insert_resource(bevy_gantz_egui::NodeCodecRes(node::codec()))
         .add_plugins(DefaultPlugins.set(log_plugin()).set(window::plugin()))
         .add_plugins(EguiPlugin::default())
         // Drives both layout settling and the registry/views persist.
@@ -170,7 +173,7 @@ mod tests {
     #[test]
     fn base_gantz_deserializes() {
         let _registry: gantz_ca::Registry =
-            gantz_egui::export::parse_export::<Box<dyn super::node::Node>>(BASE_GANTZ)
+            gantz_egui::export::parse_export(BASE_GANTZ, &super::node::codec())
                 .expect("valid .gantz");
     }
 }

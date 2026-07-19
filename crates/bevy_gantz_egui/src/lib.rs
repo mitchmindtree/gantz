@@ -80,14 +80,12 @@ where
     N: Node
         + Clone
         + From<gantz_egui::node::NamedRef>
-        + gantz_egui::sync::AsNamedRefMut
         + gantz_egui::sync::AsNamedRef
         + gantz_egui::NodeUi
         + node::ToUpdateBang
         + node::ToTickBang
         + serde::Serialize
         + serde::de::DeserializeOwned
-        + gantz_format::NodeSugar
         + Send
         + Sync
         + 'static,
@@ -170,8 +168,8 @@ where
             .add_observer(on_paste::<N>)
             .add_observer(on_undo)
             .add_observer(on_redo)
-            .add_observer(on_export_head::<N>)
-            .add_observer(on_export_all_named::<N>)
+            .add_observer(on_export_head)
+            .add_observer(on_export_all_named)
             .add_observer(on_import_file::<N>)
             .add_observer(on_reset_base_graph::<N>)
             // Systems. `drive_update_bangs` evaluates head VMs, so it must not
@@ -252,6 +250,16 @@ pub struct PerfGui(pub gantz_egui::widget::PerfCapture);
 /// The gantz GUI state (open head states, etc.).
 #[derive(Resource, Default)]
 pub struct GuiState(pub gantz_egui::widget::GantzState);
+
+/// The application's value-level [`NodeCodec`][gantz_egui::node::NodeCodec]:
+/// the seam through which `.gantz` parse/export paths validate and normalize
+/// stored nodes.
+///
+/// The application inserts this alongside [`bevy_gantz::BuiltinNodes`]
+/// (typically `NodeCodecRes(node::codec())`); [`GantzEguiPlugin`]'s
+/// import/export/base systems read it.
+#[derive(Clone, Copy, Resource)]
+pub struct NodeCodecRes(pub gantz_egui::node::NodeCodec);
 
 /// Names of base nodes baked into the binary.
 ///
@@ -732,16 +740,9 @@ pub fn on_head_committed_resync<N>(
     mut cache: ResMut<GraphCache<N>>,
     mut heads: Query<head::OpenHeadData<N>, With<head::OpenHead>>,
 ) where
-    N: 'static
-        + Clone
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + Node
-        + gantz_egui::sync::AsNamedRefMut
-        + Send
-        + Sync,
+    N: 'static + Clone + serde::de::DeserializeOwned + Send + Sync,
 {
-    let moves = gantz_egui::sync::resync::<N>(&mut registry, bevy_gantz::reg::timestamp());
+    let moves = gantz_egui::sync::resync(&mut registry, bevy_gantz::reg::timestamp());
     refresh_cache(&registry, &mut cache);
     refresh_moved_heads(&moves, &mut registry, &mut cache, &mut heads);
 }
@@ -755,14 +756,7 @@ pub fn on_branched_head_fork_nested<N>(
     mut cache: ResMut<GraphCache<N>>,
     mut heads: Query<head::OpenHeadData<N>, With<head::OpenHead>>,
 ) where
-    N: 'static
-        + Clone
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + Node
-        + gantz_egui::sync::AsNamedRefMut
-        + Send
-        + Sync,
+    N: 'static + Clone + serde::de::DeserializeOwned + Send + Sync,
 {
     let event = trigger.event();
     let (ca::Head::Branch(old), ca::Head::Branch(new)) = (&event.old_head, &event.new_head) else {
@@ -771,8 +765,8 @@ pub fn on_branched_head_fork_nested<N>(
     let ts = bevy_gantz::reg::timestamp();
     // Give the fork independent nested children, then (when the fork renamed a
     // *nested* graph to a root name) repoint the parent's references to it.
-    let mut moves = gantz_egui::sync::fork_nested::<N>(&mut registry, ts, old, new);
-    moves.extend(gantz_egui::sync::promote_nested::<N>(
+    let mut moves = gantz_egui::sync::fork_nested(&mut registry, ts, old, new);
+    moves.extend(gantz_egui::sync::promote_nested(
         &mut registry,
         ts,
         old,
@@ -845,7 +839,6 @@ pub fn on_create_node<N>(
         + serde::Serialize
         + serde::de::DeserializeOwned
         + From<gantz_egui::node::NamedRef>
-        + gantz_egui::sync::AsNamedRef
         + Send
         + Sync,
 {
@@ -875,7 +868,6 @@ pub fn on_create_node<N>(
     let get_node = |ca: &ca::ContentAddr| node_reg.node(ca);
     gantz_egui::ops::create_node(
         node_reg.ca_registry(),
-        node_reg.reified(),
         editing.as_deref(),
         &get_node,
         |node_type| node_reg.create_node(node_type),
@@ -1072,17 +1064,11 @@ pub fn on_inspect_edge<N>(
 pub fn on_copy_nodes<N>(
     trigger: On<ForHead<gantz_egui::CopyNodes>>,
     registry: Res<Registry>,
+    codec: Res<NodeCodecRes>,
     mut clipboard: ResMut<bevy_egui::EguiClipboard>,
     mut heads: Query<(&mut head::WorkingGraph<N>, &GraphView), With<head::OpenHead>>,
 ) where
-    N: 'static
-        + Node
-        + Clone
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_format::NodeSugar
-        + Send
-        + Sync,
+    N: 'static + Node + Clone + serde::Serialize + Send + Sync,
 {
     let event = trigger.event();
     let Ok((wg, gv)) = heads.get_mut(event.head) else {
@@ -1090,7 +1076,7 @@ pub fn on_copy_nodes<N>(
         return;
     };
 
-    let text = gantz_egui::ops::copy_nodes(&registry, &wg, gv, &event.data.0);
+    let text = gantz_egui::ops::copy_nodes(&registry, &wg, gv, &event.data.0, &codec.0);
     if let Some(text) = text {
         clipboard.set_text(&text);
     }
@@ -1107,6 +1093,7 @@ pub fn on_paste<N>(
     mut registry: ResMut<Registry>,
     mut cache: ResMut<GraphCache<N>>,
     builtins: Res<BuiltinNodes<N>>,
+    codec: Res<NodeCodecRes>,
     mut gui_state: ResMut<GuiState>,
     mut vms: NonSendMut<head::HeadVms>,
     mut clipboard: ResMut<bevy_egui::EguiClipboard>,
@@ -1126,7 +1113,6 @@ pub fn on_paste<N>(
         + serde::Serialize
         + serde::de::DeserializeOwned
         + gantz_egui::sync::AsNamedRef
-        + gantz_format::NodeSugar
         + Send
         + Sync,
 {
@@ -1149,13 +1135,13 @@ pub fn on_paste<N>(
 
     let pasted = gantz_egui::ops::paste(
         &mut registry,
-        &cache,
         editing.as_deref(),
         &mut wg,
         &mut gv,
         head_state,
         &text,
         &event.data.pos,
+        &codec.0,
     );
 
     // Re-register the full root graph so pasted nodes get their state
@@ -1181,6 +1167,7 @@ pub fn on_cut_nodes<N>(
     trigger: On<ForHead<gantz_egui::CutNodes>>,
     mut registry: ResMut<Registry>,
     mut cache: ResMut<GraphCache<N>>,
+    codec: Res<NodeCodecRes>,
     mut gui_state: ResMut<GuiState>,
     mut vms: NonSendMut<head::HeadVms>,
     mut clipboard: ResMut<bevy_egui::EguiClipboard>,
@@ -1194,14 +1181,7 @@ pub fn on_cut_nodes<N>(
         With<head::OpenHead>,
     >,
 ) where
-    N: 'static
-        + Node
-        + Clone
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_format::NodeSugar
-        + Send
-        + Sync,
+    N: 'static + Node + Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync,
 {
     let event = trigger.event();
     let Ok((mut head_ref, mut wg, mut gv)) = heads.get_mut(event.head) else {
@@ -1224,6 +1204,7 @@ pub fn on_cut_nodes<N>(
         &mut gv,
         &mut head_state.scene.interaction.selection,
         &event.data.0,
+        &codec.0,
     );
     if let Some(text) = text {
         clipboard.set_text(&text);
@@ -1241,6 +1222,7 @@ pub fn on_duplicate_nodes<N>(
     mut registry: ResMut<Registry>,
     mut cache: ResMut<GraphCache<N>>,
     builtins: Res<BuiltinNodes<N>>,
+    codec: Res<NodeCodecRes>,
     mut gui_state: ResMut<GuiState>,
     mut vms: NonSendMut<head::HeadVms>,
     mut cmds: Commands,
@@ -1259,7 +1241,6 @@ pub fn on_duplicate_nodes<N>(
         + serde::Serialize
         + serde::de::DeserializeOwned
         + gantz_egui::sync::AsNamedRef
-        + gantz_format::NodeSugar
         + Send
         + Sync,
 {
@@ -1279,12 +1260,12 @@ pub fn on_duplicate_nodes<N>(
 
     let duplicated = gantz_egui::ops::duplicate_nodes(
         &mut registry,
-        &cache,
         editing.as_deref(),
         &mut wg,
         &mut gv,
         head_state,
         &event.data.0,
+        &codec.0,
     );
 
     // Re-register the full root graph so the new nodes get their state
@@ -1328,14 +1309,7 @@ pub fn on_merge_head<N>(
         With<head::OpenHead>,
     >,
 ) where
-    N: 'static
-        + Node
-        + Clone
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_egui::sync::AsNamedRef
-        + Send
-        + Sync,
+    N: 'static + Node + Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync,
 {
     let event = trigger.event();
     let Ok((mut head_ref, mut wg, mut gv)) = heads.get_mut(event.head) else {
@@ -1354,7 +1328,6 @@ pub fn on_merge_head<N>(
     let old_head = head_ref.0.clone();
     let outcome = gantz_egui::ops::merge_head(
         &mut registry,
-        &cache,
         bevy_gantz::reg::timestamp(),
         &mut head_ref.0,
         &mut wg,
@@ -1447,18 +1420,12 @@ pub fn on_redo(
 /// Exports the head's graph (with transitive dependencies and views) to a
 /// `.gantz` file chosen via an `rfd` file dialog. The export is serialized as
 /// `.gantz` text using the [`gantz_egui::export`] infrastructure.
-pub fn on_export_head<N>(
+pub fn on_export_head(
     trigger: On<ExportHeadEvent>,
     registry: Res<Registry>,
+    codec: Res<NodeCodecRes>,
     heads: Query<&head::HeadRef, With<head::OpenHead>>,
-) where
-    N: 'static
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_format::NodeSugar
-        + Send
-        + Sync,
-{
+) {
     let event = trigger.event();
     let Ok(head_ref) = heads.get(event.head) else {
         log::error!("ExportHead: head not found for entity {:?}", event.head);
@@ -1466,7 +1433,7 @@ pub fn on_export_head<N>(
     };
     let head: &ca::Head = &**head_ref;
 
-    let text = match gantz_egui::export::export_heads_sexpr::<N>(&registry, [head]) {
+    let text = match gantz_egui::export::export_heads_sexpr(&registry, [head], &codec.0) {
         Ok(s) => s,
         Err(e) => {
             log::error!("ExportHead: failed to serialize: {e}");
@@ -1498,15 +1465,11 @@ pub fn on_export_head<N>(
 ///
 /// Exports every named graph (with transitive dependencies and views) to a
 /// single `.gantz` file chosen via an `rfd` file dialog.
-pub fn on_export_all_named<N>(_trigger: On<ExportAllNamedEvent>, registry: Res<Registry>)
-where
-    N: 'static
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_format::NodeSugar
-        + Send
-        + Sync,
-{
+pub fn on_export_all_named(
+    _trigger: On<ExportAllNamedEvent>,
+    registry: Res<Registry>,
+    codec: Res<NodeCodecRes>,
+) {
     let named_heads: Vec<ca::Head> = registry
         .heads()
         .map(|(name, _)| ca::Head::Branch(name.clone()))
@@ -1517,7 +1480,8 @@ where
         return;
     }
 
-    let text = match gantz_egui::export::export_heads_sexpr::<N>(&registry, named_heads.iter()) {
+    let text = match gantz_egui::export::export_heads_sexpr(&registry, named_heads.iter(), &codec.0)
+    {
         Ok(s) => s,
         Err(e) => {
             log::error!("ExportAllNamed: failed to serialize: {e}");
@@ -1550,18 +1514,13 @@ pub fn on_import_file<N>(
     trigger: On<ImportFileEvent>,
     mut registry: ResMut<Registry>,
     mut cache: ResMut<GraphCache<N>>,
+    codec: Res<NodeCodecRes>,
     mut cmds: Commands,
 ) where
-    N: 'static
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + Node
-        + gantz_format::NodeSugar
-        + Send
-        + Sync,
+    N: 'static + serde::de::DeserializeOwned + Send + Sync,
 {
     let event = trigger.event();
-    let export = match gantz_egui::export::parse_export::<N>(&event.bytes) {
+    let export = match gantz_egui::export::parse_export(&event.bytes, &codec.0) {
         Ok(e) => e,
         Err(e) => {
             log::error!("ImportFile: {e}");
@@ -1597,14 +1556,9 @@ pub fn on_reset_base_graph<N>(
     base_names: Res<BaseNames>,
     mut registry: ResMut<Registry>,
     mut cache: ResMut<GraphCache<N>>,
+    codec: Res<NodeCodecRes>,
 ) where
-    N: 'static
-        + Node
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_format::NodeSugar
-        + Send
-        + Sync,
+    N: 'static + serde::de::DeserializeOwned + Send + Sync,
 {
     let name = &trigger.event().0;
     // Re-parse the source that defined the name (recorded at load), seeded
@@ -1620,10 +1574,11 @@ pub fn on_reset_base_graph<N>(
         return;
     };
     let seed = base::seed_graph_addrs(&base_names.0, &registry);
-    let export: gantz_ca::Registry = match gantz_egui::export::parse_export_seeded_at::<N>(
+    let export: gantz_ca::Registry = match gantz_egui::export::parse_export_seeded_at(
         source.bytes,
         crate::base::BASE_TIMESTAMP,
         &seed,
+        &codec.0,
     ) {
         Ok(e) => e,
         Err(e) => {
@@ -1805,7 +1760,6 @@ where
         + serde::Serialize
         + serde::de::DeserializeOwned
         + gantz_egui::NodeUi
-        + gantz_egui::sync::AsNamedRef
         + Send
         + Sync,
 {

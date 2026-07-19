@@ -29,9 +29,14 @@ impl gantz_format::NodeSugar for Box<dyn TestNode> {
     }
 }
 
-impl crate::sync::AsNamedRef for Box<dyn TestNode> {
-    fn as_named_ref(&self) -> Option<&NamedRef> {
-        ((&**self) as &dyn Any).downcast_ref::<NamedRef>()
+/// The value-level codec for the test node set: the SAME manifest as the
+/// `impl_node_set_serde!` invocation above.
+pub fn codec() -> crate::node::NodeCodec {
+    crate::ui_node_codec! {
+        Box<dyn TestNode> {
+            gantz_core::node::Expr,
+            crate::node::NamedRef,
+        }
     }
 }
 

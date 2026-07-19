@@ -45,14 +45,6 @@ fn is_default<T: Default + PartialEq>(t: &T) -> bool {
     *t == T::default()
 }
 
-/// Trait for environments that can check if a name maps to a content address.
-pub trait NameRegistry {
-    /// Returns the current content address for the given name, if it exists.
-    fn name_ca(&self, name: &str) -> Option<gantz_ca::ContentAddr>;
-    /// Returns true if a node with the given content address exists in the environment.
-    fn node_exists(&self, ca: &gantz_ca::ContentAddr) -> bool;
-}
-
 impl NamedRef {
     /// Construct a `NamedRef` node (auto-sync disabled).
     pub fn new(name: Name, ref_: gantz_core::node::Ref) -> Self {

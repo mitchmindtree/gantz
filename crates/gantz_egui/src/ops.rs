@@ -70,8 +70,8 @@ pub fn branch_node<N>(
 
 /// The newest commit pointing at the given graph, if any (ties broken by
 /// address for determinism).
-fn newest_commit_for_graph<G>(
-    registry: &gantz_ca::Registry<G>,
+fn newest_commit_for_graph(
+    registry: &gantz_ca::Registry<DataGraph>,
     graph_addr: GraphAddr,
 ) -> Option<CommitAddr> {
     registry
@@ -509,8 +509,8 @@ where
 ///
 /// Returns `None` when the head has no parent commit to return to.
 /// Navigation itself is frontend-specific and stays with the caller.
-pub fn undo<G>(
-    registry: &gantz_ca::Registry<G>,
+pub fn undo(
+    registry: &gantz_ca::Registry<DataGraph>,
     redo_stacks: &mut HashMap<gantz_ca::Head, Vec<CommitAddr>>,
     head: &gantz_ca::Head,
 ) -> Option<CommitAddr> {

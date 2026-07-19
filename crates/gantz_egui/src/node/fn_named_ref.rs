@@ -1,6 +1,6 @@
 //! `Fn<NamedRef>` type alias and NodeUi implementation.
 
-use super::{NameRegistry, NamedRef, missing_color, outdated_color};
+use super::{NamedRef, missing_color, outdated_color};
 use crate::{
     InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind,
     widget::node_inspector,
@@ -13,13 +13,6 @@ pub type FnNamedRef = gantz_core::node::Fn<NamedRef>;
 // `NodeTag` for the foreign `Fn<NamedRef>` here directly.
 impl gantz_core::node::FnNodeTag for NamedRef {
     const FN_TAG: &'static str = "FnNamedRef";
-}
-
-/// Trait for environments that can provide Fn-compatible node names.
-pub trait FnNodeNames: NameRegistry {
-    /// Names of nodes that can be used with Fn.
-    /// Filters to: stateless, branchless, single-output nodes.
-    fn fn_node_names(&self) -> Vec<String>;
 }
 
 impl NodeUi for FnNamedRef {

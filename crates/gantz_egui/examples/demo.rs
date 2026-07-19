@@ -81,24 +81,6 @@ type Registry = gantz_ca::Registry<gantz_ca::DataGraph>;
 /// Constructors for all primitive nodes.
 type Primitives = BTreeMap<String, Box<dyn Fn() -> Box<dyn Node>>>;
 
-// Provide the `NodeTypeRegistry` implementation required by `gantz_egui`.
-impl gantz_egui::NodeTypeRegistry for Environment {
-    fn node_types(&self) -> Vec<&str> {
-        let mut types = vec![gantz_egui::widget::gantz::NESTED_GRAPH_TYPE];
-        types.extend(self.primitives.keys().map(|s| &s[..]));
-        // A root name is its single segment.
-        types.extend(
-            self.registry
-                .heads()
-                .filter(|(n, _)| !n.is_nested())
-                .map(|(n, _)| n.segments()[0].as_str()),
-        );
-        types.sort();
-        types.dedup();
-        types
-    }
-}
-
 impl Environment {
     /// Create a node of the given type name.
     fn new_node(&self, node_type: &str) -> Option<Box<dyn Node>> {
@@ -113,25 +95,16 @@ impl Environment {
     }
 }
 
-// Provide the `GraphRegistry` implementation required by the `GraphSelect` widget.
-impl gantz_egui::widget::graph_select::GraphRegistry for Environment {
-    fn commits(&self) -> Vec<(&gantz_ca::CommitAddr, &gantz_ca::Commit)> {
-        // Sort commits by newest to oldest.
-        let mut commits: Vec<_> = self.registry.commits().iter().collect();
-        commits.sort_by(|(_, a), (_, b)| b.timestamp.cmp(&a.timestamp));
-        commits
+// Provide the `Registry` implementation required by the Gantz widget.
+impl gantz_egui::Registry for Environment {
+    fn ca(&self) -> &Registry {
+        &self.registry
     }
 
-    fn names(&self) -> Vec<(gantz_ca::Name, gantz_ca::CommitAddr)> {
-        self.registry
-            .heads()
-            .map(|(n, ca)| (n.clone(), ca))
-            .collect()
+    fn node(&self, ca: &gantz_ca::ContentAddr) -> Option<&dyn gantz_core::Node> {
+        Environment::node(self, ca)
     }
-}
 
-// Provide the `NameRegistry` implementation required by `gantz_egui::node::NamedRef`.
-impl gantz_egui::node::NameRegistry for Environment {
     fn name_ca(&self, name: &str) -> Option<gantz_ca::ContentAddr> {
         // The addr a `Ref` should pin: the name's head graph addr.
         let name: gantz_ca::Name = name.parse().expect("infallible");
@@ -143,10 +116,7 @@ impl gantz_egui::node::NameRegistry for Environment {
         let graph_ca = gantz_ca::GraphAddr::from(*ca);
         self.registry.graph(&graph_ca).is_some()
     }
-}
 
-// Provide the `FnNodeNames` implementation required by `gantz_egui::node::FnNamedRef`.
-impl gantz_egui::node::FnNodeNames for Environment {
     fn fn_node_names(&self) -> Vec<String> {
         use gantz_core::Node;
         // Fn-compatible nodes: stateless, branchless, single-output.
@@ -169,12 +139,20 @@ impl gantz_egui::node::FnNodeNames for Environment {
             .map(|(name, _)| name.to_string())
             .collect()
     }
-}
 
-// Provide the `Registry` implementation required by the Gantz widget.
-impl gantz_egui::Registry for Environment {
-    fn node(&self, ca: &gantz_ca::ContentAddr) -> Option<&dyn gantz_core::Node> {
-        Environment::node(self, ca)
+    fn node_types(&self) -> Vec<&str> {
+        let mut types = vec![gantz_egui::widget::gantz::NESTED_GRAPH_TYPE];
+        types.extend(self.primitives.keys().map(|s| &s[..]));
+        // A root name is its single segment.
+        types.extend(
+            self.registry
+                .heads()
+                .filter(|(n, _)| !n.is_nested())
+                .map(|(n, _)| n.segments()[0].as_str()),
+        );
+        types.sort();
+        types.dedup();
+        types
     }
 
     fn would_ref_cycle(&self, target: &str, editing: &str) -> bool {
@@ -253,11 +231,6 @@ impl gantz_egui::Registry for Environment {
         info
     }
 
-    fn graph_description(&self, name: &str) -> Option<String> {
-        let name: gantz_ca::Name = name.parse().expect("infallible");
-        gantz_egui::section::description(&self.registry, &name)
-    }
-
     fn node_description(&self, name: &str) -> Option<std::borrow::Cow<'static, str>> {
         use gantz_egui::NodeUi as _;
         use std::borrow::Cow;
@@ -273,10 +246,6 @@ impl gantz_egui::Registry for Environment {
         self.new_node(name)
             .and_then(|n| n.description())
             .map(Cow::Borrowed)
-    }
-
-    fn merge_candidates(&self, ours: &gantz_ca::Head) -> Vec<gantz_egui::merge::MergeCandidate> {
-        gantz_egui::merge::merge_candidates(&self.registry, ours)
     }
 
     fn merge_preview(

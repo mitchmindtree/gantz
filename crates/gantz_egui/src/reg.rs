@@ -1,13 +1,10 @@
 //! Registry reference for node lookup and trait implementations.
 //!
 //! Provides [`RegistryRef`] - a unified view combining a content-addressed
-//! registry with builtin nodes, implementing the various registry traits
-//! required by gantz_egui widgets.
+//! registry with builtin nodes, implementing the [`Registry`] trait required
+//! by the gantz_egui widgets.
 
 use crate::Registry;
-use crate::node::{FnNodeNames, NameRegistry};
-use crate::widget::gantz::NodeTypeRegistry;
-use crate::widget::graph_select::GraphRegistry;
 use gantz_ca as ca;
 use gantz_ca::DataGraph;
 use gantz_core::data::ReifiedGraphs;
@@ -21,8 +18,8 @@ use std::collections::BTreeMap;
 ///
 /// Combines access to a content-addressed registry (for user-defined graphs,
 /// stored as data), the reified-graph cache serving those graphs as typed
-/// nodes, and builtin nodes, implementing all the registry traits required by
-/// gantz_egui widgets.
+/// nodes, and builtin nodes, implementing the [`Registry`] trait required by
+/// the gantz_egui widgets.
 pub struct RegistryRef<'a, N: 'static + Send + Sync> {
     ca_registry: &'a ca::Registry<DataGraph>,
     reified: &'a ReifiedGraphs<N>,
@@ -68,6 +65,10 @@ impl<N: 'static + Node + Send + Sync> RegistryRef<'_, N> {
     ///
     /// Checks reified registry graphs first (a graph in the registry IS a
     /// node), then falls back to builtins.
+    ///
+    /// Also available via [`Registry::node`]; this inherent form asks only
+    /// `N: Node` of the node type, for callers (e.g. headless graph ops) whose
+    /// node bounds don't meet the full [`Registry`] impl's UI requirements.
     pub fn node(&self, ca: &ca::ContentAddr) -> Option<&dyn Node> {
         let graph_ca = ca::GraphAddr::from(*ca);
         if let Some(graph) = self.reified.get(&graph_ca) {
@@ -95,46 +96,24 @@ impl<N: 'static + Node + Send + Sync> RegistryRef<'_, N> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Trait implementations
-// ---------------------------------------------------------------------------
-
-impl<N: 'static + Node + Send + Sync> NodeTypeRegistry for RegistryRef<'_, N> {
-    fn node_types(&self) -> Vec<&str> {
-        // The reserved nested-graph entry replaces the old `graph` builtin.
-        let mut types = vec![crate::widget::gantz::NESTED_GRAPH_TYPE];
-        types.extend(self.builtins.names());
-        // Nested graphs are hidden from the root graph-select list, so don't
-        // offer them as creatable node types either. A root name is its
-        // single segment.
-        types.extend(
-            self.ca_registry
-                .heads()
-                .filter(|(name, _)| !name.is_nested())
-                .map(|(name, _)| name.segments()[0].as_str()),
-        );
-        types.sort();
-        types.dedup();
-        types
-    }
-}
-
-impl<N: 'static + Node + Send + Sync> GraphRegistry for RegistryRef<'_, N> {
-    fn commits(&self) -> Vec<(&ca::CommitAddr, &ca::Commit)> {
-        let mut commits: Vec<_> = self.ca_registry.commits().iter().collect();
-        commits.sort_by(|(_, a), (_, b)| b.timestamp.cmp(&a.timestamp));
-        commits
-    }
-
-    fn names(&self) -> Vec<(ca::Name, ca::CommitAddr)> {
+impl<N> Registry for RegistryRef<'_, N>
+where
+    N: 'static
+        + Node
+        + crate::NodeUi
+        + crate::sync::AsNamedRef
+        + serde::de::DeserializeOwned
+        + Send
+        + Sync,
+{
+    fn ca(&self) -> &ca::Registry<DataGraph> {
         self.ca_registry
-            .heads()
-            .map(|(name, ca)| (name.clone(), ca))
-            .collect()
     }
-}
 
-impl<N: 'static + Node + Send + Sync> NameRegistry for RegistryRef<'_, N> {
+    fn node(&self, ca: &ca::ContentAddr) -> Option<&dyn Node> {
+        RegistryRef::node(self, ca)
+    }
+
     fn name_ca(&self, name: &str) -> Option<ca::ContentAddr> {
         let parsed: ca::Name = name.parse().expect("infallible");
         head_graph_addr(self.ca_registry, &parsed)
@@ -145,9 +124,7 @@ impl<N: 'static + Node + Send + Sync> NameRegistry for RegistryRef<'_, N> {
     fn node_exists(&self, ca: &ca::ContentAddr) -> bool {
         self.node(ca).is_some()
     }
-}
 
-impl<N: 'static + Node + Send + Sync> FnNodeNames for RegistryRef<'_, N> {
     fn fn_node_names(&self) -> Vec<String> {
         let builtin_names = self
             .builtins
@@ -175,20 +152,23 @@ impl<N: 'static + Node + Send + Sync> FnNodeNames for RegistryRef<'_, N> {
         names.sort();
         names
     }
-}
 
-impl<N> Registry for RegistryRef<'_, N>
-where
-    N: 'static
-        + Node
-        + crate::NodeUi
-        + crate::sync::AsNamedRef
-        + serde::de::DeserializeOwned
-        + Send
-        + Sync,
-{
-    fn node(&self, ca: &ca::ContentAddr) -> Option<&dyn Node> {
-        RegistryRef::node(self, ca)
+    fn node_types(&self) -> Vec<&str> {
+        // The reserved nested-graph entry replaces the old `graph` builtin.
+        let mut types = vec![crate::widget::gantz::NESTED_GRAPH_TYPE];
+        types.extend(self.builtins.names());
+        // Nested graphs are hidden from the root graph-select list, so don't
+        // offer them as creatable node types either. A root name is its
+        // single segment.
+        types.extend(
+            self.ca_registry
+                .heads()
+                .filter(|(name, _)| !name.is_nested())
+                .map(|(name, _)| name.segments()[0].as_str()),
+        );
+        types.sort();
+        types.dedup();
+        types
     }
 
     fn would_ref_cycle(&self, target: &str, editing: &str) -> bool {
@@ -264,8 +244,7 @@ where
             // inlet/outlet markers.
             if let Some(graph) = self.reified.get(&graph_addr) {
                 let ca: ca::ContentAddr = graph_addr.into();
-                let socket =
-                    |kind: SocketKind, ix: usize| Registry::socket_doc(self, &ca, kind, ix);
+                let socket = |kind: SocketKind, ix: usize| self.socket_doc(&ca, kind, ix);
                 info.inputs = collect(graph.n_inputs(meta_ctx), SocketKind::Input, &socket);
                 info.outputs = collect(graph.n_outputs(meta_ctx), SocketKind::Output, &socket);
             }
@@ -277,15 +256,6 @@ where
         }
 
         info
-    }
-
-    fn graph_description(&self, name: &str) -> Option<String> {
-        let parsed: ca::Name = name.parse().expect("infallible");
-        crate::section::description(self.ca_registry, &parsed)
-    }
-
-    fn merge_candidates(&self, ours: &ca::Head) -> Vec<crate::merge::MergeCandidate> {
-        crate::merge::merge_candidates(self.ca_registry, ours)
     }
 
     fn merge_preview(
@@ -319,4 +289,9 @@ where
 pub fn head_graph_addr(reg: &ca::Registry<DataGraph>, name: &ca::Name) -> Option<ca::GraphAddr> {
     let head_ca = reg.head(name)?;
     reg.commits().get(&head_ca).map(|commit| commit.graph)
+}
+
+/// All name -> head commit pairs, in name order.
+pub fn names(reg: &ca::Registry<DataGraph>) -> Vec<(ca::Name, ca::CommitAddr)> {
+    reg.heads().map(|(name, ca)| (name.clone(), ca)).collect()
 }

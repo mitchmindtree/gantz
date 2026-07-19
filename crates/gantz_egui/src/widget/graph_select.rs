@@ -35,21 +35,6 @@ impl Default for GraphSelectState {
     }
 }
 
-/// Methods required on the provided graph registry.
-pub trait GraphRegistry {
-    /// All selectable commit addresses.
-    fn commits(&self) -> Vec<(&gantz_ca::CommitAddr, &gantz_ca::Commit)>;
-    /// All name -> head commit pairs, in name order.
-    fn names(&self) -> Vec<(Name, gantz_ca::CommitAddr)>;
-    /// The head commit for the given name, if any.
-    fn name_head(&self, name: &Name) -> Option<gantz_ca::CommitAddr> {
-        self.names()
-            .into_iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, ca)| ca)
-    }
-}
-
 /// Commands emitted from the `GraphSelect` widget.
 #[derive(Debug, Default)]
 pub struct GraphSelectResponse {
@@ -162,7 +147,7 @@ impl<'a> GraphSelect<'a> {
             });
         });
 
-        let names = self.registry.names();
+        let names = crate::reg::names(self.registry.ca());
         // Captured by `show_named` to surface each named graph's description and
         // input/output docs on hover.
         let registry = self.registry;
@@ -329,9 +314,7 @@ impl<'a> GraphSelect<'a> {
                     .collect();
 
                 // Show only unnamed commits that are currently open as heads.
-                for (ca, commit) in self
-                    .registry
-                    .commits()
+                for (ca, commit) in commits_by_recency(self.registry.ca())
                     .into_iter()
                     .filter(|(ca, _)| !visited.contains(ca) && open_head_cas.contains(ca))
                 {
@@ -387,6 +370,18 @@ impl<'a> GraphSelect<'a> {
 
         response
     }
+}
+
+/// All commits in the registry, sorted newest to oldest.
+///
+/// The head-listing widgets (graph select, history view) share this ordering
+/// for their unnamed-commit rows.
+pub fn commits_by_recency(
+    reg: &gantz_ca::Registry<gantz_ca::DataGraph>,
+) -> Vec<(&gantz_ca::CommitAddr, &gantz_ca::Commit)> {
+    let mut commits: Vec<_> = reg.commits().iter().collect();
+    commits.sort_by(|(_, a), (_, b)| b.timestamp.cmp(&a.timestamp));
+    commits
 }
 
 /// Whether the name follows the `demo-*` naming convention for demo graphs.

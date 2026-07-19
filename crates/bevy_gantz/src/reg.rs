@@ -5,7 +5,6 @@
 //! - [`GraphCache<N>`] — Bevy resource wrapping the reified-graph cache
 //! - [`lookup_node`] — Simple node lookup function
 
-use crate::builtin::Builtins;
 use crate::head::{HeadRef, OpenHead};
 use bevy_ecs::prelude::*;
 use bevy_log as log;
@@ -13,6 +12,7 @@ use gantz_ca as ca;
 use gantz_core::Node;
 use gantz_core::data::ReifiedGraphs;
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -80,17 +80,18 @@ pub fn timestamp() -> Duration {
 /// Look up a node by content address.
 ///
 /// Checks reified registry graphs first (a graph in the registry IS a node),
-/// then falls back to builtins.
+/// then falls back to the reified builtin instances (see
+/// [`crate::BuiltinNodes`]).
 pub fn lookup_node<'a, N: 'static + Node + Send + Sync>(
     cache: &'a ReifiedGraphs<N>,
-    builtins: &'a dyn Builtins<Node = N>,
+    builtins: &'a HashMap<ca::ContentAddr, N>,
     ca: &ca::ContentAddr,
 ) -> Option<&'a dyn Node> {
     let graph_ca = ca::GraphAddr::from(*ca);
     if let Some(graph) = cache.get(&graph_ca) {
         return Some(graph as &dyn Node);
     }
-    builtins.instance(ca).map(|n| n as &dyn Node)
+    builtins.get(ca).map(|n| n as &dyn Node)
 }
 
 /// Bring the reified-graph cache up to date with the registry, best effort.

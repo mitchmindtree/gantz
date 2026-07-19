@@ -33,10 +33,14 @@ fn main() {
         .add_plugins(GantzEguiPlugin::<Box<dyn node::Node>>::default())
         // DSP plugin: cpal output stream + plyphon synth driver for DSP graphs.
         .add_plugins(bevy_gantz_plyphon::PlyphonPlugin::<Box<dyn node::Node>>::default())
-        // The full builtin node set composed from every domain's builtins.
-        .insert_resource(BuiltinNodes::<Box<dyn node::Node>>(Box::new(
-            node::builtins(),
-        )))
+        // The full builtin node set composed from every domain's builtins,
+        // reified once through the node-set serde. A builtin failing to
+        // reify is a node-set composition error, so fail loudly at startup.
+        .insert_resource({
+            let (builtins, errs) = BuiltinNodes::<Box<dyn node::Node>>::reify(node::builtins());
+            assert!(errs.is_empty(), "builtins failed to reify: {errs:?}");
+            builtins
+        })
         .add_plugins(DefaultPlugins.set(log_plugin()).set(window::plugin()))
         .add_plugins(EguiPlugin::default())
         // Drives both layout settling and the registry/views persist.

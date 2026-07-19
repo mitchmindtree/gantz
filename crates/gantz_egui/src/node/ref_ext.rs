@@ -63,8 +63,9 @@ mod tests {
     fn named_ref_inspector_merges_ext_ui_responses() {
         let registry = gantz_ca::Registry::default();
         let reified = gantz_core::data::ReifiedGraphs::<NamedRef>::new();
-        let builtins = gantz_core::BuiltinSet::<NamedRef>::from_specs([]);
-        let reg_ref = crate::RegistryRef::new(&registry, &reified, &builtins);
+        let builtins = gantz_core::Builtins::default();
+        let instances = std::collections::HashMap::new();
+        let reg_ref = crate::RegistryRef::new(&registry, &reified, &builtins, &instances);
         let mut vm = gantz_core::steel::steel_vm::engine::Engine::new_base();
         let mut named = NamedRef::new(
             "x".parse().unwrap(),

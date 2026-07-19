@@ -64,13 +64,6 @@ impl From<gantz_egui::node::NamedRef> for Box<dyn Node> {
     }
 }
 
-// Lets domain crates provide `Builtin` ctor lists generic over this node set.
-impl<T: Node> gantz_core::FromNode<T> for Box<dyn Node> {
-    fn from_node(node: T) -> Self {
-        Box::new(node)
-    }
-}
-
 // Lets the reference-resync / rename machinery find `NamedRef`s within an
 // erased node by downcasting.
 impl gantz_egui::sync::AsNamedRefMut for Box<dyn Node> {
@@ -174,8 +167,8 @@ pub fn codec() -> gantz_egui::node::NodeCodec {
 }
 
 /// The app's full builtin node set: every domain's builtin specs composed.
-pub fn builtins() -> gantz_core::BuiltinSet<Box<dyn Node>> {
-    gantz_core::BuiltinSet::from_specs(
+pub fn builtins() -> gantz_core::Builtins {
+    gantz_core::Builtins::from_specs(
         gantz_core::node::builtins()
             .into_iter()
             .chain(gantz_std::builtins())
@@ -204,6 +197,17 @@ mod tests {
         let errs = reified.ensure_all(reg);
         assert!(errs.is_empty(), "{errs:?}");
         reified
+    }
+
+    /// The composed builtin palette plus one reified `Box<dyn Node>` instance
+    /// per builtin - the pair `RegistryRef` consumes.
+    fn builtins_with_instances() -> (
+        gantz_core::Builtins,
+        std::collections::HashMap<gantz_ca::ContentAddr, Box<dyn Node>>,
+    ) {
+        let (nodes, errs) = bevy_gantz::BuiltinNodes::<Box<dyn Node>>::reify(super::builtins());
+        assert!(errs.is_empty(), "{errs:?}");
+        (nodes.builtins, nodes.instances)
     }
 
     /// The typed graph at the given head's tip, if reified.
@@ -279,7 +283,29 @@ mod tests {
             "~unpack",
         ];
         let builtins = super::builtins();
-        assert_eq!(gantz_core::Builtins::names(&builtins), expected);
+        let names: Vec<_> = builtins.names().collect();
+        assert_eq!(names, expected);
+    }
+
+    /// Gate test for the builtin data <-> typed instance seam: every composed
+    /// builtin's stored `NodeData` reifies through the app codec and
+    /// re-erases to the identical `NodeData` (same canonical form, same
+    /// content address).
+    #[test]
+    fn builtins_round_trip_through_codec() {
+        let codec = super::codec();
+        let builtins = super::builtins();
+        for name in builtins.names() {
+            let nd = builtins.node_data(name).expect("named builtin");
+            let inst = codec
+                .reify_ui(nd)
+                .unwrap_or_else(|e| panic!("builtin `{name}` failed to reify: {e}"));
+            let back = inst
+                .erase()
+                .unwrap_or_else(|e| panic!("builtin `{name}` failed to re-erase: {e}"));
+            assert_eq!(*nd, back, "builtin `{name}`: typed round-trip diverges");
+            assert_eq!(nd.content_addr(), back.content_addr());
+        }
     }
 
     /// Read an `inspect` node's stored value as a list of `f64`s.
@@ -950,8 +976,8 @@ mod tests {
 
         // The binding's path reaches the nested lag's live param state in a VM
         // compiled from the same (un-flattened) graph.
-        let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&registry, &reified, &builtins);
+        let (builtins, instances) = builtins_with_instances();
+        let reg_ref = gantz_egui::RegistryRef::new(&registry, &reified, &builtins, &instances);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let config = gantz_core::compile::Config::default();
         let (mut vm, _compiled) =
@@ -1447,8 +1473,8 @@ mod tests {
         let head = gantz_ca::Head::Branch(name("g"));
         let graph = head_graph(&reified, &registry, &head).expect("g graph");
 
-        let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&registry, &reified, &builtins);
+        let (builtins, instances) = builtins_with_instances();
+        let reg_ref = gantz_egui::RegistryRef::new(&registry, &reified, &builtins, &instances);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
 
         let entrypoints = bevy_gantz_egui::node::tick_bang::entrypoints(&get_node, graph);
@@ -1873,8 +1899,8 @@ mod tests {
         let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
             .expect("parse base");
         let reified = reify_all(&base);
-        let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&base, &reified, &builtins);
+        let (builtins, instances) = builtins_with_instances();
+        let reg_ref = gantz_egui::RegistryRef::new(&base, &reified, &builtins, &instances);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let configs = [
             gantz_core::compile::Config::default(),
@@ -2141,9 +2167,9 @@ mod tests {
         );
 
         // Resolution: a `ref add` exposes `add`'s socket docs.
-        let builtins = super::builtins();
+        let (builtins, instances) = builtins_with_instances();
         let reified = reify_all(&base);
-        let reg_ref = gantz_egui::RegistryRef::new(&base, &reified, &builtins);
+        let reg_ref = gantz_egui::RegistryRef::new(&base, &reified, &builtins, &instances);
         let add: gantz_ca::ContentAddr = gantz_egui::reg::head_graph_addr(&base, &name("add"))
             .expect("add")
             .into();
@@ -2177,8 +2203,8 @@ mod tests {
         let base: DataReg = gantz_egui::export::parse_export::<Box<dyn Node>>(gantz_base::BYTES)
             .expect("parse base");
         let reified = reify_all(&base);
-        let builtins = super::builtins();
-        let reg_ref = gantz_egui::RegistryRef::new(&base, &reified, &builtins);
+        let (builtins, instances) = builtins_with_instances();
+        let reg_ref = gantz_egui::RegistryRef::new(&base, &reified, &builtins, &instances);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let config = gantz_core::compile::Config::default();
 
@@ -2264,9 +2290,9 @@ mod tests {
         registry.merge(subset);
 
         // Reopen: the reset demo must still compile, i.e. every `ref` resolves.
-        let builtins = super::builtins();
+        let (builtins, instances) = builtins_with_instances();
         let reified = reify_all(&registry);
-        let reg_ref = gantz_egui::RegistryRef::new(&registry, &reified, &builtins);
+        let reg_ref = gantz_egui::RegistryRef::new(&registry, &reified, &builtins, &instances);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let head = gantz_ca::Head::Branch(demo);
         let graph = head_graph(&reified, &registry, &head).expect("demo graph");
@@ -2393,9 +2419,9 @@ mod tests {
             .expect("parse source");
             merged.merge(export);
         }
-        let builtins = super::builtins();
+        let (builtins, instances) = builtins_with_instances();
         let reified = reify_all(&merged);
-        let reg_ref = gantz_egui::RegistryRef::new(&merged, &reified, &builtins);
+        let reg_ref = gantz_egui::RegistryRef::new(&merged, &reified, &builtins, &instances);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let names: Vec<gantz_ca::Name> = merged.heads().map(|(n, _)| n.clone()).collect();
         assert!(names.contains(&name("demo-sine")), "plyphon demo loaded");
@@ -2477,9 +2503,9 @@ mod tests {
         merged.merge(domain);
 
         // The merged registry compiles the wrapper.
-        let builtins = super::builtins();
+        let (builtins, instances) = builtins_with_instances();
         let reified = reify_all(&merged);
-        let reg_ref = gantz_egui::RegistryRef::new(&merged, &reified, &builtins);
+        let reg_ref = gantz_egui::RegistryRef::new(&merged, &reified, &builtins, &instances);
         let get_node = |ca: &gantz_ca::ContentAddr| reg_ref.node(ca);
         let head = gantz_ca::Head::Branch(name("wrap-add"));
         let graph = head_graph(&reified, &merged, &head).expect("wrap-add graph");

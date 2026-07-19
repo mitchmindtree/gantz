@@ -30,14 +30,6 @@ impl AsRefNode for TestNode {
     }
 }
 
-// Builtin content addresses keep the typed-CaHash scheme (see
-// `bevy_gantz::builtin`).
-impl gantz_ca::CaHash for TestNode {
-    fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-        hasher.update(b"test.node");
-    }
-}
-
 /// A headless app with the gantz plugins added in REVERSED order builds,
 /// finishes and ticks without panicking, with the DSP resources present.
 #[test]
@@ -48,9 +40,7 @@ fn plugin_order_is_insensitive() {
     app.add_plugins(PlyphonPlugin::<TestNode>::new());
     app.add_plugins(GantzPlugin::<TestNode>::default());
     // The builtin set is the app's responsibility (see `GantzPlugin` docs).
-    app.insert_resource(bevy_gantz::BuiltinNodes::<TestNode>(Box::new(
-        gantz_core::BuiltinSet::from_specs([]),
-    )));
+    app.insert_resource(bevy_gantz::BuiltinNodes::<TestNode>::default());
     app.finish();
     app.cleanup();
     for _ in 0..3 {

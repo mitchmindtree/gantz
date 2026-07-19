@@ -30,9 +30,11 @@ fn main() {
         // The DSP plugin contributes the plyphon base source, and lets DSP
         // demos be heard while they are edited.
         .add_plugins(bevy_gantz_plyphon::PlyphonPlugin::<Box<dyn node::Node>>::default())
-        .insert_resource(BuiltinNodes::<Box<dyn node::Node>>(Box::new(
-            node::builtins(),
-        )))
+        .insert_resource({
+            let (builtins, errs) = BuiltinNodes::<Box<dyn node::Node>>::reify(node::builtins());
+            assert!(errs.is_empty(), "builtins failed to reify: {errs:?}");
+            builtins
+        })
         .add_plugins(DefaultPlugins.set(log_plugin()).set(window_plugin()))
         .add_plugins(EguiPlugin::default())
         .add_plugins(DebouncedInputPlugin::<DebouncedInputEvent>::new(0.25))

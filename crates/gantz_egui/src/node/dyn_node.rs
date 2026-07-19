@@ -11,11 +11,13 @@
 //! addresses).
 
 use crate::NodeUi;
-use gantz_ca::{DataGraph, NodeData};
+use gantz_ca::{ContentAddr, DataGraph, NodeData};
+use gantz_core::Builtins;
 use gantz_core::data::{EraseNodeError, ReifyError, ReifyNodeError};
 use gantz_core::node::graph::Graph;
 use petgraph::visit::EdgeRef;
 use std::any::Any;
+use std::collections::HashMap;
 
 /// A UI-capable node erased to a trait object.
 ///
@@ -47,6 +49,17 @@ pub struct NodeCodec {
     sugars: fn() -> gantz_format::Sugars<'static>,
 }
 
+/// The reified builtin palette: one typed [`DynNode`] instance per builtin,
+/// keyed by its erased content address.
+///
+/// The stored instances serve both compilation (via the [`gantz_core::Node`]
+/// supertrait upcast) and [`NodeUi`] introspection (palette docs, socket
+/// previews) without minting fresh instances per frame.
+#[derive(Default)]
+pub struct UiBuiltins {
+    map: HashMap<ContentAddr, DynNode>,
+}
+
 /// Failure to normalize a node's data form through its type: the reify or
 /// the re-erasure failed.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -75,6 +88,32 @@ impl UiNodeInstance {
         let node: &dyn gantz_core::Node = &*self.node;
         let any: &dyn Any = node;
         (self.erase)(any)
+    }
+}
+
+impl UiBuiltins {
+    /// Reify each builtin once through the codec.
+    ///
+    /// Failures are returned for logging; a builtin that fails to reify
+    /// (e.g. a tag missing from the codec) degrades to a lookup miss.
+    pub fn reify(builtins: &Builtins, codec: &NodeCodec) -> (Self, Vec<ReifyNodeError>) {
+        let mut map = HashMap::new();
+        let mut errs = vec![];
+        for name in builtins.names() {
+            let node_data = builtins.node_data(name).expect("named builtin");
+            match codec.reify_ui(node_data) {
+                Ok(inst) => {
+                    map.insert(node_data.content_addr(), inst.node);
+                }
+                Err(e) => errs.push(e),
+            }
+        }
+        (Self { map }, errs)
+    }
+
+    /// The reified instance of the builtin with the given content address.
+    pub fn get(&self, ca: &ContentAddr) -> Option<&DynNode> {
+        self.map.get(ca)
     }
 }
 

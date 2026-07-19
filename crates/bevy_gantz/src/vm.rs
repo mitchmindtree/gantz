@@ -392,7 +392,7 @@ pub fn sync<N>(
         // systems (e.g. `drive_update_bangs`, `on_eval_entry`) skip the head
         // rather than driving a stale graph.
         let graph: &Graph<N> = &*data.working_graph;
-        let get_node = |ca: &ca::ContentAddr| lookup_node(&cache, &**builtins, ca);
+        let get_node = |ca: &ca::ContentAddr| lookup_node(&cache, &builtins.instances, ca);
         let entrypoints = collect_entrypoints(&ep_fns, &get_node, graph);
         let result = match vms.get_mut(&data.entity) {
             None => init(&get_node, graph, &entrypoints, &config.0).map(|(vm, module)| {

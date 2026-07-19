@@ -32,8 +32,10 @@ fn main() -> Result<(), eframe::Error> {
 /// graphs. Also provides access to the node registry. This can be thought of as
 /// a shared immutable input to all nodes.
 struct Environment {
-    /// Constructors for all primitive nodes.
-    primitives: Primitives,
+    /// The builtin (primitive) node palette as data.
+    builtins: gantz_core::Builtins,
+    /// One reified builtin instance per palette entry, for introspection.
+    instances: gantz_egui::node::UiBuiltins,
     /// The registry of all nodes composed from other nodes, stored as data.
     registry: Registry,
     /// The registry's graphs reified through the demo's node set, for typed
@@ -78,9 +80,6 @@ impl Environment {
 /// Registry of graphs (in erased data form), commits and branch names.
 type Registry = gantz_ca::Registry;
 
-/// Constructors for all primitive nodes.
-type Primitives = BTreeMap<String, Box<dyn Fn() -> Box<dyn Node>>>;
-
 impl Environment {
     /// Create a node of the given type name.
     fn new_node(&self, node_type: &str) -> Option<Box<dyn Node>> {
@@ -91,7 +90,11 @@ impl Environment {
                 let named = gantz_egui::node::NamedRef::new(name.clone(), ref_);
                 Box::new(named) as Box<dyn Node>
             })
-            .or_else(|| self.primitives.get(node_type).map(|f| (f)()))
+            .or_else(|| {
+                // Builtins reify a fresh instance from their stored data.
+                let node_data = self.builtins.node_data(node_type)?;
+                gantz_core::data::reify_node(node_data).ok()
+            })
     }
 }
 
@@ -142,7 +145,9 @@ impl gantz_egui::Registry for Environment {
 
     fn node_types(&self) -> Vec<&str> {
         let mut types = vec![gantz_egui::widget::gantz::NESTED_GRAPH_TYPE];
-        types.extend(self.primitives.keys().map(|s| &s[..]));
+        for name in self.builtins.names() {
+            types.push(name);
+        }
         // A root name is its single segment.
         types.extend(
             self.registry
@@ -222,7 +227,12 @@ impl gantz_egui::Registry for Environment {
                 info.inputs = collect(graph.n_inputs(meta_ctx), SocketKind::Input, &socket);
                 info.outputs = collect(graph.n_outputs(meta_ctx), SocketKind::Output, &socket);
             }
-        } else if let Some(node) = self.new_node(name) {
+        } else if let Some(node) = self
+            .builtins
+            .content_addr(name)
+            .and_then(|ca| self.instances.get(&ca))
+        {
+            // A builtin: introspect its stored instance.
             let socket = |kind: SocketKind, ix: usize| node.socket_doc(self, kind, ix);
             info.inputs = collect(node.n_inputs(meta_ctx), SocketKind::Input, &socket);
             info.outputs = collect(node.n_outputs(meta_ctx), SocketKind::Output, &socket);
@@ -243,7 +253,9 @@ impl gantz_egui::Registry for Environment {
         if self.registry.head(&parsed).is_some() {
             return gantz_egui::section::description(&self.registry, &parsed).map(Cow::Owned);
         }
-        self.new_node(name)
+        self.builtins
+            .content_addr(name)
+            .and_then(|ca| self.instances.get(&ca))
             .and_then(|n| n.description())
             .map(Cow::Borrowed)
     }
@@ -258,48 +270,41 @@ impl gantz_egui::Registry for Environment {
     }
 }
 
-/// The set of all known node types accessible to gantz.
-fn primitives() -> Primitives {
-    let mut p = Primitives::default();
-    register_primitive(&mut p, "bang", || {
-        Box::new(gantz_std::Bang::default()) as Box<_>
-    });
-    register_primitive(&mut p, "branch", || {
-        Box::new(gantz_core::node::Branch::default()) as Box<_>
-    });
-    register_primitive(&mut p, "delay", || {
-        Box::new(gantz_core::node::Delay::default()) as Box<_>
-    });
-    register_primitive(&mut p, "expr", || {
-        Box::new(gantz_core::node::Expr::new("()").unwrap()) as Box<_>
-    });
-    register_primitive(&mut p, "inlet", || {
-        Box::new(gantz_core::node::graph::Inlet::default()) as Box<_>
-    });
-    register_primitive(&mut p, "inspect", || {
-        Box::new(gantz_egui::node::Inspect::default()) as Box<_>
-    });
-    register_primitive(&mut p, "outlet", || {
-        Box::new(gantz_core::node::graph::Outlet::default()) as Box<_>
-    });
-    register_primitive(&mut p, "log", || {
-        Box::new(gantz_std::Log::default()) as Box<_>
-    });
-    register_primitive(&mut p, "number", || {
-        Box::new(gantz_std::Number::default()) as Box<_>
-    });
-    register_primitive(&mut p, "plot", || {
-        Box::new(gantz_egui::node::Plot::default()) as Box<_>
-    });
-    p
+/// The set of all known primitive node types accessible to gantz, as data.
+fn builtins() -> gantz_core::Builtins {
+    use gantz_core::Builtin;
+    gantz_core::Builtins::from_specs([
+        Builtin::new("bang", &gantz_std::Bang::default()),
+        Builtin::new("branch", &gantz_core::node::Branch::default()),
+        Builtin::new("delay", &gantz_core::node::Delay::default()),
+        Builtin::new("expr", &gantz_core::node::Expr::new("()").unwrap()),
+        Builtin::new("inlet", &gantz_core::node::graph::Inlet::default()),
+        Builtin::new("inspect", &gantz_egui::node::Inspect::default()),
+        Builtin::new("outlet", &gantz_core::node::graph::Outlet::default()),
+        Builtin::new("log", &gantz_std::Log::default()),
+        Builtin::new("number", &gantz_std::Number::default()),
+        Builtin::new("plot", &gantz_egui::node::Plot::default()),
+    ])
 }
 
-fn register_primitive(
-    primitives: &mut Primitives,
-    name: impl Into<String>,
-    new: impl 'static + Fn() -> Box<dyn Node>,
-) -> Option<Box<dyn Fn() -> Box<dyn Node>>> {
-    primitives.insert(name.into(), Box::new(new) as Box<_>)
+/// The value-level codec for the demo's node set: the SAME manifest as the
+/// `impl_node_set_serde!` invocation below.
+fn codec() -> gantz_egui::node::NodeCodec {
+    gantz_egui::ui_node_codec! {
+        Box<dyn Node> {
+            gantz_core::node::Branch,
+            gantz_core::node::Delay,
+            gantz_core::node::Expr,
+            gantz_core::node::graph::Inlet,
+            gantz_core::node::graph::Outlet,
+            gantz_std::Bang,
+            gantz_std::Log,
+            gantz_std::Number,
+            gantz_egui::node::Inspect,
+            gantz_egui::node::NamedRef,
+            gantz_egui::node::Plot,
+        }
+    }
 }
 
 // ----------------------------------------------
@@ -568,10 +573,15 @@ impl App {
 
         // Setup the environment that will be provided to all nodes, reifying
         // the stored graphs through the demo's node set.
-        let primitives = primitives();
+        let builtins = builtins();
+        let (instances, errs) = gantz_egui::node::UiBuiltins::reify(&builtins, &codec());
+        for e in errs {
+            log::error!("failed to reify builtin: {e}");
+        }
         let mut env = Environment {
             registry,
-            primitives,
+            builtins,
+            instances,
             reified: Default::default(),
         };
         env.ensure_reified();

@@ -11,35 +11,40 @@ use gantz_core::node;
 use gantz_core::{Builtins, Node};
 use petgraph::visit::{IntoNodeReferences, NodeRef};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Registry reference providing unified node access.
 ///
 /// Combines access to a content-addressed registry (for user-defined graphs,
 /// stored as data), the reified-graph cache serving those graphs as typed
-/// nodes, and builtin nodes, implementing the [`Registry`] trait required by
+/// nodes, and the builtin palette ([`Builtins`] data plus one reified
+/// instance per builtin), implementing the [`Registry`] trait required by
 /// the gantz_egui widgets.
 pub struct RegistryRef<'a, N: 'static + Send + Sync> {
     ca_registry: &'a ca::Registry,
     reified: &'a ReifiedGraphs<N>,
-    builtins: &'a dyn Builtins<Node = N>,
+    builtins: &'a Builtins,
+    instances: &'a HashMap<ca::ContentAddr, N>,
 }
 
 /// Named heads (branches), ordered by name.
 pub type Names = BTreeMap<ca::Name, ca::CommitAddr>;
 
 impl<'a, N: 'static + Send + Sync> RegistryRef<'a, N> {
-    /// Construct from a CA registry, its reified-graph cache and a builtins
-    /// provider.
+    /// Construct from a CA registry, its reified-graph cache, the builtin
+    /// palette data and its reified instances (keyed by erased content
+    /// address, one per builtin).
     pub fn new(
         ca_registry: &'a ca::Registry,
         reified: &'a ReifiedGraphs<N>,
-        builtins: &'a dyn Builtins<Node = N>,
+        builtins: &'a Builtins,
+        instances: &'a HashMap<ca::ContentAddr, N>,
     ) -> Self {
         Self {
             ca_registry,
             reified,
             builtins,
+            instances,
         }
     }
 
@@ -53,9 +58,14 @@ impl<'a, N: 'static + Send + Sync> RegistryRef<'a, N> {
         self.reified
     }
 
-    /// Access the builtins provider.
-    pub fn builtins(&self) -> &dyn Builtins<Node = N> {
+    /// Access the builtin palette data.
+    pub fn builtins(&self) -> &Builtins {
         self.builtins
+    }
+
+    /// Access the reified builtin instances.
+    pub fn instances(&self) -> &HashMap<ca::ContentAddr, N> {
+        self.instances
     }
 }
 
@@ -73,16 +83,17 @@ impl<N: 'static + Node + Send + Sync> RegistryRef<'_, N> {
         if let Some(graph) = self.reified.get(&graph_ca) {
             return Some(graph as &dyn Node);
         }
-        self.builtins.instance(ca).map(|n| n as &dyn Node)
+        self.instances.get(ca).map(|n| n as &dyn Node)
     }
 
     /// Create a node of the given type name.
     ///
     /// Checks registry names first (creating a [`crate::node::NamedRef`]
-    /// pinning the name's head graph), then falls back to builtins.
+    /// pinning the name's head graph), then falls back to builtins,
+    /// reifying a fresh instance from the builtin's stored data.
     pub fn create_node(&self, node_type: &str) -> Option<N>
     where
-        N: From<crate::node::NamedRef>,
+        N: From<crate::node::NamedRef> + serde::de::DeserializeOwned,
     {
         let name: ca::Name = node_type.parse().expect("infallible");
         head_graph_addr(self.ca_registry, &name)
@@ -91,7 +102,16 @@ impl<N: 'static + Node + Send + Sync> RegistryRef<'_, N> {
                 let named = crate::node::NamedRef::new(name.clone(), ref_);
                 N::from(named)
             })
-            .or_else(|| self.builtins.create(node_type))
+            .or_else(|| {
+                let node_data = self.builtins.node_data(node_type)?;
+                match gantz_core::data::reify_node(node_data) {
+                    Ok(node) => Some(node),
+                    Err(e) => {
+                        log::error!("builtin `{node_type}` failed to reify: {e}");
+                        None
+                    }
+                }
+            })
     }
 }
 
@@ -125,11 +145,7 @@ where
     }
 
     fn fn_node_names(&self) -> Vec<String> {
-        let builtin_names = self
-            .builtins
-            .names()
-            .into_iter()
-            .filter_map(|name| self.builtins.content_addr(name).map(|_| name.to_string()));
+        let builtin_names = self.builtins.names().map(str::to_string);
         let registry_names = self.ca_registry.heads().map(|(name, _)| name.to_string());
         let all_names = builtin_names.chain(registry_names);
 
@@ -155,7 +171,9 @@ where
     fn node_types(&self) -> Vec<&str> {
         // The reserved nested-graph entry replaces the old `graph` builtin.
         let mut types = vec![crate::widget::gantz::NESTED_GRAPH_TYPE];
-        types.extend(self.builtins.names());
+        for name in self.builtins.names() {
+            types.push(name);
+        }
         // Nested graphs are hidden from the root graph-select list, so don't
         // offer them as creatable node types either. A root name is its
         // single segment.
@@ -177,11 +195,9 @@ where
     }
 
     fn demo_graph(&self, name: &str) -> Option<String> {
-        // User-graph associations live in the demo section, keyed by name;
-        // builtins expose their own demo by builtin name.
+        // Demo associations live in the registry's demo section, keyed by name.
         let parsed: ca::Name = name.parse().expect("infallible");
         crate::section::demo(self.ca_registry, &parsed)
-            .or_else(|| self.builtins.demo_graph(name).map(str::to_string))
     }
 
     fn socket_doc(
@@ -247,8 +263,12 @@ where
                 info.inputs = collect(graph.n_inputs(meta_ctx), SocketKind::Input, &socket);
                 info.outputs = collect(graph.n_outputs(meta_ctx), SocketKind::Output, &socket);
             }
-        } else if let Some(builtin) = self.builtins.create(name) {
-            // A builtin: introspect a fresh instance.
+        } else if let Some(builtin) = self
+            .builtins
+            .content_addr(name)
+            .and_then(|ca| self.instances.get(&ca))
+        {
+            // A builtin: introspect its stored instance.
             let socket = |kind: SocketKind, ix: usize| builtin.socket_doc(self, kind, ix);
             info.inputs = collect(builtin.n_inputs(meta_ctx), SocketKind::Input, &socket);
             info.outputs = collect(builtin.n_outputs(meta_ctx), SocketKind::Output, &socket);
@@ -277,7 +297,8 @@ where
             return crate::section::description(self.ca_registry, &parsed).map(Cow::Owned);
         }
         self.builtins
-            .create(name)
+            .content_addr(name)
+            .and_then(|ca| self.instances.get(&ca))
             .and_then(|n| n.description())
             .map(Cow::Borrowed)
     }

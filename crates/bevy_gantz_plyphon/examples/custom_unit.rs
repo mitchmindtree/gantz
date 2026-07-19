@@ -22,7 +22,7 @@ use std::time::Duration;
 use bevy_gantz::{BuiltinNodes, GantzPlugin, Registry, head, timestamp};
 use bevy_gantz_plyphon::PlyphonPlugin;
 use bytemuck::{Pod, Zeroable};
-use gantz_ca::{CaHash, ContentAddr, Hasher, Head};
+use gantz_ca::{CaHash, Hasher, Head};
 use gantz_core::Node as GantzNode;
 use gantz_core::edge::Edge;
 use gantz_core::node::graph::Graph;
@@ -207,29 +207,6 @@ impl AsRefNode for N {
     }
 }
 
-/// An empty builtin set: this example builds its graph in code, so no palette
-/// constructors are needed - but `vm::sync` expects the resource to exist.
-struct NoBuiltins;
-
-impl gantz_core::Builtins for NoBuiltins {
-    type Node = N;
-    fn names(&self) -> Vec<&str> {
-        vec![]
-    }
-    fn create(&self, _name: &str) -> Option<N> {
-        None
-    }
-    fn instance(&self, _ca: &ContentAddr) -> Option<&N> {
-        None
-    }
-    fn name(&self, _ca: &ContentAddr) -> Option<&str> {
-        None
-    }
-    fn content_addr(&self, _name: &str) -> Option<ContentAddr> {
-        None
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 4. The headless bevy app.
 // ---------------------------------------------------------------------------
@@ -247,7 +224,9 @@ fn main() {
         .add_plugins(PlyphonPlugin::<N>::new().with_units(|reg| {
             reg.register("Saw", Box::new(SawCtor));
         }))
-        .insert_resource(BuiltinNodes::<N>(Box::new(NoBuiltins)))
+        // An empty builtin set: this example builds its graph in code, so no
+        // palette entries are needed - but `vm::sync` expects the resource.
+        .insert_resource(BuiltinNodes::<N>::default())
         .add_systems(Startup, setup)
         .run();
 }

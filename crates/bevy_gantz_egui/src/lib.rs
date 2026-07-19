@@ -581,7 +581,7 @@ pub fn registry_ref<'a, N: 'static + Send + Sync>(
     cache: &'a GraphCache<N>,
     builtins: &'a BuiltinNodes<N>,
 ) -> RegistryRef<'a, N> {
-    RegistryRef::new(registry, cache, &*builtins.0)
+    RegistryRef::new(registry, cache, &builtins.builtins, &builtins.instances)
 }
 
 // ----------------------------------------------------------------------------

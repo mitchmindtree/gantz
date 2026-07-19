@@ -1,5 +1,8 @@
 //! The content-addressing abstractions for `gantz`.
 
+// Let the `CaHash` derive (which emits `gantz_ca::` paths) be used in-crate.
+extern crate self as gantz_ca;
+
 #[doc(inline)]
 pub use ca::{ContentAddr, ContentAddrShort, content_addr};
 #[doc(inline)]
@@ -8,6 +11,8 @@ pub use commit::{Branch, Commit, CommitAddr, Head, Timestamp, addr as commit_add
 pub use datum::{Datum, DatumError, from_datum, to_datum};
 #[doc(inline)]
 pub use diff::{Diff, DiffSummary, Matching};
+#[doc(inline)]
+pub use edge::{Edge, Input, Output};
 /// Re-export the derive macro.
 pub use gantz_ca_derive::CaHash;
 #[doc(inline)]
@@ -27,6 +32,8 @@ pub use merge::{
 #[doc(inline)]
 pub use name::{Name, SEP as NAME_SEP};
 #[doc(inline)]
+pub use node_data::{DataGraph, NodeData};
+#[doc(inline)]
 pub use reach::{LiveSet, OutRefs, closure, closure_from, export, prune};
 #[doc(inline)]
 pub use registry::{
@@ -45,11 +52,13 @@ mod ca;
 mod commit;
 pub mod datum;
 pub mod diff;
+pub mod edge;
 mod graph;
 mod hash;
 pub mod history;
 pub mod merge;
 pub mod name;
+pub mod node_data;
 pub mod ops;
 pub mod reach;
 pub mod registry;

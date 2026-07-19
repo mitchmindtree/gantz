@@ -3,23 +3,21 @@
 //! The output mirrors the registry's three maps: a `(graph "<addr>" ...)` body
 //! per graph, a flat `(commits ...)` table (one head commit per graph, for
 //! validation), and a `(names ...)` table. Nodes get generated
-//! `{keyword}{index}` labels and cross the node-type boundary as serde
-//! [`Datum`]s. The returned [`Dumped`] also exposes, per graph, the id and node
-//! labels emitted - everything an extender needs to attach its own forms (e.g.
-//! `(layout ...)`) keyed by the same ids.
+//! `{keyword}{index}` labels and are written straight from their stored
+//! [`NodeData`] form (`tag` + field [`Datum`]) - no node type is involved. The
+//! returned [`Dumped`] also exposes, per graph, the id and node labels emitted
+//! - everything an extender needs to attach its own forms (e.g. `(layout ...)`)
+//! keyed by the same ids.
 
-use crate::datum::{Datum, to_datum};
+use crate::datum::Datum;
 use crate::error::FormatError;
 use crate::model::{
     Addr, CommitDecl, Conn, Document, Endpoint, GraphBody, GraphDef, NameDecl, NodeDecl, NodeSpec,
     RefSpec, SectionForm, SectionKey,
 };
 use crate::sugar::Sugar;
-use gantz_ca::{ContentAddr, DataGraph, GraphAddr, Key, Registry, Value};
-use gantz_core::node::graph::Graph;
+use gantz_ca::{ContentAddr, DataGraph, GraphAddr, Key, NodeData, Registry, Value};
 use petgraph::visit::EdgeRef;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 
 /// The result of serializing a registry: the text plus the per-graph label
@@ -46,17 +44,11 @@ pub struct GraphLabels {
 /// skipped here, every other section is emitted as a generic
 /// `(section ...)` form so unknown-domain data round-trips through text.
 /// The `heads` section is always covered by the `(names ...)` table.
-pub fn raise<N>(
+pub fn raise(
     registry: &Registry<DataGraph>,
     sugar: &dyn Sugar,
     claimed: &[&str],
-) -> Result<Dumped, FormatError>
-where
-    // The stored data graphs are reified through the node set `N`
-    // (`DeserializeOwned`) and the typed nodes serialized back to datums
-    // (`Serialize`), so `N` is the codec for the text forms.
-    N: Serialize + DeserializeOwned,
-{
+) -> Result<Dumped, FormatError> {
     let mut doc = Document::default();
     let mut graphs = HashMap::new();
 
@@ -77,8 +69,7 @@ where
     graph_entries.sort_by_key(|&(ga, _)| (newest.get(ga).copied(), *ga));
 
     for (g_addr, data_graph) in graph_entries {
-        let graph = reify_graph::<N>(data_graph)?;
-        let (body, labels) = graph_to_body::<N>(&graph, sugar, true)?;
+        let (body, labels) = graph_to_body(data_graph, sugar, true)?;
         let id = short_hex(*g_addr);
         doc.graphs.push(GraphDef {
             id: Addr::Concrete(id.clone()),
@@ -161,14 +152,11 @@ fn push_sections(doc: &mut Document, registry: &Registry<DataGraph>, claimed: &[
 ///
 /// Graphs with no name are skipped: a name-resolved `ref` can only target a
 /// named graph, so an unnamed graph is unreachable in this format.
-pub fn raise_named<N>(
+pub fn raise_named(
     registry: &Registry<DataGraph>,
     sugar: &dyn Sugar,
     claimed: &[&str],
-) -> Result<Dumped, FormatError>
-where
-    N: Serialize + DeserializeOwned,
-{
+) -> Result<Dumped, FormatError> {
     let mut doc = Document::default();
     let mut graphs = HashMap::new();
 
@@ -179,8 +167,7 @@ where
         let Some(data_graph) = registry.graphs().get(&commit.graph) else {
             continue;
         };
-        let graph = reify_graph::<N>(data_graph)?;
-        let (body, labels) = graph_to_body::<N>(&graph, sugar, false)?;
+        let (body, labels) = graph_to_body(data_graph, sugar, false)?;
         doc.graphs.push(GraphDef {
             id: Addr::Label(name.to_string()),
             body,
@@ -202,32 +189,31 @@ where
 
 // -- graph -> body -----------------------------------------------------------
 
-/// Reify a stored data graph through the node set `N`, mapping decode
-/// failures to a [`FormatError`].
-fn reify_graph<N>(data_graph: &DataGraph) -> Result<Graph<N>, FormatError>
-where
-    N: DeserializeOwned,
-{
-    gantz_core::data::reify(data_graph)
-        .map_err(|e| FormatError::node_deserialize(e.source.tag.clone(), e.to_string()))
+/// A stored node's tagged datum: its `"type"` entry (the tag) prepended to its
+/// field map. This is the exact inverse of erasure's tag split, so the datum
+/// matches what node-set serde would produce - no node type involved.
+fn node_value(node_data: &NodeData) -> Result<Datum, FormatError> {
+    match &node_data.data {
+        Datum::Map(fields) => Ok(Datum::tagged(&node_data.tag, fields.clone())),
+        _ => Err(FormatError::malformed(format!(
+            "node type `{}`: stored data is not a field map",
+            node_data.tag,
+        ))),
+    }
 }
 
-/// Convert a graph into a [`GraphBody`], returning the index -> label map used
-/// to resolve connections and (by extenders) layout positions.
-fn graph_to_body<N>(
-    graph: &Graph<N>,
+/// Convert a stored data graph into a [`GraphBody`], returning the index ->
+/// label map used to resolve connections and (by extenders) layout positions.
+fn graph_to_body(
+    graph: &DataGraph,
     sugar: &dyn Sugar,
     pin: bool,
-) -> Result<(GraphBody, HashMap<usize, String>), FormatError>
-where
-    N: Serialize,
-{
+) -> Result<(GraphBody, HashMap<usize, String>), FormatError> {
     let mut nodes = Vec::new();
     let mut labels: HashMap<usize, String> = HashMap::new();
 
     for ix in graph.node_indices() {
-        let value =
-            to_datum(&graph[ix]).map_err(|e| FormatError::node_deserialize("?", e.to_string()))?;
+        let value = node_value(&graph[ix])?;
         let (spec, keyword) = node_spec_from_datum(value, sugar, pin)?;
         let label = format!("{keyword}{}", ix.index());
         labels.insert(ix.index(), label.clone());

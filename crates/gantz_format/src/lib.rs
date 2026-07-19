@@ -17,10 +17,14 @@
 //! (`N::sugar()`), so each crate owns the sugar for its own nodes ([`CoreSugar`]
 //! covers `gantz_core`'s). The `_with` variants accept any `&dyn Sugar`
 //! explicitly (compose with [`Sugars`]), still falling back to the generic
-//! `(node ...)` form. Any node type that is `Serialize + DeserializeOwned +
-//! gantz_core::Node` works: the registry stores graphs in their erased data
-//! form ([`gantz_ca::DataGraph`]), and the node-set type is the codec the
-//! text forms travel through (see [`gantz_core::data`]).
+//! `(node ...)` form. On the reading side any node type that is `Serialize +
+//! DeserializeOwned + gantz_core::Node` works: the registry stores graphs in
+//! their erased data form ([`gantz_ca::DataGraph`]), and the node-set type is
+//! the codec parsed text travels through (see [`gantz_core::data`]). The
+//! writing side needs no node type at all: the stored [`gantz_ca::NodeData`]
+//! (`tag` + field datum) is already the tagged form the writer consumes, so
+//! [`to_string_with`]/[`to_string_named_with`] can serialize any registry
+//! without the node set compiled in.
 
 mod datum;
 mod error;
@@ -110,21 +114,18 @@ where
 /// forms (e.g. `(descriptions ...)`).
 pub fn to_string<N>(registry: &Registry<DataGraph>, claimed: &[&str]) -> Result<Dumped, FormatError>
 where
-    N: Serialize + DeserializeOwned + NodeSugar,
+    N: NodeSugar,
 {
-    to_string_with::<N>(registry, &N::sugar(), claimed)
+    to_string_with(registry, &N::sugar(), claimed)
 }
 
 /// Serialize a registry to `.gantz` text using a custom keyword [`Sugar`].
-pub fn to_string_with<N>(
+pub fn to_string_with(
     registry: &Registry<DataGraph>,
     sugar: &dyn Sugar,
     claimed: &[&str],
-) -> Result<Dumped, FormatError>
-where
-    N: Serialize + DeserializeOwned,
-{
-    raise::raise::<N>(registry, sugar, claimed)
+) -> Result<Dumped, FormatError> {
+    raise::raise(registry, sugar, claimed)
 }
 
 /// Serialize a registry in the inline-name format: each named graph is emitted
@@ -136,21 +137,18 @@ pub fn to_string_named<N>(
     claimed: &[&str],
 ) -> Result<Dumped, FormatError>
 where
-    N: Serialize + DeserializeOwned + NodeSugar,
+    N: NodeSugar,
 {
-    to_string_named_with::<N>(registry, &N::sugar(), claimed)
+    to_string_named_with(registry, &N::sugar(), claimed)
 }
 
 /// As [`to_string_named`], with a custom keyword [`Sugar`].
-pub fn to_string_named_with<N>(
+pub fn to_string_named_with(
     registry: &Registry<DataGraph>,
     sugar: &dyn Sugar,
     claimed: &[&str],
-) -> Result<Dumped, FormatError>
-where
-    N: Serialize + DeserializeOwned,
-{
-    raise::raise_named::<N>(registry, sugar, claimed)
+) -> Result<Dumped, FormatError> {
+    raise::raise_named(registry, sugar, claimed)
 }
 
 #[cfg(test)]
@@ -201,8 +199,8 @@ mod tests {
         // `from_str`/`to_string` would instead require a `NodeSugar` impl.)
         let loaded = from_str_with::<Box<dyn Widget>>(text, std::time::Duration::ZERO, &CoreSugar)
             .expect("parse without NodeSugar");
-        let dumped = to_string_with::<Box<dyn Widget>>(&loaded.registry, &CoreSugar, &[])
-            .expect("write without NodeSugar");
+        let dumped =
+            to_string_with(&loaded.registry, &CoreSugar, &[]).expect("write without NodeSugar");
 
         // The node survived the round-trip through the generic form.
         assert!(
@@ -217,7 +215,7 @@ mod tests {
             from_str_with::<Box<dyn Widget>>(&dumped.text, std::time::Duration::ZERO, &CoreSugar)
                 .expect("reparse");
         assert_eq!(
-            to_string_with::<Box<dyn Widget>>(&reloaded.registry, &CoreSugar, &[])
+            to_string_with(&reloaded.registry, &CoreSugar, &[])
                 .expect("rewrite")
                 .text,
             dumped.text,
@@ -250,8 +248,7 @@ mod tests {
 
         // The merge parent survives a write + reparse; non-merge commits carry
         // no `merge-parents` clause.
-        let dumped = to_string_with::<Box<dyn Widget>>(&loaded.registry, &CoreSugar, &[])
-            .expect("write merge commit");
+        let dumped = to_string_with(&loaded.registry, &CoreSugar, &[]).expect("write merge commit");
         assert_eq!(dumped.text.matches("(merge-parents").count(), 1);
         let reloaded =
             from_str_with::<Box<dyn Widget>>(&dumped.text, std::time::Duration::ZERO, &CoreSugar)
@@ -263,6 +260,53 @@ mod tests {
             .find(|c| !c.merge_parents.is_empty())
             .expect("merge commit survives the round-trip");
         assert_eq!(re_merge.merge_parents.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod data_only_tests {
+    //! Raising is node-set-free: a registry built purely from [`NodeData`]
+    //! literals - no node type compiled in at all - serializes to text. This is
+    //! what lets a relay or tool depending only on `gantz_ca` + `gantz_format`
+    //! export a registry.
+
+    use super::*;
+    use gantz_ca::{Commit, Datum, Edge, NodeData};
+
+    #[test]
+    fn raising_needs_no_node_set() {
+        let mut graph = DataGraph::default();
+        let expr = graph.add_node(NodeData::new(
+            "Expr",
+            Datum::Map(vec![("src".to_string(), Datum::Str("(+ 1 2)".to_string()))]),
+        ));
+        let gain = graph.add_node(NodeData::new(
+            "Gain",
+            Datum::Map(vec![("db".to_string(), Datum::I64(6))]),
+        ));
+        graph.add_edge(expr, gain, Edge::from((0u16, 0u16)));
+
+        let mut registry: Registry<DataGraph> = Registry::default();
+        let g_addr = registry.add_graph(graph);
+        let c_addr = registry.add_commit(Commit::new(Timestamp::ZERO, None, g_addr));
+        registry.set_head("patch".parse().expect("valid name"), c_addr);
+
+        let dumped = to_string_with(&registry, &CoreSugar, &[]).expect("raise from data alone");
+        let g = &gantz_ca::ContentAddr::from(g_addr).to_string()[..8];
+        let c = &gantz_ca::ContentAddr::from(c_addr).to_string()[..8];
+        let expected = format!(
+            "(graph \"{g}\"\n\
+            \x20 (expr0 (expr (+ 1 2)))\n\
+            \x20 (node1 (node \"Gain\" (db 6)))\n\
+            \x20 (-> expr0 node1))\n\
+            \n\
+            (commits\n\
+            \x20 (\"{c}\" (time 0 0) (graph \"{g}\")))\n\
+            \n\
+            (names\n\
+            \x20 (patch \"{c}\"))\n",
+        );
+        assert_eq!(dumped.text, expected);
     }
 }
 

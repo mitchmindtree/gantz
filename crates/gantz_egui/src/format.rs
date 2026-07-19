@@ -67,11 +67,11 @@ fn registry_from_loaded(mut loaded: Loaded) -> Registry<DataGraph> {
     loaded.registry
 }
 
-/// Serialize a registry to a `.gantz` document, with `N` as the node-set
-/// codec for the graph forms.
+/// Serialize a registry to a `.gantz` document, with `N` selecting the node
+/// set's keyword [`gantz_format::Sugar`] for the graph forms.
 pub fn to_string<N>(registry: &Registry<DataGraph>) -> Result<String, FormatError>
 where
-    N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
+    N: gantz_format::NodeSugar,
 {
     let dumped = gantz_format::to_string::<N>(registry, CLAIMED)?;
     // Each top-level block is a section; they are joined with a blank line.
@@ -107,7 +107,7 @@ where
 /// suited to a hand-editable, git-friendly base file.
 pub fn to_string_named<N>(registry: &Registry<DataGraph>) -> Result<String, FormatError>
 where
-    N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
+    N: gantz_format::NodeSugar,
 {
     let dumped = gantz_format::to_string_named::<N>(registry, CLAIMED)?;
     let mut sections = vec![dumped.text.trim_end().to_string()];

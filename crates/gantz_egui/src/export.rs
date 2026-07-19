@@ -139,7 +139,7 @@ pub fn export_heads_sexpr<N>(
     heads: impl IntoIterator<Item = impl std::borrow::Borrow<gantz_ca::Head>>,
 ) -> Result<String, crate::format::FormatError>
 where
-    N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
+    N: gantz_format::NodeSugar,
 {
     let export_registry = export_heads_registry(registry, heads);
     crate::format::to_string::<N>(&export_registry)
@@ -154,7 +154,7 @@ pub fn export_heads_sexpr_named<N>(
     heads: impl IntoIterator<Item = impl std::borrow::Borrow<gantz_ca::Head>>,
 ) -> Result<String, crate::format::FormatError>
 where
-    N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
+    N: gantz_format::NodeSugar,
 {
     let export_registry = export_heads_registry(registry, heads);
     crate::format::to_string_named::<N>(&export_registry)
@@ -172,7 +172,7 @@ pub fn export_names_sexpr_named<N>(
     names: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<String, crate::format::FormatError>
 where
-    N: Serialize + DeserializeOwned + gantz_format::NodeSugar,
+    N: gantz_format::NodeSugar,
 {
     let requested: HashSet<Name> = names
         .into_iter()
@@ -412,7 +412,7 @@ where
 /// document. [`copied_from_str`] reverses this.
 pub fn copied_to_string<N>(copied: &Copied<N>) -> Result<String, crate::format::FormatError>
 where
-    N: Serialize + DeserializeOwned + gantz_core::Node + gantz_format::NodeSugar,
+    N: Serialize + gantz_core::Node + gantz_format::NodeSugar,
 {
     // Add the subgraph (erased) to the dependency registry as a fresh root
     // commit named `CLIPBOARD_NAME`. A fixed timestamp keeps the payload

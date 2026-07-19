@@ -22,8 +22,9 @@
 //! every source back to its own file and demo reset can re-parse the right
 //! source.
 
+use crate::reg::{GraphCache, refresh_cache};
 use bevy_ecs::prelude::*;
-use bevy_gantz::reg::{GraphCache, Registry, refresh_cache};
+use bevy_gantz::Registry;
 use bevy_log as log;
 use gantz_ca::Name;
 use std::collections::{BTreeMap, HashMap};
@@ -90,16 +91,14 @@ pub const BASE_TIMESTAMP: gantz_ca::Timestamp = std::time::Duration::ZERO;
 /// yet. Push order therefore does not matter - sources load in dependency
 /// order. A source whose references never resolve (or that fails to parse
 /// outright) is logged and dropped.
-pub fn load<N>(
+pub fn load(
     sources: Res<BaseSources>,
     mut registry: ResMut<Registry>,
-    mut cache: ResMut<GraphCache<N>>,
+    mut cache: ResMut<GraphCache>,
     codec: Res<NodeCodecRes>,
     mut base_names: ResMut<BaseNames>,
     mut name_sources: ResMut<BaseNameSources>,
-) where
-    N: 'static + serde::de::DeserializeOwned + Send + Sync,
-{
+) {
     let mut pending: Vec<&BaseSource> = sources.0.iter().collect();
     loop {
         let mut deferred: Vec<&BaseSource> = Vec::new();
@@ -179,7 +178,7 @@ pub fn load<N>(
         pending = deferred;
     }
     // The merged base graphs must be reified before any typed reads.
-    refresh_cache(&registry, &mut cache);
+    refresh_cache(&registry, &mut cache, &codec.0);
 }
 
 /// System that exports every named graph back to its owning source's file

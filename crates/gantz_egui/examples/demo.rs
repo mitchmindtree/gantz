@@ -1,17 +1,14 @@
 //! A simple demonstration of a pure `egui` setup for `gantz`.
 //!
-//! Includes a top-level `Node` trait with a minimal set of nodes, an
-//! environment with a node registry, and a minimal default graph to demonstrate
-//! how to use these with the top-level `Gantz` widget in an egui app.
+//! Includes a node codec over a minimal node set, an environment with a node
+//! registry, and a minimal default graph to demonstrate how to use these with
+//! the top-level `Gantz` widget in an egui app.
 
-use dyn_clone::DynClone;
 use eframe::egui;
 use gantz_core::{compile::push_pull_entrypoints, steel::steel_vm::engine::Engine};
+use gantz_egui::node::DynNode;
 use gantz_egui::{HeadAccess, HeadDataMut};
-use std::{
-    any::Any,
-    collections::{BTreeMap, HashMap},
-};
+use std::collections::{BTreeMap, HashMap};
 
 // ----------------------------------------------
 
@@ -38,11 +35,11 @@ struct Environment {
     instances: gantz_egui::node::UiBuiltins,
     /// The registry of all nodes composed from other nodes, stored as data.
     registry: Registry,
-    /// The registry's graphs reified through the demo's node set, for typed
+    /// The registry's graphs reified through the demo's node codec, for typed
     /// node lookups. Kept in step with the registry via [`ensure_reified`].
     ///
     /// [`ensure_reified`]: Environment::ensure_reified
-    reified: gantz_core::data::ReifiedGraphs<Box<dyn Node>>,
+    reified: gantz_core::data::ReifiedGraphs<DynNode>,
 }
 
 impl Environment {
@@ -71,8 +68,21 @@ impl Environment {
     /// Bring the reified cache up to date with the registry, logging graphs
     /// that fail to decode (they degrade like any missing node).
     fn ensure_reified(&mut self) {
-        for e in self.reified.ensure_all(&self.registry) {
+        let codec = codec();
+        let reify = |nd: &gantz_ca::NodeData| codec.reify_ui(nd).map(|inst| inst.node);
+        for e in self.reified.ensure_all_with(&self.registry, reify) {
             log::error!("failed to reify registry graph: {e}");
+        }
+    }
+
+    /// The borrowed [`gantz_egui::Env`] view over this environment's parts.
+    fn as_env<'a>(&'a self, codec: &'a gantz_egui::node::NodeCodec) -> gantz_egui::Env<'a> {
+        gantz_egui::Env {
+            registry: &self.registry,
+            builtins: &self.builtins,
+            codec,
+            graphs: &self.reified,
+            instances: &self.instances,
         }
     }
 }
@@ -101,178 +111,6 @@ impl Environment {
     }
 }
 
-// Provide the `Registry` implementation required by the Gantz widget.
-impl gantz_egui::Registry for Environment {
-    fn ca(&self) -> &Registry {
-        &self.registry
-    }
-
-    fn node(&self, ca: &gantz_ca::ContentAddr) -> Option<&dyn gantz_core::Node> {
-        Environment::node(self, ca)
-    }
-
-    fn name_ca(&self, name: &str) -> Option<gantz_ca::ContentAddr> {
-        // The addr a `Ref` should pin: the name's head graph addr.
-        let name: gantz_ca::Name = name.parse().expect("infallible");
-        self.head_graph_addr(&name).map(Into::into)
-    }
-
-    fn node_exists(&self, ca: &gantz_ca::ContentAddr) -> bool {
-        // Check if the graph exists in the registry.
-        let graph_ca = gantz_ca::GraphAddr::from(*ca);
-        self.registry.graph(&graph_ca).is_some()
-    }
-
-    fn fn_node_names(&self) -> Vec<String> {
-        use gantz_core::Node;
-        // Fn-compatible nodes: stateless, branchless, single-output.
-        let get_node = |ca: &gantz_ca::ContentAddr| self.node(ca);
-        let meta_ctx = gantz_core::node::MetaCtx::new(&get_node);
-        self.registry
-            .heads()
-            .filter(|(name, _)| {
-                let Some(graph_ca) = self.head_graph_addr(name) else {
-                    return false;
-                };
-                let Some(graph) = self.reified.get(&graph_ca) else {
-                    return false;
-                };
-                let stateful = graph.stateful(meta_ctx);
-                let branching = !graph.branches(meta_ctx).is_empty();
-                let single_output = graph.n_outputs(meta_ctx) == 1;
-                !stateful && !branching && single_output
-            })
-            .map(|(name, _)| name.to_string())
-            .collect()
-    }
-
-    fn node_types(&self) -> Vec<&str> {
-        let mut types = vec![gantz_egui::widget::gantz::NESTED_GRAPH_TYPE];
-        for name in self.builtins.names() {
-            types.push(name);
-        }
-        // A root name is its single segment.
-        types.extend(
-            self.registry
-                .heads()
-                .filter(|(n, _)| !n.is_nested())
-                .map(|(n, _)| n.segments()[0].as_str()),
-        );
-        types.sort();
-        types.dedup();
-        types
-    }
-
-    fn would_ref_cycle(&self, target: &str, editing: &str) -> bool {
-        let target: gantz_ca::Name = target.parse().expect("infallible");
-        let editing: gantz_ca::Name = editing.parse().expect("infallible");
-        gantz_egui::cycle::would_cycle(&self.registry, &target, &editing)
-    }
-
-    fn socket_doc(
-        &self,
-        ca: &gantz_ca::ContentAddr,
-        kind: gantz_egui::SocketKind,
-        ix: usize,
-    ) -> Option<gantz_egui::SocketDoc> {
-        use gantz_core::Node as _;
-        use petgraph::visit::{IntoNodeReferences, NodeRef};
-        // Resolve the referenced graph and read the ix-th inlet/outlet marker's
-        // own doc.
-        let graph_ca = gantz_ca::GraphAddr::from(*ca);
-        let graph = self.reified.get(&graph_ca)?;
-        let get_node = |c: &gantz_ca::ContentAddr| self.node(c);
-        let meta_ctx = gantz_core::node::MetaCtx::new(&get_node);
-        let node_ref = graph
-            .node_references()
-            .filter(|n| match kind {
-                gantz_egui::SocketKind::Input => n.weight().inlet(meta_ctx),
-                gantz_egui::SocketKind::Output => n.weight().outlet(meta_ctx),
-            })
-            .nth(ix)?;
-        let marker_kind = match kind {
-            gantz_egui::SocketKind::Input => gantz_egui::SocketKind::Output,
-            gantz_egui::SocketKind::Output => gantz_egui::SocketKind::Input,
-        };
-        gantz_egui::NodeUi::socket_doc(node_ref.weight(), self, marker_kind, 0)
-    }
-
-    fn command_info(&self, name: &str) -> gantz_egui::CommandInfo {
-        use gantz_core::Node as _;
-        use gantz_egui::{CommandInfo, NodeUi as _, SocketDoc, SocketKind};
-
-        let mut info = CommandInfo {
-            name: name.to_string(),
-            description: self.node_description(name),
-            ..Default::default()
-        };
-
-        if name == gantz_egui::widget::gantz::NESTED_GRAPH_TYPE {
-            return info;
-        }
-
-        let get_node = |c: &gantz_ca::ContentAddr| self.node(c);
-        let meta_ctx = gantz_core::node::MetaCtx::new(&get_node);
-        let collect =
-            |n: usize, kind: SocketKind, f: &dyn Fn(SocketKind, usize) -> Option<SocketDoc>| {
-                (0..n)
-                    .map(|ix| f(kind, ix).unwrap_or_else(|| SocketDoc::ty("any")))
-                    .collect::<Vec<_>>()
-            };
-
-        let parsed: gantz_ca::Name = name.parse().expect("infallible");
-        if let Some(graph_ca) = self.head_graph_addr(&parsed) {
-            if let Some(graph) = self.reified.get(&graph_ca) {
-                let ca: gantz_ca::ContentAddr = graph_ca.into();
-                let socket = |kind: SocketKind, ix: usize| {
-                    gantz_egui::Registry::socket_doc(self, &ca, kind, ix)
-                };
-                info.inputs = collect(graph.n_inputs(meta_ctx), SocketKind::Input, &socket);
-                info.outputs = collect(graph.n_outputs(meta_ctx), SocketKind::Output, &socket);
-            }
-        } else if let Some(node) = self
-            .builtins
-            .content_addr(name)
-            .and_then(|ca| self.instances.get(&ca))
-        {
-            // A builtin: introspect its stored instance.
-            let socket = |kind: SocketKind, ix: usize| node.socket_doc(self, kind, ix);
-            info.inputs = collect(node.n_inputs(meta_ctx), SocketKind::Input, &socket);
-            info.outputs = collect(node.n_outputs(meta_ctx), SocketKind::Output, &socket);
-        }
-
-        info
-    }
-
-    fn node_description(&self, name: &str) -> Option<std::borrow::Cow<'static, str>> {
-        use gantz_egui::NodeUi as _;
-        use std::borrow::Cow;
-        if name == gantz_egui::widget::gantz::NESTED_GRAPH_TYPE {
-            return Some(Cow::Borrowed(
-                "Create a new nested graph. Its inlets and outlets become this node's sockets.",
-            ));
-        }
-        let parsed: gantz_ca::Name = name.parse().expect("infallible");
-        if self.registry.head(&parsed).is_some() {
-            return gantz_egui::section::description(&self.registry, &parsed).map(Cow::Owned);
-        }
-        self.builtins
-            .content_addr(name)
-            .and_then(|ca| self.instances.get(&ca))
-            .and_then(|n| n.description())
-            .map(Cow::Borrowed)
-    }
-
-    fn merge_preview(
-        &self,
-        ours: &gantz_ca::Head,
-        source: &str,
-        resolutions: gantz_ca::Resolutions,
-    ) -> Option<gantz_egui::merge::MergePreview> {
-        gantz_egui::merge::merge_preview(&self.registry, ours, source, resolutions)
-    }
-}
-
 /// The set of all known primitive node types accessible to gantz, as data.
 fn builtins() -> gantz_core::Builtins {
     use gantz_core::Builtin;
@@ -290,11 +128,10 @@ fn builtins() -> gantz_core::Builtins {
     ])
 }
 
-/// The value-level codec for the demo's node set: the SAME manifest as the
-/// `impl_node_set_serde!` invocation below.
+/// The value-level codec for the demo's node set: THE node-set manifest.
 fn codec() -> gantz_egui::node::NodeCodec {
     gantz_egui::ui_node_codec! {
-        Box<dyn Node> {
+        NodeSet {
             gantz_core::node::Branch,
             gantz_core::node::Delay,
             gantz_core::node::Expr,
@@ -310,52 +147,11 @@ fn codec() -> gantz_egui::node::NodeCodec {
     }
 }
 
-// ----------------------------------------------
-// Top-level `Node` trait
-// ----------------------------------------------
-
-/// A top-level blanket trait providing trait object cloning, hashing, and serialization.
-trait Node: Any + DynClone + gantz_ca::CaHash + gantz_core::Node + gantz_egui::NodeUi {}
-
-dyn_clone::clone_trait_object!(Node);
-
-impl Node for gantz_core::node::Branch {}
-impl Node for gantz_core::node::Delay {}
-impl Node for gantz_core::node::Expr {}
-impl Node for gantz_core::node::graph::Inlet {}
-impl Node for gantz_core::node::graph::Outlet {}
-
-impl Node for gantz_std::Bang {}
-impl Node for gantz_std::Log {}
-impl Node for gantz_std::Number {}
-
-impl Node for gantz_egui::node::Inspect {}
-impl Node for gantz_egui::node::NamedRef {}
-impl Node for gantz_egui::node::Plot {}
-
-impl Node for Box<dyn Node> {}
-
-// `Box<dyn Node>`'s `Serialize`/`Deserialize`: compiled dispatch over the
-// demo's node set, keyed by each type's definition-site `NodeTag`.
-gantz_format::impl_node_set_serde! {
-    dyn Node {
-        gantz_core::node::Branch,
-        gantz_core::node::Delay,
-        gantz_core::node::Expr,
-        gantz_core::node::graph::Inlet,
-        gantz_core::node::graph::Outlet,
-        gantz_std::Bang,
-        gantz_std::Log,
-        gantz_std::Number,
-        gantz_egui::node::Inspect,
-        gantz_egui::node::NamedRef,
-        gantz_egui::node::Plot,
-    }
-}
-
-/// The composite `.gantz` keyword sugar for the demo's node set: the
+/// The `.gantz` keyword sugar carrier for the demo's node set: the
 /// `gantz_core`, `gantz_std` and `gantz_egui` node sugars (no bevy nodes here).
-impl gantz_format::NodeSugar for Box<dyn Node> {
+struct NodeSet;
+
+impl gantz_format::NodeSugar for NodeSet {
     fn sugar() -> gantz_format::Sugars<'static> {
         gantz_format::Sugars(vec![
             &gantz_format::CoreSugar,
@@ -369,7 +165,7 @@ impl gantz_format::NodeSugar for Box<dyn Node> {
 // Graph
 // ----------------------------------------------
 
-type Graph = gantz_core::node::graph::Graph<Box<dyn Node>>;
+type Graph = gantz_core::node::graph::Graph<DynNode>;
 
 // ----------------------------------------------
 // HeadAccess
@@ -1407,7 +1203,8 @@ fn gui(ui: &mut egui::Ui, state: &mut State) -> gantz_egui::Responses {
 
             let no_base_names = Default::default();
             let codec = codec();
-            gantz_egui::widget::Gantz::new(&state.env, &codec, &no_base_names)
+            let env = state.env.as_env(&codec);
+            gantz_egui::widget::Gantz::new(&env, &codec, &no_base_names)
                 .logger(state.logger.clone())
                 .compile_config(compile_config)
                 .show(&mut state.gantz, state.focused_head, &mut access, ui)

@@ -113,18 +113,19 @@ impl<N> ReifiedGraphs<N> {
     }
 }
 
-impl<N: DeserializeOwned> ReifiedGraphs<N> {
+impl<N> ReifiedGraphs<N> {
     /// Reify the given seed addresses and every graph they transitively
-    /// reference.
+    /// reference, decoding each node weight through `reify_node`.
     ///
     /// References are resolved through the stored graphs' [`NodeData::refs`]
     /// columns, a pure data walk: nothing is decoded to *find* the set.
     /// Addresses that don't resolve to registry graphs (e.g. builtin node
     /// addresses in a node's refs) are ignored, as are already-cached graphs.
-    pub fn ensure(
+    pub fn ensure_with(
         &mut self,
         reg: &Registry,
         seeds: impl IntoIterator<Item = ContentAddr>,
+        reify_node: impl Fn(&NodeData) -> Result<N, ReifyNodeError>,
     ) -> Result<(), EnsureError> {
         let mut queue: VecDeque<GraphAddr> = seeds.into_iter().map(GraphAddr::from).collect();
         while let Some(addr) = queue.pop_front() {
@@ -136,7 +137,7 @@ impl<N: DeserializeOwned> ReifiedGraphs<N> {
                 dg.node_weights()
                     .flat_map(|n| n.refs.iter().copied().map(GraphAddr::from)),
             );
-            let g = reify(dg).map_err(|source| EnsureError {
+            let g = reify_with(dg, &reify_node).map_err(|source| EnsureError {
                 graph: addr,
                 source,
             })?;
@@ -145,18 +146,23 @@ impl<N: DeserializeOwned> ReifiedGraphs<N> {
         Ok(())
     }
 
-    /// Reify every graph in the registry's column, best effort.
+    /// Reify every graph in the registry's column, best effort, decoding each
+    /// node weight through `reify_node`.
     ///
     /// Graphs that fail to reify (e.g. an unknown tag from a domain not
     /// compiled in) are skipped and reported, and remain cache misses that
     /// lookups degrade over the same way as any missing node.
-    pub fn ensure_all(&mut self, reg: &Registry) -> Vec<EnsureError> {
+    pub fn ensure_all_with(
+        &mut self,
+        reg: &Registry,
+        reify_node: impl Fn(&NodeData) -> Result<N, ReifyNodeError>,
+    ) -> Vec<EnsureError> {
         let mut errs = vec![];
         for (addr, dg) in reg.graphs() {
             if self.graphs.contains_key(addr) {
                 continue;
             }
-            match reify(dg) {
+            match reify_with(dg, &reify_node) {
                 Ok(g) => {
                     self.graphs.insert(*addr, g);
                 }
@@ -167,6 +173,24 @@ impl<N: DeserializeOwned> ReifiedGraphs<N> {
             }
         }
         errs
+    }
+}
+
+impl<N: DeserializeOwned> ReifiedGraphs<N> {
+    /// [`ensure_with`][Self::ensure_with] over the node set's own serde
+    /// ([`reify_node`]).
+    pub fn ensure(
+        &mut self,
+        reg: &Registry,
+        seeds: impl IntoIterator<Item = ContentAddr>,
+    ) -> Result<(), EnsureError> {
+        self.ensure_with(reg, seeds, reify_node)
+    }
+
+    /// [`ensure_all_with`][Self::ensure_all_with] over the node set's own
+    /// serde ([`reify_node`]).
+    pub fn ensure_all(&mut self, reg: &Registry) -> Vec<EnsureError> {
+        self.ensure_all_with(reg, reify_node)
     }
 }
 
@@ -329,6 +353,15 @@ pub fn reify<N>(g: &DataGraph) -> Result<Graph<N>, ReifyError>
 where
     N: DeserializeOwned,
 {
+    reify_with(g, reify_node)
+}
+
+/// Reify a typed graph from its stored data form, decoding each node weight
+/// through `reify_node`: the codec-parameterized twin of [`reify`].
+pub fn reify_with<N>(
+    g: &DataGraph,
+    reify_node: impl Fn(&NodeData) -> Result<N, ReifyNodeError>,
+) -> Result<Graph<N>, ReifyError> {
     let mut out = Graph::with_capacity(g.node_count(), g.edge_count());
     for (node_ix, node_data) in g.node_weights().enumerate() {
         let node = reify_node(node_data).map_err(|source| ReifyError { node_ix, source })?;

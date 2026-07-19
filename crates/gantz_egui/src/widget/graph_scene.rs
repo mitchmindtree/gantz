@@ -1,6 +1,6 @@
 use crate::{
-    CopyNodes, InspectEdge, NodeUi, OpenHead, OpenNodePalette, OpenNodeView, Paste, PastePos,
-    Registry, ResetTilesLayout, SocketDoc, node::NodeCodec, response::DynResponse,
+    CopyNodes, Env, InspectEdge, NodeUi, OpenHead, OpenNodePalette, OpenNodeView, Paste, PastePos,
+    ResetTilesLayout, SocketDoc, node::NodeCodec, response::DynResponse,
 };
 use egui::emath::GuiRounding;
 use egui_graph::{self, SocketKind, node::EdgeEvent};
@@ -61,7 +61,7 @@ pub type NodeIndex = petgraph::graph::NodeIndex<usize>;
 /// CA-affecting change. Weights whose tag is unknown to the codec render as
 /// opaque placeholders whose data round-trips untouched.
 pub struct GraphScene<'a> {
-    registry: &'a dyn Registry,
+    registry: &'a Env<'a>,
     codec: &'a NodeCodec,
     graph: &'a mut DataGraph,
     id: egui::Id,
@@ -130,7 +130,7 @@ pub struct Selection {
 impl<'a> GraphScene<'a> {
     /// Create a graph scene for the given graph (a head's root graph; nested
     /// graphs are separate heads).
-    pub fn new(registry: &'a dyn Registry, codec: &'a NodeCodec, graph: &'a mut DataGraph) -> Self {
+    pub fn new(registry: &'a Env<'a>, codec: &'a NodeCodec, graph: &'a mut DataGraph) -> Self {
         Self {
             registry,
             codec,
@@ -471,7 +471,7 @@ impl Selection {
 /// bounding box is centred on the origin (see [`apply_auto_layout`] for
 /// selection-relative placement).
 pub fn layout(
-    registry: &dyn Registry,
+    registry: &Env<'_>,
     codec: &NodeCodec,
     graph: &DataGraph,
     graph_id: egui::Id,
@@ -544,7 +544,7 @@ pub fn layout(
 /// in place rather than snapping toward the origin. Nodes outside `target` are
 /// left untouched.
 pub fn apply_auto_layout(
-    registry: &dyn Registry,
+    registry: &Env<'_>,
     codec: &NodeCodec,
     graph: &DataGraph,
     graph_id: egui::Id,
@@ -645,7 +645,7 @@ pub fn apply_align(
 }
 
 fn nodes(
-    registry: &dyn Registry,
+    registry: &Env<'_>,
     codec: &NodeCodec,
     graph: &mut DataGraph,
     nctx: &mut egui_graph::NodesCtx,
@@ -662,7 +662,7 @@ fn nodes(
     let get_node = |ca: &gantz_ca::ContentAddr| registry.node(ca);
     let meta_ctx = gantz_core::node::MetaCtx::new(&get_node);
     let node_ids: Vec<_> = graph.node_identifiers().collect();
-    let (inlets, outlets) = crate::inlet_outlet_ids(registry, codec, graph);
+    let (inlets, outlets) = crate::inlet_outlet_ids(registry, graph);
     let mut node_responses = Vec::with_capacity(node_ids.len());
     let mut nodes_to_reset = Vec::new();
     let mut request_layout = false;

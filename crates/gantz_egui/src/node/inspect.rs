@@ -1,6 +1,6 @@
 //! An Inspect node for viewing SteelVals flowing through the graph.
 
-use crate::{NodeCtx, NodeUi, NodeUiResponse, Registry, SocketDoc, SocketKind, ui_tree::UiTree};
+use crate::{Env, NodeCtx, NodeUi, NodeUiResponse, SocketDoc, SocketKind, ui_tree::UiTree};
 use gantz_ca::CaHash;
 use gantz_core::node::{self, ExprCtx, ExprResult, MetaCtx, RegCtx};
 use gantz_nodetag::NodeTag;
@@ -39,7 +39,7 @@ impl gantz_core::Node for Inspect {
 }
 
 impl NodeUi for Inspect {
-    fn name(&self, _: &dyn crate::Registry) -> std::borrow::Cow<'_, str> {
+    fn name(&self, _: &crate::Env<'_>) -> std::borrow::Cow<'_, str> {
         "inspect".into()
     }
 
@@ -58,7 +58,7 @@ impl NodeUi for Inspect {
         NodeUiResponse::new(framed)
     }
 
-    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {
+    fn socket_doc(&self, _: &Env<'_>, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {
         Some(match kind {
             SocketKind::Input => {
                 SocketDoc::ty("any").with_description("value to display; stored and passed through")

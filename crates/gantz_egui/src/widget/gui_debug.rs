@@ -6,7 +6,7 @@
 //! playground for the GUI vocabulary and a live harness: bindings resolve
 //! into the focused graph's node state, and pushes fire its entrypoints.
 
-use crate::{Registry, node};
+use crate::{Env, node};
 use petgraph::visit::{IntoNodeReferences, NodeRef};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -134,7 +134,7 @@ fn evaluate(text_hash: u64, code: &str) -> Cache {
 /// Nodes reify transiently through the codec; a weight that fails to reify
 /// (an unknown tag) reports no count.
 pub fn node_output_counts(
-    registry: &dyn Registry,
+    registry: &Env<'_>,
     codec: &node::NodeCodec,
     g: &gantz_ca::DataGraph,
 ) -> HashMap<node::Id, usize> {

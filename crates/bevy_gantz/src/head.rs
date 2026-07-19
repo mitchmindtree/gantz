@@ -66,7 +66,8 @@ pub struct HeadRef(pub ca::Head);
 /// graph's content address always equals the head's committed graph CA
 /// (`registry.head_commit(head).graph`).
 ///
-/// [`vm::sync`](crate::vm::sync) relies on this: it reads the committed CA
+/// The UI layer's VM synchronisation system (`bevy_gantz_egui::vm::sync`)
+/// relies on this: it reads the committed CA
 /// directly to decide when to recompile and never re-hashes the working graph
 /// (see #159). [`vm::validate_committed`](crate::vm::validate_committed) is a
 /// default-off debug check that flags any violation of this invariant.

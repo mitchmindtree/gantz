@@ -11,12 +11,11 @@
 use bevy::{prelude::*, window::Window};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use bevy_gantz::{
-    BuiltinNodes, FocusedHead, GantzPlugin, HeadRef, HeadTabOrder, OpenHead, OpenHeadDataReadOnly,
-    WorkingGraph,
+    FocusedHead, GantzPlugin, HeadRef, HeadTabOrder, OpenHead, OpenHeadDataReadOnly, WorkingGraph,
     debounced_input::{DebouncedInputEvent, DebouncedInputPlugin},
     timestamp,
 };
-use bevy_gantz_egui::{GantzEguiPlugin, GuiState, HeadGuiState, TraceCapture};
+use bevy_gantz_egui::{BuiltinNodes, GantzEguiPlugin, GuiState, HeadGuiState, TraceCapture};
 use bevy_pkv::PkvStore;
 use storage::Pkv;
 
@@ -25,13 +24,13 @@ mod storage;
 
 fn main() {
     App::new()
-        .add_plugins(GantzPlugin::<Box<dyn node::Node>>::default())
-        .add_plugins(GantzEguiPlugin::<Box<dyn node::Node>>::default().base_immutable(false))
+        .add_plugins(GantzPlugin)
+        .add_plugins(GantzEguiPlugin::default().base_immutable(false))
         // The DSP plugin contributes the plyphon base source, and lets DSP
         // demos be heard while they are edited.
-        .add_plugins(bevy_gantz_plyphon::PlyphonPlugin::<Box<dyn node::Node>>::default())
+        .add_plugins(bevy_gantz_plyphon::PlyphonPlugin::default())
         .insert_resource({
-            let (builtins, errs) = BuiltinNodes::<Box<dyn node::Node>>::reify(node::builtins());
+            let (builtins, errs) = BuiltinNodes::reify(node::builtins(), &node::codec());
             assert!(errs.is_empty(), "builtins failed to reify: {errs:?}");
             builtins
         })
@@ -64,8 +63,8 @@ fn main() {
             (
                 setup_camera,
                 setup_gui_state,
-                bevy_gantz_egui::base::load::<Box<dyn node::Node>>.after(setup_gui_state),
-                setup_open.after(bevy_gantz_egui::base::load::<Box<dyn node::Node>>),
+                bevy_gantz_egui::base::load.after(setup_gui_state),
+                setup_open.after(bevy_gantz_egui::base::load),
             ),
         )
         .add_systems(EguiPrimaryContextPass, load_egui_memory)

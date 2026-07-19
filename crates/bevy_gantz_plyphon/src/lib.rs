@@ -32,9 +32,8 @@ use cpal::{FromSample, SizedSample};
 use gantz_ca as ca;
 use gantz_core::node::graph::Graph;
 use gantz_plyphon::{
-    AddAction, AsRefNode, Backend, BusKey, DefCache, Embedded, GainRef, ROOT_GROUP_ID,
-    ResolvedPart, ToNodeDsp, derive_template, flatten_from_registry, flatten_instance_children,
-    instantiate,
+    AddAction, Backend, BusKey, DefCache, Embedded, GainRef, ROOT_GROUP_ID, ResolvedPart,
+    ToNodeDsp, derive_template, flatten_from_registry, flatten_instance_children, instantiate,
 };
 use plyphon::{Controller, Nrt, Options, StreamConsumer, World, engine};
 // `std::time::Instant` panics ("time not implemented") on `wasm32-unknown-unknown`;
@@ -52,7 +51,8 @@ pub use plyphon;
 type UnitRegistrar = Box<dyn Fn(&mut plyphon::UnitRegistry) + Send + Sync>;
 
 use bevy_gantz::head::{HeadRef, HeadVms, OpenHead};
-use bevy_gantz::{EntrypointSet, EvalEpoch, GraphCache, Registry, VmSet};
+use bevy_gantz::{EntrypointSet, EvalEpoch, Registry, VmSet};
+use bevy_gantz_egui::GraphCache;
 use bevy_gantz_egui::{EdgeStyles, ExtPanes, RefExtUis, RegisterResponseExt, SettingsTabs};
 use gantz_plyphon::{
     Config, DeriveStatus, DspEdgeStyle, DspPane, DspPaneHead, DspRefExtUi, DspSettingsTab,
@@ -141,7 +141,7 @@ fn osc(secs: f64) -> u64 {
 ///   `build`, before the schedule first ticks.
 /// - Contributions to shared collections go through
 ///   `get_resource_or_init` + push (see
-///   [`bevy_gantz::EntrypointFns`],
+///   [`bevy_gantz_egui::EntrypointFns`],
 ///   [`RegisterResponseExt::register_response_with`]) - never
 ///   `insert_resource`, which would clobber earlier contributions.
 /// - GUI surfaces are provided by per-frame systems in `PreUpdate`
@@ -151,21 +151,19 @@ fn osc(secs: f64) -> u64 {
 ///   so the plugin works with or without `GantzEguiPlugin`.
 /// - The domain's own extension points (here
 ///   [`with_units`](Self::with_units)) hang off the plugin itself.
-pub struct PlyphonPlugin<N> {
+pub struct PlyphonPlugin {
     unit_registrars: Vec<UnitRegistrar>,
-    _marker: std::marker::PhantomData<N>,
 }
 
-impl<N> Default for PlyphonPlugin<N> {
+impl Default for PlyphonPlugin {
     fn default() -> Self {
         Self {
             unit_registrars: Vec::new(),
-            _marker: std::marker::PhantomData,
         }
     }
 }
 
-impl<N> PlyphonPlugin<N> {
+impl PlyphonPlugin {
     /// A plugin with no custom units (equivalent to [`default`](Self::default)).
     pub fn new() -> Self {
         Self::default()
@@ -177,7 +175,7 @@ impl<N> PlyphonPlugin<N> {
     /// (or `register_demand`) once per unit. Chainable.
     ///
     /// ```ignore
-    /// PlyphonPlugin::<N>::new().with_units(|reg| {
+    /// PlyphonPlugin::new().with_units(|reg| {
     ///     reg.register("Saw", Box::new(SawCtor));
     /// })
     /// ```
@@ -190,10 +188,7 @@ impl<N> PlyphonPlugin<N> {
     }
 }
 
-impl<N> Plugin for PlyphonPlugin<N>
-where
-    N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Clone + Send + Sync,
-{
+impl Plugin for PlyphonPlugin {
     fn build(&self, app: &mut App) {
         // DSP settings (the Settings -> DSP tab).
         app.init_resource::<DspConfig>();
@@ -215,7 +210,7 @@ where
                     sync_dsp_settings,
                     provide_dsp_pane,
                     provide_dsp_ref_ext,
-                    provide_dsp_edge_style::<N>,
+                    provide_dsp_edge_style,
                 ),
             );
         // The DSP domain's base graphs (see `bevy_gantz_egui::base`).
@@ -229,7 +224,7 @@ where
         // `.after(EntrypointSet)`: run once the `tick!`/`update!` drivers' triggered
         // evaluations have flushed, so the control values they queue are visible to
         // the param drain below in the same frame.
-        app.add_systems(Update, drive_synths::<N>.after(VmSet).after(EntrypointSet));
+        app.add_systems(Update, drive_synths.after(VmSet).after(EntrypointSet));
     }
 
     // Engine construction lives in `finish` rather than `build`: it reads the
@@ -703,15 +698,13 @@ fn provide_dsp_ref_ext(
 /// [`root_port_info`]), so it is computed here and handed to the UI -
 /// recomputed per head only when the registry, the head's working graph or
 /// its [`DspHead`] change.
-fn provide_dsp_edge_style<N>(
+fn provide_dsp_edge_style(
     registry: Res<Registry>,
-    reified: Res<GraphCache<N>>,
+    reified: Res<GraphCache>,
     heads: Query<(&HeadRef, Option<Ref<DspHead>>), With<OpenHead>>,
     mut cache: Local<HashMap<ca::Head, std::sync::Arc<RootPortInfo>>>,
     mut edge_styles: ResMut<EdgeStyles>,
-) where
-    N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Send + Sync,
-{
+) {
     let mut styled: HashMap<ca::Head, std::sync::Arc<RootPortInfo>> = HashMap::new();
     for (head_ref, dsp) in heads.iter() {
         let head = head_ref.0.clone();
@@ -755,9 +748,9 @@ fn provide_dsp_edge_style<N>(
 ///   samples into the node's ring state (capped at the tap's `size`).
 ///
 /// Also tears down synths for closed heads.
-fn drive_synths<N>(
+fn drive_synths(
     registry: Res<Registry>,
-    reified: Res<GraphCache<N>>,
+    reified: Res<GraphCache>,
     dsp: Option<NonSendMut<DspEngine>>,
     dsp_config: Res<DspConfig>,
     mut enabled_applied: Local<Option<bool>>,
@@ -765,9 +758,7 @@ fn drive_synths<N>(
     mut vms: NonSendMut<HeadVms>,
     heads: Query<(Entity, &HeadRef), With<OpenHead>>,
     mut cmds: Commands,
-) where
-    N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Clone + Send + Sync,
-{
+) {
     let Some(dsp) = dsp else {
         return;
     };
@@ -1945,7 +1936,7 @@ mod tests {
         g.add_edge(s, o, Edge::new(0.into(), 0.into()));
         let resolve =
             |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> { None };
-        let flat: Graph<Flat<TestN>> = flatten(&|_| None, &g, &resolve).expect("flatten");
+        let flat: Graph<Flat<&TestN>> = flatten(&|_| None, &g, &resolve).expect("flatten");
 
         let mut cache = DefCache::new();
         let template = derive_template(&flat, 1, &|_| None, &mut cache).expect("derive");
@@ -2011,7 +2002,7 @@ mod tests {
         g.add_edge(p, o, Edge::new(0.into(), 0.into()));
         let resolve =
             |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> { None };
-        let flat: Graph<Flat<TestN>> = flatten(&|_| None, &g, &resolve).expect("flatten");
+        let flat: Graph<Flat<&TestN>> = flatten(&|_| None, &g, &resolve).expect("flatten");
 
         let mut cache = DefCache::new();
         let template = derive_template(&flat, 1, &|_| None, &mut cache).expect("derive");
@@ -2059,13 +2050,13 @@ mod tests {
         use gantz_core::node::graph::Graph;
         use gantz_plyphon::flatten::{Flat, RefKind, flatten};
 
-        let flatten_no_refs = |g: &Graph<TestN>| -> Graph<Flat<TestN>> {
+        fn flatten_no_refs(g: &Graph<TestN>) -> Graph<Flat<&TestN>> {
             let resolve =
                 |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> {
                     None
                 };
             flatten(&|_| None, g, &resolve).expect("flatten")
-        };
+        }
 
         let (mut controller, _nrt, mut world) = plyphon::engine(plyphon::Options {
             sample_rate: 48_000.0,
@@ -2141,13 +2132,13 @@ mod tests {
         use gantz_core::node::graph::Graph;
         use gantz_plyphon::flatten::{Flat, RefKind, flatten};
 
-        let flatten_no_refs = |g: &Graph<TestN>| -> Graph<Flat<TestN>> {
+        fn flatten_no_refs(g: &Graph<TestN>) -> Graph<Flat<&TestN>> {
             let resolve =
                 |_: &TestN| -> Option<(gantz_ca::ContentAddr, RefKind, Option<&Graph<TestN>>)> {
                     None
                 };
             flatten(&|_| None, g, &resolve).expect("flatten")
-        };
+        }
 
         let (mut controller, _nrt, mut world) = plyphon::engine(plyphon::Options {
             sample_rate: 48_000.0,
@@ -2294,12 +2285,15 @@ mod tests {
     /// Flatten a head graph over `map`'s children (refs lower per their
     /// `inline` flag) and pre-flatten every child for the derivation resolver.
     #[allow(clippy::type_complexity)]
-    fn flatten_head(
-        g: &gantz_core::node::graph::Graph<TestN>,
-        map: &HashMap<gantz_ca::ContentAddr, gantz_core::node::graph::Graph<TestN>>,
+    fn flatten_head<'g>(
+        g: &'g gantz_core::node::graph::Graph<TestN>,
+        map: &'g HashMap<gantz_ca::ContentAddr, gantz_core::node::graph::Graph<TestN>>,
     ) -> (
-        gantz_core::node::graph::Graph<gantz_plyphon::Flat<TestN>>,
-        HashMap<gantz_ca::ContentAddr, gantz_core::node::graph::Graph<gantz_plyphon::Flat<TestN>>>,
+        gantz_core::node::graph::Graph<gantz_plyphon::Flat<&'g TestN>>,
+        HashMap<
+            gantz_ca::ContentAddr,
+            gantz_core::node::graph::Graph<gantz_plyphon::Flat<&'g TestN>>,
+        >,
     ) {
         use gantz_core::node::graph::Graph;
         use gantz_plyphon::flatten::{RefKind, flatten};

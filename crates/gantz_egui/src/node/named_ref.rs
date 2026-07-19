@@ -204,21 +204,21 @@ impl Node for NamedRef {
 }
 
 impl NodeUi for NamedRef {
-    fn name(&self, _registry: &dyn crate::Registry) -> Cow<'_, str> {
+    fn name(&self, _registry: &crate::Env<'_>) -> Cow<'_, str> {
         Cow::Owned(self.name.to_string())
     }
 
-    fn demo_graph(&self, registry: &dyn crate::Registry) -> Option<String> {
+    fn demo_graph(&self, registry: &crate::Env<'_>) -> Option<String> {
         registry.demo_graph(&self.name.to_string())
     }
 
-    fn nav_head(&self, _registry: &dyn crate::Registry) -> Option<gantz_ca::Head> {
+    fn nav_head(&self, _registry: &crate::Env<'_>) -> Option<gantz_ca::Head> {
         Some(gantz_ca::Head::Branch(self.name.clone()))
     }
 
     fn socket_doc(
         &self,
-        registry: &dyn crate::Registry,
+        registry: &crate::Env<'_>,
         kind: crate::SocketKind,
         ix: usize,
     ) -> Option<SocketDoc> {
@@ -227,7 +227,7 @@ impl NodeUi for NamedRef {
     }
 
     fn ui(&mut self, ctx: NodeCtx, uictx: egui_graph::NodeCtx) -> NodeUiResponse {
-        let registry = ctx.registry();
+        let registry = ctx.env();
         let mut changed = false;
 
         // Nested graphs always sync so parents follow their children's edits.
@@ -292,7 +292,7 @@ impl NodeUi for NamedRef {
     ) -> InspectorRowsResponse {
         let mut resp = InspectorRowsResponse::default();
         let row_h = node_inspector::table_row_h(body.ui_mut());
-        let registry = ctx.registry();
+        let registry = ctx.env();
         let path = ctx.path().to_vec();
 
         // Whether the referenced CA exists in the registry.
@@ -382,7 +382,7 @@ impl NodeUi for NamedRef {
     fn context_menu(&mut self, ctx: &mut NodeCtx, ui: &mut egui::Ui) -> ContextMenuResponse {
         let mut resp = ContextMenuResponse::default();
         // Offer sync/fork on the node itself when the reference is outdated.
-        if let Some(latest_ca) = outdated_latest(self, ctx.registry()) {
+        if let Some(latest_ca) = outdated_latest(self, ctx.env()) {
             let path = ctx.path().to_vec();
             match sync_fork_buttons(self, &path, ui, latest_ca) {
                 SyncForkAction::Synced => {
@@ -403,10 +403,7 @@ impl NodeUi for NamedRef {
 /// The name's current head graph CA when this reference is *outdated*: it
 /// exists, auto-sync is off, and the name now points at different content.
 /// `None` otherwise (missing, synced, or already up to date).
-fn outdated_latest(
-    named: &NamedRef,
-    registry: &dyn crate::Registry,
-) -> Option<gantz_ca::ContentAddr> {
+fn outdated_latest(named: &NamedRef, registry: &crate::Env<'_>) -> Option<gantz_ca::ContentAddr> {
     if named.sync {
         return None;
     }

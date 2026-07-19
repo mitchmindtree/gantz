@@ -1,5 +1,5 @@
-pub use tick_bang::{Interval, TickBang, ToTickBang};
-pub use update_bang::{ToUpdateBang, UpdateBang};
+pub use tick_bang::{Interval, TickBang};
+pub use update_bang::UpdateBang;
 
 pub mod tick_bang;
 pub mod update_bang;

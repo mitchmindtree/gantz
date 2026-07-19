@@ -5,10 +5,9 @@
 //! self-sufficient working-graph weight: one erased value serves rendering,
 //! compilation and evaluation. The [`NodeCodec`] carries the node set as
 //! *values* rather than as a `Box<dyn Trait>` serde impl: an application
-//! composes one with [`ui_node_codec!`](crate::ui_node_codec) from the same
-//! type manifest as its `gantz_format::impl_node_set_serde!` invocation, and
-//! both paths produce byte-identical [`NodeData`] (the same content
-//! addresses).
+//! composes one with [`ui_node_codec!`](crate::ui_node_codec), whose type
+//! list is the app's node-set manifest - a node type is storable exactly
+//! when it is listed there.
 
 use crate::NodeUi;
 use gantz_ca::{ContentAddr, DataGraph, NodeData};
@@ -70,6 +69,20 @@ pub enum NormalizeNodeError {
     /// The reified node failed to erase back to data.
     #[error(transparent)]
     Erase(#[from] EraseNodeError),
+}
+
+// Lets reference-transparent passes (e.g. the DSP compiler's flattening) find
+// the underlying `Ref` within an erased UI node. `FnNamedRef` deliberately
+// does not match: a function value references a graph without standing in for
+// it.
+impl gantz_core::node::AsRefNode for DynNode {
+    fn as_ref_node(&self) -> Option<&gantz_core::node::Ref> {
+        let node: &dyn gantz_core::Node = &**self;
+        let any: &dyn Any = node;
+        any.downcast_ref::<crate::node::NamedRef>()
+            .map(|nr| nr.ref_())
+            .or_else(|| any.downcast_ref::<gantz_core::node::Ref>())
+    }
 }
 
 impl UiNodeInstance {
@@ -166,11 +179,10 @@ impl NodeCodec {
 /// Compose a [`NodeCodec`](crate::node::NodeCodec) over a node set.
 ///
 /// Takes the node set's `gantz_format::NodeSugar` carrier type and the list
-/// of node types - the SAME manifest as the application's
-/// `gantz_format::impl_node_set_serde!` invocation, so the value-level codec
-/// and the box serde agree on tags, wire shapes and content addresses (gate
-/// the two against each other with a round-trip test). Each listed type must
-/// implement `gantz_nodetag::NodeTag`, `serde::Serialize`,
+/// of node types - THE application's node-set manifest: a node type is
+/// storable exactly when it is listed here, and its wire tag and shape (and
+/// thus its content address) are fixed by its own `NodeTag` + serde. Each
+/// listed type must implement `gantz_nodetag::NodeTag`, `serde::Serialize`,
 /// `serde::de::DeserializeOwned` and [`NodeUi`](crate::NodeUi); the calling
 /// crate must depend on `serde`.
 ///
@@ -178,9 +190,17 @@ impl NodeCodec {
 /// `gantz_core::data::ReifyNodeError` naming the tag.
 ///
 /// ```ignore
+/// pub struct NodeSet;
+///
+/// impl gantz_format::NodeSugar for NodeSet {
+///     fn sugar() -> gantz_format::Sugars<'static> {
+///         gantz_format::Sugars(vec![&gantz_format::CoreSugar])
+///     }
+/// }
+///
 /// pub fn codec() -> gantz_egui::node::NodeCodec {
 ///     gantz_egui::ui_node_codec! {
-///         Box<dyn Node> {
+///         NodeSet {
 ///             gantz_core::node::Expr,
 ///             gantz_egui::node::Comment,
 ///             // ...

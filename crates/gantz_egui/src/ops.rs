@@ -114,7 +114,7 @@ pub fn copy_nodes(
 /// ensure it has a layout entry.
 ///
 /// `new_node` produces the node's stored data form (see e.g.
-/// [`crate::RegistryRef::create_node`]); the fresh node reifies once through
+/// [`crate::Env::create_node`]); the fresh node reifies once through
 /// the `codec` for its VM registration step.
 ///
 /// Returns the index of the new node.

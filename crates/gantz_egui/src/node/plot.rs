@@ -27,8 +27,8 @@ use crate::ui_tree::plot::{is_container, resolve_color, split_channels};
 use crate::widget::node_inspector;
 use crate::widget::node_inspector::radio_option;
 use crate::{
-    ContextMenuResponse, InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse, NodeViewResponse,
-    Registry, SocketDoc, SocketKind,
+    ContextMenuResponse, Env, InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse,
+    NodeViewResponse, SocketDoc, SocketKind,
 };
 use gantz_ca::CaHash;
 use gantz_core::node::{self, ExprCtx, ExprResult, MetaCtx, RegCtx};
@@ -335,7 +335,7 @@ impl Plot {
 }
 
 impl NodeUi for Plot {
-    fn name(&self, _: &dyn Registry) -> std::borrow::Cow<'_, str> {
+    fn name(&self, _: &Env<'_>) -> std::borrow::Cow<'_, str> {
         "plot".into()
     }
 
@@ -655,7 +655,7 @@ impl NodeUi for Plot {
         ContextMenuResponse::default()
     }
 
-    fn socket_doc(&self, _: &dyn Registry, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {
+    fn socket_doc(&self, _: &Env<'_>, kind: SocketKind, _ix: usize) -> Option<SocketDoc> {
         Some(match kind {
             SocketKind::Input => SocketDoc::ty("number or list").with_description(
                 "scope: a number (or list) appended to the history; signal: the value to plot",

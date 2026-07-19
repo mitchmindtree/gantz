@@ -1,7 +1,7 @@
 use crate::{
-    Action, CopyNodes, CreateNestedGraph, CreateNode, CutNodes, DuplicateNodes, ExportAllNamed,
-    ExportHead, HeadAccess, Keymap, NodeCtx, NodeUi, OpenLogs, OpenNodePalette, OpenNodeView,
-    Paste, Redo, Registry, ReplaceHead, ResetTilesLayout, Undo, export,
+    Action, CopyNodes, CreateNestedGraph, CreateNode, CutNodes, DuplicateNodes, Env,
+    ExportAllNamed, ExportHead, HeadAccess, Keymap, NodeCtx, NodeUi, OpenLogs, OpenNodePalette,
+    OpenNodeView, Paste, Redo, ReplaceHead, ResetTilesLayout, Undo, export,
     node::NodeCodec,
     response::{DynResponse, Responses},
     widget::{self, GraphScene, GraphSceneState, graph_scene},
@@ -36,7 +36,7 @@ pub const NESTED_GRAPH_TYPE: &str = "graph";
 
 /// The top-level gantz widget.
 pub struct Gantz<'a> {
-    env: &'a dyn Registry,
+    env: &'a Env<'a>,
     /// The value-level codec through which working-graph nodes reify for
     /// their UI passes (and erase back on change).
     codec: &'a NodeCodec,
@@ -693,7 +693,7 @@ impl Default for ViewToggles {
 }
 
 struct NodeTyCmd<'a> {
-    env: &'a dyn Registry,
+    env: &'a Env<'a>,
     name: &'a str,
 }
 
@@ -766,11 +766,7 @@ impl GantzResponse {
 
 impl<'a> Gantz<'a> {
     /// Instantiate the full top-level gantz widget.
-    pub fn new(
-        env: &'a dyn Registry,
-        codec: &'a NodeCodec,
-        base_names: &'a crate::reg::Names,
-    ) -> Self {
+    pub fn new(env: &'a Env<'a>, codec: &'a NodeCodec, base_names: &'a crate::reg::Names) -> Self {
         Self {
             env,
             codec,
@@ -1380,7 +1376,7 @@ where
             Some(head) => {
                 let merge_resolutions = &mut state.merge_resolutions;
                 let head_state = state.open_heads.entry(head.clone()).or_default();
-                let names = crate::reg::names(gantz.env.ca());
+                let names = crate::reg::names(gantz.env.registry);
                 let is_base = match &head {
                     gantz_ca::Head::Branch(name) => base_names.contains_key(name),
                     _ => false,
@@ -1404,7 +1400,7 @@ where
                 // The graph's current description (named graphs only).
                 let current_description = match &head {
                     gantz_ca::Head::Branch(name) => {
-                        crate::section::description(gantz.env.ca(), name)
+                        crate::section::description(gantz.env.registry, name)
                     }
                     _ => None,
                 };
@@ -1769,8 +1765,7 @@ where
                                 let &[n_ix] = path.as_slice() else {
                                     return None;
                                 };
-                                let (inlets, outlets) =
-                                    crate::inlet_outlet_ids(env, codec, data.graph);
+                                let (inlets, outlets) = crate::inlet_outlet_ids(env, data.graph);
                                 let n_id = graph_scene::NodeIndex::new(n_ix);
                                 let weight = data.graph.node_weight(n_id)?;
                                 // Reify the one node; erase back iff changed.
@@ -1911,7 +1906,7 @@ where
                 let codec = gantz.codec;
                 egui::ScrollArea::both().show(ui, |ui| {
                     let payloads = access.with_head_mut(&head, |data| {
-                        let (inlets, outlets) = crate::inlet_outlet_ids(env, codec, data.graph);
+                        let (inlets, outlets) = crate::inlet_outlet_ids(env, data.graph);
                         let n_outs = super::gui_debug::node_output_counts(env, codec, data.graph);
                         let resolver = move |p: &[node::Id]| match p {
                             &[ix] => n_outs.get(&ix).copied(),
@@ -1978,7 +1973,7 @@ struct GraphTreeBehaviour<'a, Access>
 where
     Access: HeadAccess,
 {
-    env: &'a dyn Registry,
+    env: &'a Env<'a>,
     codec: &'a NodeCodec,
     access: &'a mut Access,
     state: &'a mut GantzState,
@@ -2085,7 +2080,7 @@ where
 
         let response = if is_editing {
             let head = tiles.get_pane(&tile_id).map(|GraphPane(h)| h.clone());
-            let names = crate::reg::names(self.env.ca());
+            let names = crate::reg::names(self.env.registry);
 
             let name_res = head.as_ref().map(|h| {
                 ui.scope(|ui| {
@@ -3138,7 +3133,7 @@ fn sidebar_toggle(ctx: &egui::Context, anchor_pos: egui::Pos2, open: &mut bool) 
 }
 
 fn graph_select(
-    env: &dyn Registry,
+    env: &Env<'_>,
     heads: &[gantz_ca::Head],
     focused_head: usize,
     base_names: &crate::reg::Names,
@@ -3152,7 +3147,7 @@ fn graph_select(
 }
 
 fn history_view(
-    env: &dyn Registry,
+    env: &Env<'_>,
     heads: &[gantz_ca::Head],
     focused_head: usize,
     ui: &mut egui::Ui,
@@ -3180,7 +3175,7 @@ fn perf_view(title: &str, capture: &mut widget::PerfCapture, ui: &mut egui::Ui) 
 /// caller to tag and merge.
 #[allow(clippy::too_many_arguments)]
 fn graph_scene(
-    registry: &dyn Registry,
+    registry: &Env<'_>,
     codec: &NodeCodec,
     graph: &mut gantz_ca::DataGraph,
     head: &gantz_ca::Head,
@@ -3322,7 +3317,7 @@ enum PaletteChoice {
 /// `editing` is the focused head's name (when it is a branch), used to hide node
 /// types whose reference would cycle back to the graph being edited.
 fn node_palette(
-    env: &dyn Registry,
+    env: &Env<'_>,
     editing: Option<&str>,
     node_palette: &mut widget::NodePalette,
     keymap: &Keymap,
@@ -3404,7 +3399,7 @@ fn head_immutable(
 /// the payloads emitted by node UIs within the inspector.
 #[allow(clippy::too_many_arguments)]
 fn node_inspector<'a>(
-    registry: &'a dyn Registry,
+    registry: &'a Env<'a>,
     codec: &NodeCodec,
     root: &mut gantz_ca::DataGraph,
     vm: &mut Engine,
@@ -3423,7 +3418,7 @@ fn node_inspector<'a>(
                 let graph = &mut *root;
                 let ids: Vec<_> = graph.node_identifiers().collect();
                 // Collect the inlets and outlets.
-                let (inlets, outlets) = crate::inlet_outlet_ids(registry, codec, graph);
+                let (inlets, outlets) = crate::inlet_outlet_ids(registry, graph);
                 // The rect of the first selected node, used to scroll to it.
                 let mut selected_rect: Option<egui::Rect> = None;
                 for id in ids {

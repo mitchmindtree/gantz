@@ -270,9 +270,6 @@ fn socket_doc_list(ui: &mut egui::Ui, heading: &str, docs: &[SocketDoc]) {
 /// parallel Vecs, etc.) allowing the widget to access head data without
 /// requiring a specific storage layout.
 pub trait HeadAccess {
-    /// The node type used in graphs.
-    type Node;
-
     /// Get the list of all head identifiers.
     fn heads(&self) -> &[gantz_ca::Head];
 
@@ -282,7 +279,7 @@ pub trait HeadAccess {
     fn with_head_mut<R>(
         &mut self,
         head: &gantz_ca::Head,
-        f: impl FnOnce(HeadDataMut<'_, Self::Node>) -> R,
+        f: impl FnOnce(HeadDataMut<'_>) -> R,
     ) -> Option<R>;
 
     /// The head's latest module artifact (source text + source map), for
@@ -306,8 +303,11 @@ pub trait HeadAccess {
 }
 
 /// Mutable access to a head's data, provided via [`HeadAccess::with_head_mut`].
-pub struct HeadDataMut<'a, N> {
-    pub graph: &'a mut gantz_core::node::graph::Graph<N>,
+pub struct HeadDataMut<'a> {
+    /// The head's working graph in its stored data form. Typed nodes appear
+    /// only transiently, reified per node through the app's
+    /// [`NodeCodec`](node::NodeCodec).
+    pub graph: &'a mut gantz_ca::DataGraph,
     /// View state (node layout + camera) for this head's graph. Nested graphs
     /// are separate named heads with their own view, so one view per head
     /// suffices (no path-keyed map).
@@ -849,22 +849,26 @@ impl<'a> NodeCtx<'a> {
 }
 
 /// The IDs of the inlet and outlet nodes.
-pub(crate) fn inlet_outlet_ids<N>(
+///
+/// Weights reify transiently through the codec; a weight that fails to
+/// reify (an unknown tag) contributes no inlet or outlet.
+pub(crate) fn inlet_outlet_ids(
     registry: &dyn Registry,
-    g: &gantz_core::node::graph::Graph<N>,
-) -> (Vec<node::Id>, Vec<node::Id>)
-where
-    N: gantz_core::Node,
-{
+    codec: &node::NodeCodec,
+    g: &gantz_ca::DataGraph,
+) -> (Vec<node::Id>, Vec<node::Id>) {
     let get_node = |ca: &gantz_ca::ContentAddr| registry.node(ca);
     let ctx = gantz_core::node::MetaCtx::new(&get_node);
     let mut inlets = vec![];
     let mut outlets = vec![];
     for n_ref in g.node_references() {
-        if n_ref.weight().inlet(ctx) {
+        let Ok(inst) = codec.reify_ui(n_ref.weight()) else {
+            continue;
+        };
+        if inst.node.inlet(ctx) {
             inlets.push(n_ref.id().index());
         }
-        if n_ref.weight().outlet(ctx) {
+        if inst.node.outlet(ctx) {
             outlets.push(n_ref.id().index());
         }
     }

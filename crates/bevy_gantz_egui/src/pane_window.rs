@@ -19,9 +19,9 @@
 
 use crate::{
     BaseImmutable, BaseNames, BuiltinNodes, CompileConfig, EdgeStyles, ExtPanes, GraphCache,
-    GuiState, HeadAccess, HostNativePaneWindows, ImportTask, OpenHeadViews, PerfGui, PerfVm,
-    RefExtUis, Registry, ResponseDispatchers, SettingsTabs, TraceCapture, WindowedPanesRequested,
-    handle_gantz_response, head, registry_ref,
+    GuiState, HeadAccess, HostNativePaneWindows, ImportTask, NodeCodecRes, OpenHeadViews, PerfGui,
+    PerfVm, RefExtUis, Registry, ResponseDispatchers, SettingsTabs, TraceCapture,
+    WindowedPanesRequested, handle_gantz_response, head, registry_ref,
 };
 use bevy_app::prelude::*;
 use bevy_camera::{Camera2d, RenderTarget};
@@ -48,25 +48,11 @@ struct PopoutView {
 /// The `N: Node` bounds shared by the render system and the plugin (same as
 /// [`crate::update`]).
 trait PaneNode:
-    'static
-    + Node
-    + Clone
-    + serde::Serialize
-    + serde::de::DeserializeOwned
-    + gantz_egui::NodeUi
-    + Send
-    + Sync
+    'static + Node + serde::de::DeserializeOwned + gantz_egui::NodeUi + Send + Sync
 {
 }
 impl<N> PaneNode for N where
-    N: 'static
-        + Node
-        + Clone
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + gantz_egui::NodeUi
-        + Send
-        + Sync
+    N: 'static + Node + serde::de::DeserializeOwned + gantz_egui::NodeUi + Send + Sync
 {
 }
 
@@ -181,11 +167,12 @@ fn render_windowed_panes<N: PaneNode>(
     mut registry: ResMut<Registry>,
     mut cache: ResMut<GraphCache<N>>,
     builtins: Res<BuiltinNodes<N>>,
+    codec: Res<NodeCodecRes>,
     mut gui_state: ResMut<GuiState>,
     mut vms: NonSendMut<head::HeadVms>,
     tab_order: Res<head::HeadTabOrder>,
     mut focused: ResMut<head::FocusedHead>,
-    mut heads_query: Query<OpenHeadViews<N>, With<head::OpenHead>>,
+    mut heads_query: Query<OpenHeadViews, With<head::OpenHead>>,
     import_task: Option<Res<ImportTask>>,
     (
         base_names,
@@ -274,7 +261,7 @@ fn render_windowed_panes<N: PaneNode>(
                 .iter()
                 .map(|s| &**s as &dyn gantz_egui::widget::EdgeStyle)
                 .collect();
-            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
+            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &codec.0, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .compile_config(compile_config.0)
                 .validate_change_tracking(change_validation.0)

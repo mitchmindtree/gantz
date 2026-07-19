@@ -6,9 +6,9 @@
 //! (see [`crate::format`]) under the `.gantz` file extension.
 
 use crate::node::NodeCodec;
-use gantz_ca::{GraphAddr, Name};
-use gantz_core::node::{self, graph::Graph};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use gantz_ca::{DataGraph, GraphAddr, Name};
+use gantz_core::node;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// File extension for gantz export files (without the leading dot).
@@ -244,8 +244,6 @@ pub enum ParseCopiedError {
     Format(crate::format::FormatError),
     /// The document parsed but carried no clipboard graph.
     NotClipboard,
-    /// The clipboard graph failed to reify through the node set.
-    Reify(gantz_core::data::ReifyError),
 }
 
 impl std::fmt::Display for ParseCopiedError {
@@ -253,7 +251,6 @@ impl std::fmt::Display for ParseCopiedError {
         match self {
             Self::Format(e) => write!(f, "failed to parse .gantz text: {e}"),
             Self::NotClipboard => write!(f, "document carries no `{CLIPBOARD_NAME}` graph"),
-            Self::Reify(e) => write!(f, "failed to decode the clipboard graph: {e}"),
         }
     }
 }
@@ -263,19 +260,19 @@ impl std::error::Error for ParseCopiedError {
         match self {
             Self::Format(e) => Some(e),
             Self::NotClipboard => None,
-            Self::Reify(e) => Some(e),
         }
     }
 }
 
 /// A clipboard payload for copied graph nodes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct Copied<N> {
+pub struct Copied {
     /// Registry dependencies referenced by copied nodes (e.g. Ref nodes),
     /// along with the heads (and their metadata) naming them.
     pub registry: gantz_ca::Registry,
-    /// The subgraph of selected nodes and their internal edges.
-    pub graph: Graph<N>,
+    /// The subgraph of selected nodes and their internal edges, in the
+    /// stored data form.
+    pub graph: DataGraph,
     /// Positions of nodes in the subgraph.
     pub positions: egui_graph::Layout,
 }
@@ -286,15 +283,12 @@ pub struct Copied<N> {
 /// selected nodes reference, plus the heads (and `WithName`/`WithCommit`
 /// metadata) whose tips point at those graphs, so pasting into another
 /// registry restores names and views.
-pub fn copy<N>(
+pub fn copy(
     registry: &gantz_ca::Registry,
-    graph: &Graph<N>,
+    graph: &DataGraph,
     selected: &HashSet<node::graph::NodeIx>,
     layout: &egui_graph::Layout,
-) -> Copied<N>
-where
-    N: Clone + gantz_core::Node,
-{
+) -> Copied {
     let subgraph = gantz_core::graph::extract_subgraph(graph, selected);
 
     // Build positions: iterate selected nodes in sorted order (matching
@@ -312,18 +306,17 @@ where
     // Collect registry deps transitively: the graphs the selected nodes
     // reference, and the graphs *those* graphs reference in turn (a nested
     // graph that itself contains nested graphs), so the whole subtree travels
-    // with the clipboard. Blob references ride along likewise. The selected
-    // nodes report their own references (they are typed); the stored graphs'
-    // structural refs/blobs columns cover the rest (a pure data walk).
+    // with the clipboard. Blob references ride along likewise. The stored
+    // refs/blobs columns cover the whole walk - pure data, no node lookups.
     let mut live = gantz_ca::LiveSet::default();
     let mut stack: Vec<GraphAddr> = subgraph
         .node_weights()
-        .flat_map(|n| n.required_addrs())
+        .flat_map(|n| n.refs.iter().copied())
         .map(GraphAddr::from)
         .filter(|ga| registry.graph(ga).is_some())
         .collect();
-    for (section, addr) in subgraph.node_weights().flat_map(|n| n.required_blobs()) {
-        live.blobs.entry(section).or_default().insert(addr);
+    for &(ref section, addr) in subgraph.node_weights().flat_map(|n| n.blobs.iter()) {
+        live.blobs.entry(section.clone()).or_default().insert(addr);
     }
     while let Some(graph_ca) = stack.pop() {
         if !live.graphs.insert(graph_ca) {
@@ -370,16 +363,13 @@ where
 /// Merges registry dependencies, adds the subgraph nodes/edges, and maps
 /// positions with the given offset. Returns the new node indices in the
 /// target graph.
-pub fn paste<N>(
+pub fn paste(
     registry: &mut gantz_ca::Registry,
-    target_graph: &mut Graph<N>,
+    target_graph: &mut DataGraph,
     target_layout: &mut egui_graph::Layout,
-    copied: &Copied<N>,
+    copied: &Copied,
     offset: egui::Vec2,
-) -> Vec<node::graph::NodeIx>
-where
-    N: Clone,
-{
+) -> Vec<node::graph::NodeIx> {
     registry.merge(copied.registry.clone());
     let new_indices = gantz_core::graph::add_subgraph(target_graph, &copied.graph);
 
@@ -401,20 +391,15 @@ where
 /// stored as the clipboard commit's view section entry - alongside the
 /// registry dependencies, so the whole payload is one ordinary `.gantz`
 /// document. [`copied_from_str`] reverses this.
-pub fn copied_to_string<N>(
-    copied: &Copied<N>,
+pub fn copied_to_string(
+    copied: &Copied,
     codec: &NodeCodec,
-) -> Result<String, crate::format::FormatError>
-where
-    N: Serialize + gantz_core::Node,
-{
-    // Add the subgraph (erased) to the dependency registry as a fresh root
-    // commit named `CLIPBOARD_NAME`. A fixed timestamp keeps the payload
+) -> Result<String, crate::format::FormatError> {
+    // Add the subgraph to the dependency registry as a fresh root commit
+    // named `CLIPBOARD_NAME`. A fixed timestamp keeps the payload
     // deterministic.
     let mut registry = copied.registry.clone();
-    let data_graph = gantz_core::data::erase(&copied.graph)
-        .map_err(|e| crate::format::FormatError::malformed(e.to_string()))?;
-    let g_addr = registry.add_graph(data_graph);
+    let g_addr = registry.add_graph(copied.graph.clone());
     let commit_ca = registry.add_commit(gantz_ca::Commit::new(
         std::time::Duration::ZERO,
         None,
@@ -437,20 +422,17 @@ where
 ///
 /// Splits the `clipboard` graph (and its positions) back out from the registry
 /// dependencies.
-pub fn copied_from_str<N>(text: &str, codec: &NodeCodec) -> Result<Copied<N>, ParseCopiedError>
-where
-    N: DeserializeOwned,
-{
+pub fn copied_from_str(text: &str, codec: &NodeCodec) -> Result<Copied, ParseCopiedError> {
     let registry = crate::format::from_str(text, now(), codec).map_err(ParseCopiedError::Format)?;
 
     let clipboard: Name = CLIPBOARD_NAME.parse().expect("infallible");
     let clip_ca = registry
         .head(&clipboard)
         .ok_or(ParseCopiedError::NotClipboard)?;
-    let graph: Graph<N> = registry
+    let graph: DataGraph = registry
         .commit_graph_ref(&clip_ca)
-        .ok_or(ParseCopiedError::NotClipboard)
-        .and_then(|dg| gantz_core::data::reify(dg).map_err(ParseCopiedError::Reify))?;
+        .ok_or(ParseCopiedError::NotClipboard)?
+        .clone();
     let positions = crate::section::view(&registry, &clip_ca)
         .map(|view| view.layout)
         .unwrap_or_default();
@@ -566,7 +548,7 @@ mod tests {
     /// positions riding the clipboard commit's view section entry.
     #[test]
     fn clipboard_round_trip_carries_positions_and_deps() {
-        use crate::test_node::{TestGraph, TestNode, codec, commit_named, expr, named_ref};
+        use crate::test_node::{TestGraph, codec, commit_named, expr, named_ref};
 
         let mut reg = gantz_ca::Registry::default();
         let mut leaf_g = TestGraph::default();
@@ -574,10 +556,12 @@ mod tests {
         let (_, leaf_ga) = commit_named(&mut reg, Duration::from_secs(1), &leaf_g, &name("leaf"));
         crate::section::set_description(&mut reg, name("leaf"), "a leaf".to_string());
 
-        // The working graph: a ref to `leaf` plus a plain expr node.
-        let mut working = TestGraph::default();
-        let a = working.add_node(named_ref("leaf", leaf_ga));
-        let b = working.add_node(expr("(+ 2 2)"));
+        // The working graph (in data form): a ref to `leaf` plus a plain
+        // expr node.
+        let mut typed = TestGraph::default();
+        let a = typed.add_node(named_ref("leaf", leaf_ga));
+        let b = typed.add_node(expr("(+ 2 2)"));
+        let working = gantz_core::data::erase(&typed).unwrap();
         let mut layout = egui_graph::Layout::default();
         layout.insert(egui_graph::NodeId(a.index() as u64), egui::pos2(1.0, 2.0));
         layout.insert(egui_graph::NodeId(b.index() as u64), egui::pos2(3.0, 4.0));
@@ -588,7 +572,7 @@ mod tests {
         assert!(copied.registry.head(&name("leaf")).is_some());
 
         let text = copied_to_string(&copied, &codec()).unwrap();
-        let back: Copied<Box<dyn TestNode>> = copied_from_str(&text, &codec()).unwrap();
+        let back: Copied = copied_from_str(&text, &codec()).unwrap();
 
         // The subgraph and its positions survive.
         assert_eq!(back.graph.node_count(), 2);
@@ -613,7 +597,7 @@ mod tests {
 
         // Pasting merges the deps so the ref resolves in the target.
         let mut target_reg = gantz_ca::Registry::default();
-        let mut target_graph = TestGraph::default();
+        let mut target_graph = DataGraph::default();
         let mut target_layout = egui_graph::Layout::default();
         let new = paste(
             &mut target_reg,

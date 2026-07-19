@@ -123,13 +123,11 @@ fn setup_resources(storage: Res<Pkv>, mut cmds: Commands) {
 fn setup_open(
     storage: Res<Pkv>,
     mut registry: ResMut<Registry>,
-    mut cache: ResMut<bevy_gantz::GraphCache<Box<dyn node::Node>>>,
     mut cmds: Commands,
     mut tab_order: ResMut<HeadTabOrder>,
     mut focused: ResMut<FocusedHead>,
 ) {
-    let loaded =
-        bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, &mut *cache, timestamp());
+    let loaded = bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, timestamp());
     let focused_head = bevy_gantz::storage::load_focused_head(&*storage);
 
     // Spawn entities for each open head. `OpenHead`'s required components

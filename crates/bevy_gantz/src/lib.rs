@@ -129,11 +129,11 @@ where
             .insert_resource(EvalEpoch(web_time::Instant::now()))
             .init_non_send::<HeadVms>()
             // Register head event handlers.
-            .add_observer(head::on_open::<N>)
-            .add_observer(head::on_replace::<N>)
+            .add_observer(head::on_open)
+            .add_observer(head::on_replace)
             .add_observer(head::on_close)
             .add_observer(head::on_branch_head)
-            .add_observer(head::on_move_branch::<N>)
+            .add_observer(head::on_move_branch)
             // Register eval entry event handler.
             .add_observer(vm::on_eval_entry)
             // Input-addressed VM synchronisation: (re)compiles whenever a head's
@@ -141,7 +141,7 @@ where
             .add_systems(Update, vm::sync::<N>.in_set(VmSet))
             // Debug check for the WorkingGraph commit-before-return invariant
             // (no-op unless `ValidateCommitted` is enabled).
-            .add_systems(Update, vm::validate_committed::<N>.after(VmSet));
+            .add_systems(Update, vm::validate_committed.after(VmSet));
     }
 }
 

@@ -118,13 +118,11 @@ fn setup_gui_state(storage: Res<Pkv>, mut cmds: Commands) {
 fn setup_open(
     storage: Res<Pkv>,
     mut registry: ResMut<bevy_gantz::Registry>,
-    mut cache: ResMut<bevy_gantz::GraphCache<Box<dyn node::Node>>>,
     mut cmds: Commands,
     mut tab_order: ResMut<HeadTabOrder>,
     mut focused: ResMut<FocusedHead>,
 ) {
-    let loaded =
-        bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, &mut *cache, timestamp());
+    let loaded = bevy_gantz_egui::storage::load_open(&*storage, &mut *registry, timestamp());
     let focused_head = bevy_gantz::storage::load_focused_head(&*storage);
 
     // `OpenHead`'s required components cover the compile outcome; `vm::sync`
@@ -164,7 +162,7 @@ fn persist_state(
     mut ctxs: EguiContexts,
     tab_order: Res<HeadTabOrder>,
     focused: Res<FocusedHead>,
-    heads_query: Query<OpenHeadDataReadOnly<Box<dyn node::Node>>, With<OpenHead>>,
+    heads_query: Query<OpenHeadDataReadOnly, With<OpenHead>>,
 ) {
     // Save all open heads in tab order.
     let heads: Vec<_> = tab_order

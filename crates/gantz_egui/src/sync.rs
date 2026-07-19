@@ -18,18 +18,6 @@ use gantz_nodetag::NodeTag;
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// Access the [`NamedRef`] within a frontend's node type, if any.
-///
-/// Implemented by frontends (typically a downcast) over their *typed* node
-/// set. The registry-side cascades in this module no longer need it (they
-/// rewrite stored [`NodeData`] directly); it remains only for ops that
-/// inspect a typed working/clipboard graph (see `crate::ops::paste` and
-/// `crate::ops::branch_node`) until the working graph itself goes data.
-pub trait AsNamedRef {
-    /// A shared reference to the inner [`NamedRef`], if this node is one.
-    fn as_named_ref(&self) -> Option<&NamedRef>;
-}
-
 /// A named graph whose commit moved during [`resync`] or a rename cascade.
 #[derive(Clone, Debug)]
 pub struct Moved {

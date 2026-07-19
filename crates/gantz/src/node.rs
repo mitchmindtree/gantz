@@ -58,20 +58,6 @@ gantz_format::impl_node_set_serde! {
     }
 }
 
-impl From<gantz_egui::node::NamedRef> for Box<dyn Node> {
-    fn from(named: gantz_egui::node::NamedRef) -> Self {
-        Box::new(named)
-    }
-}
-
-// Lets typed-graph ops (paste's cycle check, `branch_node`) find `NamedRef`s
-// within an erased node by downcasting.
-impl gantz_egui::sync::AsNamedRef for Box<dyn Node> {
-    fn as_named_ref(&self) -> Option<&gantz_egui::node::NamedRef> {
-        ((&**self) as &dyn Any).downcast_ref::<gantz_egui::node::NamedRef>()
-    }
-}
-
 // Lets reference-transparent passes (e.g. the DSP compiler's flattening) find
 // the underlying `Ref` within an erased node. `FnNamedRef` deliberately does
 // not match: a function value references a graph without standing in for it.
@@ -183,6 +169,12 @@ mod tests {
 
     fn name(s: &str) -> gantz_ca::Name {
         s.parse().expect("infallible")
+    }
+
+    /// The `NamedRef` within an erased app node, if it is one.
+    #[allow(clippy::borrowed_box)]
+    fn as_named_ref(node: &Box<dyn Node>) -> Option<&gantz_egui::node::NamedRef> {
+        ((&**node) as &dyn std::any::Any).downcast_ref()
     }
 
     /// Reify the whole registry column into a typed cache.
@@ -913,7 +905,6 @@ mod tests {
     /// app's real node type.
     #[test]
     fn nested_dsp_graph_flattens_derives_and_bridges_state() {
-        use gantz_egui::sync::AsNamedRef;
         use gantz_plyphon::ToNodeDsp;
         use std::time::Duration;
 
@@ -940,7 +931,7 @@ mod tests {
         // the lag within the child (its only dsp node).
         let ref_ix = parent
             .node_indices()
-            .find(|&n| parent[n].as_named_ref().is_some())
+            .find(|&n| as_named_ref(&parent[n]).is_some())
             .expect("ref node")
             .index();
         let lag_ix = child
@@ -1606,6 +1597,8 @@ mod tests {
         let a = graph.add_node(node("Identity"));
         let b = graph.add_node(node("Identity"));
         graph.add_edge(a, b, gantz_core::Edge::new(0.into(), 0.into()));
+        // The clipboard operates on the working graph's data form.
+        let graph = gantz_core::data::erase(&graph).expect("erase");
 
         let registry = DataReg::default();
         let mut layout = egui_graph::Layout::default();
@@ -1619,7 +1612,7 @@ mod tests {
         steel::parser::parser::Parser::parse(&text)
             .unwrap_or_else(|e| panic!("clipboard text is not valid Steel: {e}\n{text}"));
 
-        let back: export::Copied<Box<dyn Node>> =
+        let back: export::Copied =
             export::copied_from_str(&text, &super::codec()).expect("copied from text");
         assert_eq!(back.graph.node_count(), 2);
         assert_eq!(back.graph.edge_count(), 1);
@@ -1764,7 +1757,6 @@ mod tests {
         use gantz_core::node::{Identity, Ref};
         use gantz_egui::export;
         use gantz_egui::node::NamedRef;
-        use std::any::Any;
         use std::collections::HashSet;
         use std::time::Duration;
         type G = gantz_core::node::graph::Graph<Box<dyn Node>>;
@@ -1781,24 +1773,22 @@ mod tests {
         v2.add_node(Box::new(Identity) as Box<dyn Node>);
         let (_, v2_addr) = commit_to_name(&mut registry, Duration::from_secs(2), &v2, &name("A:1"));
 
-        // A graph holding a synced NamedRef to "A:1"'s head graph.
-        let mut graph: G = G::default();
-        let nref = graph.add_node(Box::new(NamedRef::with_sync(
-            name("A:1"),
-            Ref::new(v2_addr.into()),
-        )) as Box<dyn Node>);
+        // A graph (in data form) holding a synced NamedRef to "A:1"'s head
+        // graph.
+        let mut graph = gantz_ca::DataGraph::default();
+        let named = NamedRef::with_sync(name("A:1"), Ref::new(v2_addr.into()));
+        let nref = graph.add_node(gantz_core::data::erase_node_typed(&named).expect("erase"));
         let selected: HashSet<_> = [nref].into_iter().collect();
 
         // Copy -> clipboard text -> paste.
         let copied = export::copy(&registry, &graph, &selected, &egui_graph::Layout::default());
         let text = export::copied_to_string(&copied, &super::codec()).expect("copied to text");
-        let back: export::Copied<Box<dyn Node>> =
+        let back: export::Copied =
             export::copied_from_str(&text, &super::codec()).expect("copied from text");
 
         assert_eq!(back.graph.node_count(), 1, "the nested-ref node must paste");
         let kept = back.graph.node_weights().any(|n| {
-            ((&**n) as &dyn Any)
-                .downcast_ref::<NamedRef>()
+            gantz_core::data::reify_node_concrete::<NamedRef>(n)
                 .map(|nr| nr.name() == &name("A:1"))
                 .unwrap_or(false)
         });
@@ -2013,11 +2003,12 @@ mod tests {
         let child: G = G::default();
         let (_, child_addr) = commit_to_name(&mut registry, now, &child, &name("child"));
 
-        let mut graph: G = G::default();
+        // The working graph is data: the ext-carrying `NamedRef` erases in.
+        let mut graph = gantz_ca::DataGraph::default();
         let mut named =
             NamedRef::with_sync(name("child"), gantz_core::node::Ref::new(child_addr.into()));
         named.set_ext(key, &ext).unwrap();
-        let ix = graph.add_node(Box::new(named) as Box<dyn Node>);
+        let ix = graph.add_node(gantz_core::data::erase_node_typed(&named).unwrap());
 
         gantz_egui::ops::branch_node(
             &mut registry,
@@ -2027,7 +2018,8 @@ mod tests {
             child_addr.into(),
             &[ix.index()],
         );
-        let forked = gantz_egui::sync::AsNamedRef::as_named_ref(&graph[ix]).expect("named ref");
+        let forked: NamedRef =
+            gantz_core::data::reify_node_concrete(&graph[ix]).expect("named ref");
         assert_eq!(forked.name(), &name("fork"));
         assert_eq!(
             forked.ext_as::<TestExt>(key),
@@ -2041,8 +2033,8 @@ mod tests {
             NamedRef::new(name("fork"), gantz_core::node::Ref::new(child_addr.into()));
         expected.set_ext(key, &ext).unwrap();
         assert_eq!(
-            gantz_ca::content_addr(forked),
-            gantz_ca::content_addr(&expected),
+            graph[ix],
+            gantz_core::data::erase_node_typed(&expected).unwrap(),
         );
     }
 
@@ -2092,7 +2084,7 @@ mod tests {
         let g = reified.get(&export2.commits()[&head].graph).expect("graph");
         let named = g
             .node_indices()
-            .find_map(|ix| gantz_egui::sync::AsNamedRef::as_named_ref(&g[ix]))
+            .find_map(|ix| as_named_ref(&g[ix]))
             .expect("a named ref in use-mul");
         assert_eq!(
             named.ext_as::<TestExt>("test.ext"),
@@ -2126,7 +2118,7 @@ mod tests {
         let datum = gantz_format::to_datum(&node).expect("to datum");
         let back: Box<dyn Node> = gantz_format::from_datum(datum).expect("from datum");
         assert_eq!(gantz_ca::content_addr(&back), expected_ca);
-        let named = gantz_egui::sync::AsNamedRef::as_named_ref(&back).expect("named");
+        let named = as_named_ref(&back).expect("named");
         assert_eq!(
             named.ext_as::<TestExt>("test.ext"),
             Some(TestExt { inline: true })

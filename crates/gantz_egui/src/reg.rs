@@ -86,32 +86,26 @@ impl<N: 'static + Node + Send + Sync> RegistryRef<'_, N> {
         self.instances.get(ca).map(|n| n as &dyn Node)
     }
 
-    /// Create a node of the given type name.
+    /// Create a node of the given type name, in its stored data form.
     ///
     /// Checks registry names first (creating a [`crate::node::NamedRef`]
-    /// pinning the name's head graph), then falls back to builtins,
-    /// reifying a fresh instance from the builtin's stored data.
-    pub fn create_node(&self, node_type: &str) -> Option<N>
-    where
-        N: From<crate::node::NamedRef> + serde::de::DeserializeOwned,
-    {
+    /// pinning the name's head graph), then falls back to the builtin's
+    /// stored data.
+    pub fn create_node(&self, node_type: &str) -> Option<ca::NodeData> {
         let name: ca::Name = node_type.parse().expect("infallible");
         head_graph_addr(self.ca_registry, &name)
-            .map(|graph_addr| {
+            .and_then(|graph_addr| {
                 let ref_ = gantz_core::node::Ref::new(graph_addr.into());
                 let named = crate::node::NamedRef::new(name.clone(), ref_);
-                N::from(named)
-            })
-            .or_else(|| {
-                let node_data = self.builtins.node_data(node_type)?;
-                match gantz_core::data::reify_node(node_data) {
-                    Ok(node) => Some(node),
+                match gantz_core::data::erase_node_typed(&named) {
+                    Ok(node_data) => Some(node_data),
                     Err(e) => {
-                        log::error!("builtin `{node_type}` failed to reify: {e}");
+                        log::error!("failed to erase a `NamedRef` to `{name}`: {e}");
                         None
                     }
                 }
             })
+            .or_else(|| self.builtins.node_data(node_type).cloned())
     }
 }
 

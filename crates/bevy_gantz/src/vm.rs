@@ -11,11 +11,10 @@ use crate::reg::{GraphCache, Registry, lookup_node};
 use bevy_ecs::prelude::*;
 use bevy_log as log;
 use gantz_ca as ca;
-use gantz_core::data::erase_with_addr;
 use gantz_core::node::{self, GetNode, graph::Graph};
 use gantz_core::vm::{CompileError, Compiled};
-use gantz_core::{Node, compile as core_compile, diagnostic};
-use serde::{Serialize, de::DeserializeOwned};
+use gantz_core::{Diagnostic, Node, compile as core_compile, diagnostic};
+use serde::de::DeserializeOwned;
 use std::time::Duration;
 use steel::steel_vm::engine::Engine;
 
@@ -297,25 +296,16 @@ pub fn on_eval_entry(
 /// the commit-before-return invariant (see `WorkingGraph`) is upheld, which in
 /// turn lets [`sync`] recompile from the committed address without re-hashing.
 /// This is the single place a working graph is content-addressed.
-pub fn commit_working_graph<N>(
+pub fn commit_working_graph(
     registry: &mut Registry,
     cmds: &mut Commands,
     entity: Entity,
     head: &mut ca::Head,
-    graph: &Graph<N>,
-) -> bool
-where
-    N: Serialize + Node,
-{
-    // Registry graph addresses are always computed on the erased form; the
-    // erased graph doubles as the commit content.
-    let (dg, graph_ca) = match erase_with_addr(graph) {
-        Ok(res) => res,
-        Err(e) => {
-            log::error!("failed to erase working graph for commit: {e}");
-            return false;
-        }
-    };
+    graph: &ca::DataGraph,
+) -> bool {
+    // The working graph IS the stored form, so its registry address is
+    // computed directly - no erase step.
+    let graph_ca = ca::graph_addr(graph);
     let Some(head_commit) = registry.head_commit(head) else {
         return false;
     };
@@ -323,6 +313,7 @@ where
         return false;
     }
     let old_head = head.clone();
+    let dg = graph.clone();
     let new_commit_ca =
         registry.commit_graph_to_head(crate::reg::timestamp(), graph_ca, || dg, head);
     log::debug!("Graph changed -> {}", new_commit_ca.display_short());
@@ -358,7 +349,7 @@ pub fn sync<N>(
     ep_fns: Res<EntrypointFns<N>>,
     config: Res<CompileConfig>,
     mut vms: NonSendMut<head::HeadVms>,
-    mut heads_query: Query<head::OpenHeadData<N>, With<head::OpenHead>>,
+    mut heads_query: Query<head::OpenHeadData, With<head::OpenHead>>,
 ) where
     N: 'static + Node + Clone + DeserializeOwned + Send + Sync,
 {
@@ -376,22 +367,47 @@ pub fn sync<N>(
             continue;
         }
 
-        // The mutation-site refresh policy keeps the cache fresh, but ensure
-        // the committed graph's transitive references anyway (the working
-        // graph matches the committed one) so compilation never observes a
-        // stale miss. Failure to reify a referenced graph logs and skips the
-        // head this frame.
+        // Compilation reads the reified cache at the committed address (the
+        // `WorkingGraph` invariant guarantees the working graph equals it).
+        // Ensure the committed graph and its transitive references first. A
+        // reify failure (e.g. an unknown tag rendered as a placeholder) marks
+        // the attempt in `CompiledInputs` - no per-frame retry - and surfaces
+        // a compile diagnostic attributed to the failing node so the scene
+        // glows its placeholder; any previous VM stays evaluable.
         if let Err(e) = cache.ensure(&registry, [graph_ca.into()]) {
             log::error!("cannot compile head: {e}");
+            // Attribute the failing node when it lies in the head's own root
+            // graph; a failure within a referenced graph flags the whole
+            // scene.
+            let path = if e.graph == graph_ca {
+                vec![e.source.node_ix]
+            } else {
+                vec![]
+            };
+            let message = format!("cannot compile: {e}");
+            data.module.error = Some(message.clone());
+            *data.diagnostics = head::Diagnostics(vec![Diagnostic {
+                path,
+                inputs: vec![],
+                outputs: vec![],
+                span: None,
+                message,
+                severity: diagnostic::Severity::Compile,
+            }]);
+            data.compiled_inputs.0 = Some(inputs);
             continue;
         }
+        let Some(graph) = cache.get(&graph_ca) else {
+            // The committed graph is missing from the registry outright.
+            log::error!("cannot compile head: committed graph missing from the registry");
+            continue;
+        };
 
         // Rebuild the VM. On an in-place compile error the VM is kept (its
         // previous module remains evaluable) and the error surfaces via the
         // module/diagnostics components; a failed init leaves no VM, so eval
         // systems (e.g. `drive_update_bangs`, `on_eval_entry`) skip the head
         // rather than driving a stale graph.
-        let graph: &Graph<N> = &*data.working_graph;
         let get_node = |ca: &ca::ContentAddr| lookup_node(&cache, &builtins.instances, ca);
         let entrypoints = collect_entrypoints(&ep_fns, &get_node, graph);
         let result = match vms.get_mut(&data.entity) {
@@ -416,30 +432,30 @@ pub fn sync<N>(
 ///
 /// When [`ValidateCommitted`] is enabled, hash every open head's working
 /// graph and warn if it differs from the head's committed graph CA - i.e. a
-/// system mutated the working graph without committing it. A no-op (no hashing)
-/// when disabled, which is the default.
-pub fn validate_committed<N>(
+/// system mutated the working graph without committing it. Every weight is
+/// also checked for canonicality (address computation assumes it). A no-op
+/// (no hashing) when disabled, which is the default.
+pub fn validate_committed(
     validate: Res<ValidateCommitted>,
     registry: Res<Registry>,
-    heads: Query<head::OpenHeadDataReadOnly<N>, With<head::OpenHead>>,
-) where
-    N: 'static + Serialize + Node + Send + Sync,
-{
+    heads: Query<head::OpenHeadDataReadOnly, With<head::OpenHead>>,
+) {
     if !validate.0 {
         return;
     }
     for data in heads.iter() {
-        // Addresses are computed on the erased form, like the commit path.
-        let working = match erase_with_addr(&data.working_graph.0) {
-            Ok((_, addr)) => addr,
-            Err(e) => {
+        for (ix, weight) in data.working_graph.0.node_weights().enumerate() {
+            if !weight.is_canonical() {
                 log::warn!(
-                    "WorkingGraph invariant check: head {:?} working graph failed to erase: {e}",
+                    "WorkingGraph invariant check: head {:?} node {ix} ({}) is not \
+                     canonical - its address (and thus the commit comparison) is \
+                     unreliable",
                     data.entity,
+                    weight.tag,
                 );
-                continue;
             }
-        };
+        }
+        let working = ca::graph_addr(&data.working_graph.0);
         let committed = registry.head_commit(&data.head_ref.0).map(|c| c.graph);
         if committed != Some(working) {
             log::warn!(

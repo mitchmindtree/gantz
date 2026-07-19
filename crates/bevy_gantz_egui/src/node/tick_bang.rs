@@ -443,22 +443,30 @@ pub fn drive_tick_bangs<N>(
     cache: Res<bevy_gantz::GraphCache<N>>,
     builtins: Res<bevy_gantz::BuiltinNodes<N>>,
     mut vms: NonSendMut<bevy_gantz::head::HeadVms>,
-    heads: Query<(Entity, &bevy_gantz::head::WorkingGraph<N>), With<bevy_gantz::head::OpenHead>>,
+    heads: Query<(Entity, &bevy_gantz::head::HeadRef), With<bevy_gantz::head::OpenHead>>,
     mut cmds: Commands,
 ) where
-    N: gantz_core::Node + ToTickBang + Send + Sync,
+    N: 'static + gantz_core::Node + ToTickBang + Send + Sync,
 {
     let dt = time.delta_secs_f64();
     // The frame's monotonic "now"; each tick's exact firing time is derived from it.
     let now = epoch.now_secs();
 
-    for (entity, wg) in heads.iter() {
+    for (entity, head_ref) in heads.iter() {
+        // The head's committed graph, read from the reified cache (the
+        // working graph equals it by the `WorkingGraph` invariant).
+        let Some(graph_ca) = registry.head_commit(&head_ref.0).map(|c| c.graph) else {
+            continue;
+        };
+        let Some(graph) = cache.get(&graph_ca) else {
+            continue;
+        };
         let node_reg = crate::registry_ref(&registry, &cache, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| node_reg.node(ca);
 
         // Collect all TickBang paths + durations.
         let mut collector = TickBangCollector { ticks: vec![] };
-        gantz_core::graph::visit_typed(&get_node, &**wg, &[], &mut collector);
+        gantz_core::graph::visit_typed(&get_node, graph, &[], &mut collector);
 
         if collector.ticks.is_empty() {
             continue;

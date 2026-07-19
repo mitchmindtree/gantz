@@ -147,12 +147,6 @@ impl NamedRef {
     }
 }
 
-impl crate::sync::AsNamedRef for NamedRef {
-    fn as_named_ref(&self) -> Option<&NamedRef> {
-        Some(self)
-    }
-}
-
 impl gantz_core::node::AsRefNode for NamedRef {
     fn as_ref_node(&self) -> Option<&gantz_core::node::Ref> {
         Some(&self.ref_)

@@ -158,29 +158,37 @@ where
 
 /// Drives `update!` nodes every update, independent of GUI visibility.
 ///
-/// For each open head, traverses the working graph to find all `UpdateBang`
-/// nodes, updates their state to the current update delta time, and triggers
-/// a single push evaluation for all of them.
+/// For each open head, traverses the head's committed graph - read from the
+/// reified cache, which the working graph equals by the `WorkingGraph`
+/// invariant - to find all `UpdateBang` nodes, updates their state to the
+/// current update delta time, and triggers a single push evaluation for all
+/// of them.
 pub fn drive_update_bangs<N>(
     time: Res<Time>,
     registry: Res<crate::Registry>,
     cache: Res<bevy_gantz::GraphCache<N>>,
     builtins: Res<bevy_gantz::BuiltinNodes<N>>,
     mut vms: NonSendMut<bevy_gantz::head::HeadVms>,
-    heads: Query<(Entity, &bevy_gantz::head::WorkingGraph<N>), With<bevy_gantz::head::OpenHead>>,
+    heads: Query<(Entity, &bevy_gantz::head::HeadRef), With<bevy_gantz::head::OpenHead>>,
     mut cmds: Commands,
 ) where
-    N: gantz_core::Node + ToUpdateBang + Send + Sync,
+    N: 'static + gantz_core::Node + ToUpdateBang + Send + Sync,
 {
     let dt = time.delta_secs_f64();
 
-    for (entity, wg) in heads.iter() {
+    for (entity, head_ref) in heads.iter() {
+        let Some(graph_ca) = registry.head_commit(&head_ref.0).map(|c| c.graph) else {
+            continue;
+        };
+        let Some(graph) = cache.get(&graph_ca) else {
+            continue;
+        };
         let node_reg = crate::registry_ref(&registry, &cache, &builtins);
         let get_node = |ca: &gantz_ca::ContentAddr| node_reg.node(ca);
 
         // Collect all UpdateBang paths.
         let mut collector = UpdateBangCollector { paths: vec![] };
-        gantz_core::graph::visit_typed(&get_node, &**wg, &[], &mut collector);
+        gantz_core::graph::visit_typed(&get_node, graph, &[], &mut collector);
 
         if collector.paths.is_empty() {
             continue;

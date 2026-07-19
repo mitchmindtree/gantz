@@ -51,7 +51,7 @@ pub use plyphon;
 /// [`plyphon::UnitRegistry`] at startup (see [`PlyphonPlugin::with_units`]).
 type UnitRegistrar = Box<dyn Fn(&mut plyphon::UnitRegistry) + Send + Sync>;
 
-use bevy_gantz::head::{HeadRef, HeadVms, OpenHead, WorkingGraph};
+use bevy_gantz::head::{HeadRef, HeadVms, OpenHead};
 use bevy_gantz::{EntrypointSet, EvalEpoch, GraphCache, Registry, VmSet};
 use bevy_gantz_egui::{EdgeStyles, ExtPanes, RefExtUis, RegisterResponseExt, SettingsTabs};
 use gantz_plyphon::{
@@ -706,23 +706,31 @@ fn provide_dsp_ref_ext(
 fn provide_dsp_edge_style<N>(
     registry: Res<Registry>,
     reified: Res<GraphCache<N>>,
-    heads: Query<(&HeadRef, Ref<WorkingGraph<N>>, Option<Ref<DspHead>>), With<OpenHead>>,
+    heads: Query<(&HeadRef, Option<Ref<DspHead>>), With<OpenHead>>,
     mut cache: Local<HashMap<ca::Head, std::sync::Arc<RootPortInfo>>>,
     mut edge_styles: ResMut<EdgeStyles>,
 ) where
     N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Send + Sync,
 {
     let mut styled: HashMap<ca::Head, std::sync::Arc<RootPortInfo>> = HashMap::new();
-    for (head_ref, wg, dsp) in heads.iter() {
+    for (head_ref, dsp) in heads.iter() {
         let head = head_ref.0.clone();
+        // The head's committed graph, read from the reified cache (the
+        // working graph equals it by the `WorkingGraph` invariant). An edit
+        // commits, so `registry.is_changed()` covers working-graph changes.
+        let Some(graph) = registry
+            .head_commit(&head)
+            .and_then(|c| reified.get(&c.graph))
+        else {
+            continue;
+        };
         let stale = registry.is_changed()
             || reified.is_changed()
-            || wg.is_changed()
             || dsp.as_ref().is_some_and(|d| d.is_changed())
             || !cache.contains_key(&head);
         if stale {
             let shapes = dsp.as_ref().map(|d| d.shapes.clone()).unwrap_or_default();
-            let info = root_port_info(&wg.0, &reified.0, &shapes);
+            let info = root_port_info(graph, &reified.0, &shapes);
             cache.insert(head.clone(), std::sync::Arc::new(info));
         }
         styled.insert(head.clone(), cache[&head].clone());
@@ -755,7 +763,7 @@ fn drive_synths<N>(
     mut enabled_applied: Local<Option<bool>>,
     state: NonSendMut<HeadSynths>,
     mut vms: NonSendMut<HeadVms>,
-    heads: Query<(Entity, &HeadRef, &WorkingGraph<N>), With<OpenHead>>,
+    heads: Query<(Entity, &HeadRef), With<OpenHead>>,
     mut cmds: Commands,
 ) where
     N: 'static + ToNodeDsp + gantz_core::Node + AsRefNode + Clone + Send + Sync,
@@ -790,9 +798,15 @@ fn drive_synths<N>(
     let sample_rate = dsp.sample_rate;
     let mut live: HashSet<Entity> = HashSet::new();
 
-    for (entity, head_ref, wg) in heads.iter() {
+    for (entity, head_ref) in heads.iter() {
         live.insert(entity);
         let Some(graph_ca) = registry.head_commit(&head_ref.0).map(|c| c.graph) else {
+            continue;
+        };
+        // The head's committed graph, read from the reified cache (the
+        // working graph equals it by the `WorkingGraph` invariant). A cache
+        // miss (e.g. an unknown-tag reify failure) keeps the previous synths.
+        let Some(graph) = reified.get(&graph_ca) else {
             continue;
         };
 
@@ -808,7 +822,7 @@ fn drive_synths<N>(
             .get(&entity)
             .is_none_or(|h| h.graph != graph_ca || h.retry);
         if stale {
-            let flat_children = flatten_from_registry(&wg.0, &reified).and_then(|flat| {
+            let flat_children = flatten_from_registry(graph, &reified).and_then(|flat| {
                 let children = flatten_instance_children(&flat, &reified)?;
                 Ok((flat, children))
             });

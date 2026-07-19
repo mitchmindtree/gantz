@@ -1739,7 +1739,7 @@ pub fn update(
                 .iter()
                 .map(|s| &**s as &dyn gantz_egui::widget::EdgeStyle)
                 .collect();
-            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &codec.0, &base_names.0)
+            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .compile_config(current_compile_config)
                 .validate_change_tracking(current_validate_change_tracking)

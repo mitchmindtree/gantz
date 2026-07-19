@@ -766,10 +766,10 @@ impl GantzResponse {
 
 impl<'a> Gantz<'a> {
     /// Instantiate the full top-level gantz widget.
-    pub fn new(env: &'a Env<'a>, codec: &'a NodeCodec, base_names: &'a crate::reg::Names) -> Self {
+    pub fn new(env: &'a Env<'a>, base_names: &'a crate::reg::Names) -> Self {
         Self {
             env,
-            codec,
+            codec: env.codec,
             base_names,
             log_source: None,
             perf_vm: None,

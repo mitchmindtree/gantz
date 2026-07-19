@@ -23,7 +23,7 @@ use bevy_gantz::{GantzPlugin, Registry, head, timestamp};
 use bevy_gantz_egui::{GraphCache, NodeCodecRes};
 use bevy_gantz_plyphon::PlyphonPlugin;
 use bytemuck::{Pod, Zeroable};
-use gantz_ca::{CaHash, Hasher, Head};
+use gantz_ca::Head;
 use gantz_core::Node as GantzNode;
 use gantz_core::node::{ExprCtx, ExprResult, MetaCtx, parse_expr};
 use gantz_plyphon::{DspBuilder, NodeDsp, Signal, ToNodeDsp};
@@ -93,13 +93,6 @@ impl GantzNode for SawNode {
     fn expr(&self, _: ExprCtx<'_, '_>) -> ExprResult {
         // Steel-inert: a placeholder output for the (ignored) dsp edge.
         parse_expr("0")
-    }
-}
-
-impl CaHash for SawNode {
-    fn hash(&self, hasher: &mut Hasher) {
-        hasher.update(b"example.saw");
-        hasher.update(&self.freq.to_le_bytes());
     }
 }
 

@@ -1204,7 +1204,7 @@ fn gui(ui: &mut egui::Ui, state: &mut State) -> gantz_egui::Responses {
             let no_base_names = Default::default();
             let codec = codec();
             let env = state.env.as_env(&codec);
-            gantz_egui::widget::Gantz::new(&env, &codec, &no_base_names)
+            gantz_egui::widget::Gantz::new(&env, &no_base_names)
                 .logger(state.logger.clone())
                 .compile_config(compile_config)
                 .show(&mut state.gantz, state.focused_head, &mut access, ui)

@@ -208,14 +208,14 @@ pub struct HeadDataMut<'a> {
 ///
 /// **A node MUST mark its response [`changed`](NodeUiResponse::mark_changed)
 /// whenever it mutates state that contributes to its content address (its
-/// `CaHash`), at the moment that state is actually written.** For
+/// erased, serialized form), at the moment that state is actually written.** For
 /// buffered/debounced edits (e.g. a text field flushed on focus loss) mark
 /// `changed` at the *flush*, not on the keystroke - the node weight only
 /// changes at the flush. Silent mutations (e.g. auto-syncing a reference to a
 /// newer commit) must mark `changed` too, even though no widget was touched.
 ///
 /// State that does NOT affect the content address must NOT mark `changed`:
-/// `#[cahash(skip)]` fields, values written to VM runtime state via
+/// `#[serde(skip)]` fields, values written to VM runtime state via
 /// [`NodeCtx::update_value`], node layout/position, and evaluation triggers
 /// queued via [`push_eval`](NodeUiResponse::push_eval). A missed `changed`
 /// leaves the committed graph stale (a correctness bug); a spurious `changed`

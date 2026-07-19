@@ -243,7 +243,7 @@ fn render_windowed_panes(
                 .iter()
                 .map(|s| &**s as &dyn gantz_egui::widget::EdgeStyle)
                 .collect();
-            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &codec.0, &base_names.0)
+            let mut widget = gantz_egui::widget::Gantz::new(&node_reg, &base_names.0)
                 .base_immutable(base_immutable.0)
                 .compile_config(compile_config.0)
                 .validate_change_tracking(change_validation.0)

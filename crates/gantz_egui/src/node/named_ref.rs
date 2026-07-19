@@ -4,7 +4,7 @@ use crate::{
     BranchNode, ContextMenuResponse, InspectorRowsResponse, NodeCtx, NodeUi, NodeUiResponse,
     OpenHead, ReplaceHead, SocketDoc, widget::node_inspector,
 };
-use gantz_ca::{CaHash, Name};
+use gantz_ca::Name;
 use gantz_core::node::{self, ExprCtx, ExprResult, MetaCtx, Node, RegCtx};
 use gantz_nodetag::NodeTag;
 use serde::{Deserialize, Serialize};
@@ -25,8 +25,7 @@ pub fn missing_color() -> egui::Color32 {
 /// Similar to [`gantz_core::node::Ref`], but also stores the human-readable
 /// name associated with the reference. This allows for detecting when the
 /// name's current commit differs from the stored reference.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, CaHash, NodeTag)]
-#[cahash("gantz.named-ref")]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize, NodeTag)]
 pub struct NamedRef {
     /// The underlying reference by content address.
     ref_: gantz_core::node::Ref,

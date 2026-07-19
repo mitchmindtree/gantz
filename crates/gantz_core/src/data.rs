@@ -317,10 +317,10 @@ where
 
 /// Erase a typed graph and compute its registry address in one pass.
 ///
-/// Registry graph addresses are ALWAYS computed on the erased form: the
-/// typed node `CaHash` impls are not load-bearing for graph identity. Any
-/// site that compares or mints a registry address for a typed working graph
-/// goes through here (or erases first).
+/// Registry graph addresses are ALWAYS computed on the erased form: typed
+/// nodes carry no content addressing of their own. Any site that compares
+/// or mints a registry address for a typed working graph goes through here
+/// (or erases first).
 pub fn erase_with_addr<N>(g: &Graph<N>) -> Result<(DataGraph, GraphAddr), EraseError>
 where
     N: Serialize + Node,

@@ -1726,7 +1726,7 @@ mod tests {
     /// inspector must change the node's address so the edit rides the normal
     /// commit + export pipeline rather than being silently dropped by the
     /// registry's content-addressed dedup. Guards against re-adding
-    /// `#[cahash(skip)]` to `NamedRef::sync`.
+    /// `#[serde(skip)]` to `NamedRef::sync`.
     #[test]
     fn named_ref_sync_affects_content_addr() {
         use gantz_egui::node::NamedRef;
@@ -1735,25 +1735,30 @@ mod tests {
         let off = NamedRef::new(name("x"), ref_.clone());
         let on = NamedRef::with_sync(name("x"), ref_);
         assert_ne!(
-            gantz_ca::content_addr(&off),
-            gantz_ca::content_addr(&on),
+            erased_addr(&off),
+            erased_addr(&on),
             "toggling `sync` must change the content address, otherwise the \
              toggle can't trigger a commit and won't persist",
         );
     }
 
-    /// The ext-free `NamedRef` address must never change: it is the address
-    /// every existing graph's references already hash to. (Re-pinned once by
-    /// the registry rewrite, which made `name` a segmented [`gantz_ca::Name`]
-    /// and so changed the hashed form.)
+    /// A node's erased (data-layer) content address.
+    fn erased_addr(named: &gantz_egui::node::NamedRef) -> gantz_ca::ContentAddr {
+        gantz_core::data::erase_node_typed(named)
+            .unwrap()
+            .content_addr()
+    }
+
+    /// The ext-free `NamedRef` erased address must never change: it is the
+    /// address every existing graph's references already hash to.
     #[test]
     fn named_ref_ext_free_content_addr_is_pinned() {
         use gantz_egui::node::NamedRef;
         let ca = gantz_ca::ContentAddr::from([0u8; 32]);
         let named = NamedRef::new(name("mul"), gantz_core::node::Ref::new(ca));
         assert_eq!(
-            gantz_ca::content_addr(&named).to_string(),
-            "b818ed6d50a54c2aef7efd05bcc0f8974511f2e464e1563249b04bb334064663",
+            erased_addr(&named).to_string(),
+            "207f946ce3dfee38b4da6616a775f7b575e4f850b4ee945c8c4d061737314cc0",
             "ext-free NamedRef CA changed - this breaks every existing graph address",
         );
     }
@@ -1774,9 +1779,9 @@ mod tests {
 
         let ca = gantz_ca::ContentAddr::from([0u8; 32]);
         let mut named = NamedRef::new(name("mul"), gantz_core::node::Ref::new(ca));
-        let plain_ca = gantz_ca::content_addr(&named);
+        let plain_ca = erased_addr(&named);
         named.set_ext(key, &ext).unwrap();
-        assert_ne!(gantz_ca::content_addr(&named), plain_ca);
+        assert_ne!(erased_addr(&named), plain_ca);
 
         // Rename cascade repoints - ext rides.
         named.rename(name("mul2"), gantz_ca::ContentAddr::from([1u8; 32]));

@@ -2071,7 +2071,7 @@ mod tests {
         let s = g1.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
         let o = g1.add_node(TestN::Out(gantz_plyphon::Out::default()));
         g1.add_edge(s, o, Edge::new(0.into(), 0.into()));
-        let ca1 = gantz_ca::graph_addr(&g1);
+        let ca1 = graph_addr(&g1);
         let flat1 = flatten_no_refs(&g1);
         structural_sync(
             &mut controller,
@@ -2098,7 +2098,7 @@ mod tests {
         let _i = g2.add_node(TestN::Inlet);
         let _o2 = g2.add_node(TestN::Outlet);
         g2.add_edge(s, o, Edge::new(0.into(), 0.into()));
-        let ca2 = gantz_ca::graph_addr(&g2);
+        let ca2 = graph_addr(&g2);
         assert_ne!(ca1, ca2, "adding nodes changes the graph address");
         let flat2 = flatten_no_refs(&g2);
         structural_sync(
@@ -2155,7 +2155,7 @@ mod tests {
         let o = g1.add_node(TestN::Out(gantz_plyphon::Out::default()));
         g1.add_edge(pk, up, Edge::new(0.into(), 0.into()));
         g1.add_edge(up, o, Edge::new(0.into(), 0.into()));
-        let ca1 = gantz_ca::graph_addr(&g1);
+        let ca1 = graph_addr(&g1);
         structural_sync(
             &mut controller,
             &mut state,
@@ -2182,7 +2182,7 @@ mod tests {
         let mut g2 = g1.clone();
         let s = g2.add_node(TestN::SinOsc(gantz_plyphon::SinOsc::default()));
         g2.add_edge(s, pk, Edge::new(0.into(), 0.into()));
-        let ca2 = gantz_ca::graph_addr(&g2);
+        let ca2 = graph_addr(&g2);
         structural_sync(
             &mut controller,
             &mut state,
@@ -2220,29 +2220,43 @@ mod tests {
         Ref(gantz_ca::ContentAddr, usize, usize, bool),
     }
 
-    impl gantz_ca::CaHash for TestN {
-        fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-            match self {
-                TestN::SinOsc(s) => gantz_ca::CaHash::hash(s, hasher),
-                TestN::Out(o) => gantz_ca::CaHash::hash(o, hasher),
-                TestN::Pack(p) => gantz_ca::CaHash::hash(p, hasher),
-                TestN::Unpack(u) => gantz_ca::CaHash::hash(u, hasher),
-                TestN::PlayBuf(p) => gantz_ca::CaHash::hash(p, hasher),
+    /// The graph's erased (data-layer) address: the same scheme the registry
+    /// uses for graph identity, so structural edits change the address and
+    /// identical graphs share one.
+    fn graph_addr(g: &gantz_core::node::graph::Graph<TestN>) -> gantz_ca::GraphAddr {
+        use gantz_ca::{Datum, NodeData};
+        use gantz_core::data::erase_node_typed;
+        let dg: gantz_ca::DataGraph = g.map(
+            |_, n| match n {
+                TestN::SinOsc(s) => erase_node_typed(s).unwrap(),
+                TestN::Out(o) => erase_node_typed(o).unwrap(),
+                TestN::Pack(p) => erase_node_typed(p).unwrap(),
+                TestN::Unpack(u) => erase_node_typed(u).unwrap(),
+                TestN::PlayBuf(p) => erase_node_typed(p).unwrap(),
                 TestN::Inlet => {
-                    hasher.update(b"inlet");
+                    erase_node_typed(&gantz_core::node::graph::Inlet::default()).unwrap()
                 }
                 TestN::Outlet => {
-                    hasher.update(b"outlet");
+                    erase_node_typed(&gantz_core::node::graph::Outlet::default()).unwrap()
                 }
                 TestN::Ref(ca, n_in, n_out, inline) => {
-                    hasher.update(b"ref");
-                    hasher.update(&ca.0);
-                    hasher.update(&n_in.to_le_bytes());
-                    hasher.update(&n_out.to_le_bytes());
-                    hasher.update(&[u8::from(*inline)]);
+                    let mut nd = NodeData::new(
+                        "test.ref",
+                        Datum::Map(vec![
+                            ("addr".to_string(), Datum::Str(ca.to_string())),
+                            ("inline".to_string(), Datum::Bool(*inline)),
+                            ("n_in".to_string(), Datum::U64(*n_in as u64)),
+                            ("n_out".to_string(), Datum::U64(*n_out as u64)),
+                        ]),
+                    );
+                    nd.refs.push(*ca);
+                    nd.canonicalize();
+                    nd
                 }
-            }
-        }
+            },
+            |_, e| *e,
+        );
+        gantz_ca::graph_addr(&dg)
     }
 
     impl gantz_plyphon::ToNodeDsp for TestN {
@@ -2376,7 +2390,7 @@ mod tests {
             &mut state,
             &Default::default(),
             entity,
-            gantz_ca::graph_addr(&g1),
+            graph_addr(&g1),
             &flat1,
             &children,
             1,
@@ -2397,7 +2411,7 @@ mod tests {
             &mut state,
             &Default::default(),
             entity,
-            gantz_ca::graph_addr(&g2),
+            graph_addr(&g2),
             &flat2,
             &children,
             1,
@@ -2459,7 +2473,7 @@ mod tests {
             &mut state,
             &Default::default(),
             entity,
-            gantz_ca::graph_addr(&g1),
+            graph_addr(&g1),
             &flat1,
             &children,
             1,
@@ -2479,7 +2493,7 @@ mod tests {
             &mut state,
             &Default::default(),
             entity,
-            gantz_ca::graph_addr(&g2),
+            graph_addr(&g2),
             &flat2,
             &children,
             1,
@@ -2539,7 +2553,7 @@ mod tests {
             &mut state,
             &Default::default(),
             entity,
-            gantz_ca::graph_addr(&g1),
+            graph_addr(&g1),
             &flat1,
             &children,
             1,
@@ -2561,7 +2575,7 @@ mod tests {
             &mut state,
             &Default::default(),
             entity,
-            gantz_ca::graph_addr(&g2),
+            graph_addr(&g2),
             &flat2,
             &children,
             1,
@@ -2598,7 +2612,7 @@ mod tests {
             &mut state,
             &Default::default(),
             entity,
-            gantz_ca::graph_addr(&g),
+            graph_addr(&g),
             &flat,
             &children,
             1,

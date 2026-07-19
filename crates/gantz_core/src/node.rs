@@ -9,7 +9,6 @@ pub use conns::Conns;
 pub use delay::Delay;
 pub use expr::{Expr, ExprNewError};
 pub use fn_::{Fn, FnNodeTag};
-use gantz_ca::CaHash;
 #[doc(inline)]
 pub use gantz_ca::{Input, Output};
 pub use id::{IDENTITY_NAME, Identity};
@@ -210,10 +209,7 @@ pub trait Node: std::any::Any {
 }
 
 /// A set of connections over which to push/pull evaluation.
-#[derive(
-    Clone, Debug, Default, Deserialize, Serialize, CaHash, Eq, Hash, Ord, PartialEq, PartialOrd,
-)]
-#[cahash("gantz.eval-conf")]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum EvalConf {
     /// Requires a fn for evaluation from all connections.
     #[default]

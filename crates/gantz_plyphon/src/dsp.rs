@@ -42,15 +42,6 @@ impl NodeRate {
     }
 }
 
-/// Fold a node's ugen `rate` into a content-address hasher, but only when
-/// non-default (audio) - so existing audio-rate nodes keep their addresses.
-pub fn cahash_rate(hasher: &mut gantz_ca::Hasher, rate: NodeRate) {
-    if rate != NodeRate::Audio {
-        hasher.update(b"rate");
-        hasher.update(rate.token().as_bytes());
-    }
-}
-
 /// A channel group: the mono wires a single dsp port carries.
 ///
 /// A gantz signal edge is a channel-*group* wire (like SC's array signals, Max's

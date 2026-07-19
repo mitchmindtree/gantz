@@ -11,7 +11,6 @@
 use bevy_ecs::prelude::*;
 use bevy_egui::egui;
 use bevy_time::prelude::*;
-use gantz_ca::CaHash;
 use gantz_core::node::{self, ExprCtx, ExprResult, MetaCtx, RegCtx};
 use gantz_core::visit;
 use gantz_egui::node::DynNode;
@@ -142,7 +141,6 @@ impl Eq for Interval {}
 
 impl Hash for Interval {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Fully qualified to disambiguate from `gantz_ca::CaHash::hash`.
         match self {
             Interval::Duration(secs) => {
                 Hash::hash(&0u8, state);
@@ -193,25 +191,6 @@ impl Default for TickBang {
     fn default() -> Self {
         TickBang {
             interval: Interval::default(),
-        }
-    }
-}
-
-impl CaHash for TickBang {
-    fn hash(&self, hasher: &mut gantz_ca::Hasher) {
-        hasher.update("gantz.tick!".as_bytes());
-        // The interval - and the unit it's specified in - is part of the node's
-        // identity: editing it gives the node a new address, which is how the
-        // commit-on-change model persists it (only committed graphs are saved).
-        match self.interval {
-            Interval::Duration(secs) => {
-                hasher.update(b"duration");
-                CaHash::hash(&secs.to_bits(), hasher);
-            }
-            Interval::Rate(hz) => {
-                hasher.update(b"rate");
-                CaHash::hash(&hz.to_bits(), hasher);
-            }
         }
     }
 }

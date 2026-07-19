@@ -6,7 +6,7 @@ use dyn_clone::DynClone;
 use gantz_core::node::graph::Graph;
 use std::any::Any;
 
-pub trait TestNode: Any + DynClone + gantz_ca::CaHash + gantz_core::Node {}
+pub trait TestNode: Any + DynClone + gantz_core::Node {}
 
 pub type TestGraph = Graph<Box<dyn TestNode>>;
 

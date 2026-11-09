@@ -260,7 +260,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -271,7 +271,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1553,7 +1553,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3049,7 +3049,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3533,7 +3533,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5048,10 +5048,11 @@ dependencies = [
 
 [[package]]
 name = "im-lists"
-version = "0.11.4"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82158d5d59eff663dbb9d89295eacac296f58bc0473331cea2f45d9d270c5540"
+checksum = "efa84651d82cf312cc1d1f1acf609debffbd672c13ae6c25f05b6b0e864c3290"
 dependencies = [
+ "allocator-api2",
  "generic_singleton",
  "smallvec",
 ]
@@ -6106,7 +6107,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7695,7 +7696,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7753,7 +7754,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7876,7 +7877,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8190,7 +8191,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8267,9 +8268,8 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "steel-core"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4acadc255e0d56fe71c09c605ebde51e6009b02d86ae610386f26437c4f91f8"
+version = "0.8.3"
+source = "git+https://github.com/mitchmindtree/steel?rev=417a6ea2bfedd2fdfd0725faf1de6d8a42df004e#417a6ea2bfedd2fdfd0725faf1de6d8a42df004e"
 dependencies = [
  "arc-swap",
  "bigdecimal",
@@ -8320,9 +8320,8 @@ dependencies = [
 
 [[package]]
 name = "steel-derive"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a564df3ca16e0be05e71bdcc3fe52f8b71e47be9c73e7a0bf43840fde591997"
+version = "0.8.3"
+source = "git+https://github.com/mitchmindtree/steel?rev=417a6ea2bfedd2fdfd0725faf1de6d8a42df004e#417a6ea2bfedd2fdfd0725faf1de6d8a42df004e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8331,9 +8330,8 @@ dependencies = [
 
 [[package]]
 name = "steel-gen"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1a614449ed6cba4138ce2e54943fb403533248da8070dad6ce943f1b14417b8"
+version = "0.8.3"
+source = "git+https://github.com/mitchmindtree/steel?rev=417a6ea2bfedd2fdfd0725faf1de6d8a42df004e#417a6ea2bfedd2fdfd0725faf1de6d8a42df004e"
 dependencies = [
  "codegen",
  "serde",
@@ -8341,9 +8339,8 @@ dependencies = [
 
 [[package]]
 name = "steel-parser"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "769cea4a36ee603bfde799ab9c1ec1f93a67df30bcf4cd22d069eb8d4155e2b2"
+version = "0.8.3"
+source = "git+https://github.com/mitchmindtree/steel?rev=417a6ea2bfedd2fdfd0725faf1de6d8a42df004e#417a6ea2bfedd2fdfd0725faf1de6d8a42df004e"
 dependencies = [
  "compact_str",
  "dashmap",
@@ -8363,11 +8360,11 @@ dependencies = [
 
 [[package]]
 name = "steel-quickscope"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3b5ab5dbc71b317360a2f5287abc1c91a92ced9a983066e2622a607583bc89e"
+version = "0.3.3"
+source = "git+https://github.com/mitchmindtree/steel?rev=417a6ea2bfedd2fdfd0725faf1de6d8a42df004e#417a6ea2bfedd2fdfd0725faf1de6d8a42df004e"
 dependencies = [
  "indexmap 2.12.0",
+ "rustc-hash 2.1.1",
  "smallvec",
 ]
 
@@ -8562,7 +8559,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -9771,7 +9768,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

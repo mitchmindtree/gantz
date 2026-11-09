@@ -113,6 +113,12 @@ tracing-subscriber = "0.3"
 web-sys = "0.3"
 web-time = "1"
 
+# Steel master with a fix to the recycling of shadowed globals. Drop this once
+# a Steel release includes the fix.
+[patch.crates-io]
+steel-core = { git = "https://github.com/mitchmindtree/steel", rev = "417a6ea2bfedd2fdfd0725faf1de6d8a42df004e" }
+steel-derive = { git = "https://github.com/mitchmindtree/steel", rev = "417a6ea2bfedd2fdfd0725faf1de6d8a42df004e" }
+
 # Full debuginfo makes each bevy-linked test binary about 1 GB, and linking
 # them dominates build time and memory. Set `CARGO_PROFILE_DEV_DEBUG=true` to
 # get full debuginfo for workspace crates in a debugger session.

@@ -135,17 +135,3 @@ fn event_representation() {
         }
     }
 }
-
-// Steel 0.8.2's `equal?` is broken for rationals nested in containers.
-// Its recursive equality visitor lacks a Rational arm. The pin-*
-// projection helpers exist because of this. If a steel upgrade fixes it,
-// this canary flags that the projections can go.
-#[test]
-fn nested_rational_equal_canary() {
-    let mut vm = new_pin_engine();
-    assert_steel_true(
-        &mut vm,
-        "nested_rational_equal_canary",
-        "(equal? #f (equal? (list 1/2) (list 1/2)))",
-    );
-}

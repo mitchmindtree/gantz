@@ -1,13 +1,11 @@
 //! Shared test harness. An engine with the `gantz/pattern` and
 //! `gantz/sched` modules plus the pin-projection helpers.
 //!
-//! Steel 0.8.2's `equal?` cannot compare rationals nested in containers.
-//! See the canary test in `span.rs`. So expected values are compared via
-//! pinned projections. Every exact number becomes a numerator and
-//! denominator list, spans become 2-lists and events become value,
-//! active and whole lists. Pinned forms contain only ints, floats, bools
-//! and symbols, which `equal?` handles, and they also pin exactness. An
-//! accidental float shows up as `0.5` instead of `(1 2)`.
+//! Expected values are compared through pinned projections. Every exact
+//! number becomes a list of its numerator and denominator. A span becomes a
+//! 2-list and an event becomes a list of its value and its spans. The pinned
+//! forms also pin exactness. An accidental float shows up as `0.5` in place
+//! of `(1 2)`.
 
 use gantz_core::steel::SteelVal;
 use gantz_core::steel::steel_vm::engine::Engine;
